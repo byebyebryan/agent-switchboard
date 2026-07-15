@@ -35,8 +35,10 @@ The formal project name and technical namespace are **Agent Switchboard** and
 `agent-switchboard`. Repository, package/distribution, configuration, and state
 identifiers use the technical namespace. User-facing titles and ordinary prose
 use the shorter **Switchboard** name after the project has been introduced.
-The executable name remains a separate packaging decision; the short product
-name does not require a bare `switchboard` package or command.
+The canonical executable is **`swbctl`**. It keeps a short Switchboard-specific
+command without colliding with the established Linux `sbctl` command or the
+crowded generic `agentctl` name. The short product name does not require a bare
+`switchboard` package or command.
 
 ## Problem
 
@@ -294,7 +296,7 @@ than silently showing incorrect data.
                                 |
                  project/session registry + reconciler
                                 |
-               agentctl command / JSON / agent tools
+               swbctl command / JSON / agent tools
                   +-------------+-------------+
                   |             |             |
                  TUI        DMS plugin     agent session
@@ -304,8 +306,8 @@ than silently showing incorrect data.
 
 The initial implementation is process-based rather than service-based:
 
-- Hooks invoke a short-lived `agentctl event` command.
-- Frontends invoke `agentctl list`, `agentctl reconcile`, and action commands.
+- Hooks invoke a short-lived `swbctl event` command.
+- Frontends invoke `swbctl list`, `swbctl reconcile`, and action commands.
 - The TUI refreshes local state and runs bounded reconciliation while open.
 - Each remote host maintains its own registry. Aggregators fetch a versioned
   snapshot over SSH.
@@ -368,7 +370,7 @@ defaults, and context-source declarations. SQLite materializes configured
 projects and retains runtime/session assignments, but it does not become a
 second editable source for those fields. Removing a configured project marks
 its materialized record undeclared; it does not erase historical sessions or
-handoffs. `agentctl project add` performs an atomic structured edit of the
+handoffs. `swbctl project add` performs an atomic structured edit of the
 project catalog, and `--print-config` can emit the equivalent declaration for a
 dotfiles workflow.
 
@@ -841,7 +843,7 @@ plus one explicit workspace action.
 Both provider hook configurations invoke a fast command:
 
 ```text
-agentctl event --provider <provider>
+swbctl event --provider <provider>
 ```
 
 The provider event JSON is read from standard input. The handler:
@@ -857,7 +859,7 @@ The provider event JSON is read from standard input. The handler:
 
 Hooks must not delay the agent loop. They never contact remote hosts, launch a
 frontend, or wait for tmux. Provider-specific hook trust and enablement remain
-visible through `agentctl doctor`.
+visible through `swbctl doctor`.
 
 Switchboard hooks coexist with provider plugins such as claude-mem and do not
 replace other matching hooks. Installation uses one identifiable user-level
@@ -963,7 +965,7 @@ session key. The binding hook replaces that provisional metadata atomically.
 The full locator includes tmux session, window, and pane IDs. Discovery must
 tolerate user-created windows, panes, and layouts.
 
-The surface starts a short-lived `agentctl bootstrap <launch-id>` process. The
+The surface starts a short-lived `swbctl bootstrap <launch-id>` process. The
 bootstrap waits until the target surface has a real viewing client so terminal
 capability and color probes observe the actual terminal. For a one-window Codex
 tmux session, `session_attached > 0` is sufficient. For a Claude workspace, at
@@ -1134,39 +1136,39 @@ the frontend.
 
 ## Command Interface
 
-The exact command spelling is not yet final, but the core needs these stable
-operations:
+The canonical executable is `swbctl`. Its command surface grows in phases
+toward these stable operations:
 
 ```text
-agentctl list [filters] [--refresh] [--json]
-agentctl show <session-key> [--json]
-agentctl project list [--json]
-agentctl project show <project-id> [--json]
-agentctl project add --name <name> --location <path> [--id <uuid>]
+swbctl list [filters] [--refresh] [--json]
+swbctl show <session-key> [--json]
+swbctl project list [--json]
+swbctl project show <project-id> [--json]
+swbctl project add --name <name> --location <path> [--id <uuid>]
                      [--print-config]
-agentctl project context <project-id> [--query <text>] [--json]
-agentctl reconcile [--host <host>]
-agentctl refresh [--host <host>]
-agentctl new [--project <project-id>] [--location <location-id>]
+swbctl project context <project-id> [--query <text>] [--json]
+swbctl reconcile [--host <host>]
+swbctl refresh [--host <host>]
+swbctl new [--project <project-id>] [--location <location-id>]
              [--provider <provider>] [--cwd <path>]
-agentctl new --from <handoff-id>|<session-key> [--provider <provider>]
-agentctl prepare-new [--project <project-id>] [--location <location-id>]
+swbctl new --from <handoff-id>|<session-key> [--provider <provider>]
+swbctl prepare-new [--project <project-id>] [--location <location-id>]
                      [--provider <provider>] [--from <handoff-id>]
                      --request-id <uuid> --json
-agentctl current [--json]
-agentctl session name [<session-key>|--current] <name>
-agentctl session handoff [<session-key>|--current] --json-stdin
-agentctl session wrap [<session-key>|--current] --json-stdin
-agentctl session pin <session-key> [--off]
-agentctl prepare-open <session-key> --request-id <uuid> --json
-agentctl open <session-key> [--transport tmux]
-agentctl prepare-workspace <provider> --request-id <uuid> --json
-agentctl workspace open <provider>
-agentctl select-surface <surface-id> --client <tmux-client-id>
-agentctl attach-surface <surface-id>
-agentctl event --provider <provider>
-agentctl snapshot [--reconcile none|live|full] --json
-agentctl doctor
+swbctl current [--json]
+swbctl session name [<session-key>|--current] <name>
+swbctl session handoff [<session-key>|--current] --json-stdin
+swbctl session wrap [<session-key>|--current] --json-stdin
+swbctl session pin <session-key> [--off]
+swbctl prepare-open <session-key> --request-id <uuid> --json
+swbctl open <session-key> [--transport tmux]
+swbctl prepare-workspace <provider> --request-id <uuid> --json
+swbctl workspace open <provider>
+swbctl select-surface <surface-id> --client <tmux-client-id>
+swbctl attach-surface <surface-id>
+swbctl event --provider <provider>
+swbctl snapshot [--reconcile none|live|full] --json
+swbctl doctor
 ```
 
 `bootstrap` and launch-intent cleanup are internal commands, not normal user
@@ -1302,7 +1304,7 @@ stored with the launch. Optional MCP/plugin tools receive the capability and
 surface ID through their process environment. Agent mutations require the
 capability and the surface's current confirmed binding. This is a same-user
 guardrail and attribution mechanism, not a defense against the local account
-owner. Human `agentctl ... --current` commands may instead resolve through the
+owner. Human `swbctl ... --current` commands may instead resolve through the
 current tmux pane metadata.
 
 An optional provider skill can guide the current agent to prepare a concise
@@ -1407,7 +1409,7 @@ database file is shared or mounted between machines.
 The basic read request launches a short-lived remote process:
 
 ```text
-ssh <target> agentctl snapshot --json
+ssh <target> swbctl snapshot --json
 ```
 
 The remote command reads its host-local registry, writes one versioned JSON
@@ -1418,13 +1420,13 @@ When the caller needs stronger liveness evidence, it can request bounded remote
 reconciliation in the same process:
 
 ```text
-ssh <target> agentctl snapshot --json --reconcile live
+ssh <target> swbctl snapshot --json --reconcile live
 ```
 
 Full provider history discovery is requested less frequently:
 
 ```text
-ssh <target> agentctl snapshot --json --reconcile full
+ssh <target> swbctl snapshot --json --reconcile full
 ```
 
 This separation prevents frequent status refreshes from repeatedly starting
@@ -1450,8 +1452,8 @@ asynchronously. A remote failure therefore does not delay local results or make
 known sessions disappear. The UI exposes snapshot age whenever data is stale or
 offline.
 
-`agentctl list` is the frontend-facing merged view. It reads the local registry
-and cached remote snapshots. `agentctl refresh` performs remote pulls and
+`swbctl list` is the frontend-facing merged view. It reads the local registry
+and cached remote snapshots. `swbctl refresh` performs remote pulls and
 updates that cache. A TUI can run refreshes asynchronously while retaining its
 current model; DMS can show cached items and refresh only when its cache is
 stale.
@@ -1482,7 +1484,7 @@ A desktop frontend first prepares the action noninteractively on the owning
 host:
 
 ```text
-ssh <target> agentctl prepare-open <session-key> \
+ssh <target> swbctl prepare-open <session-key> \
   --request-id <uuid> --json
 ```
 
@@ -1491,7 +1493,7 @@ prepared waiting surface. Only after success does the frontend focus an
 existing local terminal or launch the configured terminal around:
 
 ```text
-ssh -t <target> agentctl attach-surface <surface-id>
+ssh -t <target> swbctl attach-surface <surface-id>
 ```
 
 `attach-surface` revalidates the surface and any pending lease, then replaces
@@ -1504,7 +1506,7 @@ When preparation returns a `switch` plan for one already attached remote tmux
 client, DMS first runs:
 
 ```text
-ssh <target> agentctl select-surface <surface-id> --client <opaque-client-id>
+ssh <target> swbctl select-surface <surface-id> --client <opaque-client-id>
 ```
 
 After the owning host confirms the switch, DMS focuses the existing local
@@ -1525,7 +1527,7 @@ the project before recording an imported handoff and launch intent. No target
 host reaches back to the source and no transcript content is transferred.
 
 ```text
-ssh <target> agentctl prepare-new --request-id <uuid> --json-stdin --json
+ssh <target> swbctl prepare-new --request-id <uuid> --json-stdin --json
 ```
 
 The request envelope also selects the target's configured location. A local
@@ -1549,7 +1551,7 @@ was absent.
 If measured polling cost or latency becomes unacceptable, the protocol can add:
 
 ```text
-ssh <target> agentctl watch --jsonl
+ssh <target> swbctl watch --jsonl
 ```
 
 `watch` would be a long-lived remote process scoped to the lifetime of an open
@@ -1569,7 +1571,7 @@ local registry, status model, and attachment behavior are stable.
 The existing DMS Agent Picker remains functional during migration. Its final
 responsibilities are intentionally narrow:
 
-- invoke `agentctl list --json`
+- invoke `swbctl list --json`
 - present project groups and project-aware new-session actions
 - translate sessions into DMS launcher items
 - invoke atomic open/new preparation
@@ -1600,6 +1602,13 @@ Core configuration belongs under:
 ```text
 ${XDG_CONFIG_HOME:-~/.config}/agent-switchboard/config.toml
 ```
+
+The file is optional. If this implicit default path is absent, Switchboard
+behaves as though it read an empty TOML document and uses documented defaults;
+it does not create the file. An explicitly supplied missing path, an unreadable
+file, malformed TOML, or invalid values remain errors. Stable host identity and
+the registry are state rather than configuration and are created lazily under
+the XDG state directory when an operation needs them.
 
 Expected settings include:
 
@@ -1663,7 +1672,7 @@ remain usable.
 ### Hooks unavailable
 
 Discovery and open actions continue. Live activity is marked unknown or derived
-from weaker native evidence. `agentctl doctor` explains the missing hook or
+from weaker native evidence. `swbctl doctor` explains the missing hook or
 trust requirement.
 
 ### Stale runtime
@@ -1736,7 +1745,7 @@ session actions.
   mechanism.
 - Do not silently install hooks, alter provider settings, or enable remote
   access from a frontend action.
-- Use an absolute installed `agentctl` path in generated hook configuration and
+- Use an absolute installed `swbctl` path in generated hook configuration and
   verify noninteractive local/SSH PATH behavior in `doctor`.
 
 ## Migration from DMS Agent Picker
@@ -2020,8 +2029,8 @@ Decide whether releases provide packages, standalone archives, or both, and
 whether hook configuration is generated by an explicit install command or
 managed entirely by dotfiles.
 
-No license has been selected. Package metadata intentionally makes no license
-claim, and public distribution remains gated on an explicit licensing decision.
+Switchboard is distributed under the MIT License. Package metadata carries the
+`MIT` SPDX expression, and wheel and source artifacts include the license text.
 
 ## Accepted Design Commitments
 

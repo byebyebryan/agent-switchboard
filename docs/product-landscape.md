@@ -469,7 +469,7 @@ building a competing session database.
    remote model without introducing a fleet server.
 5. Make status reasons structured enough to distinguish permission, question,
    completion, idle readiness, stale observation, and offline host state.
-6. Keep `agentctl` output stable and additive so DMS and future frontends do
+6. Keep `swbctl` output stable and additive so DMS and future frontends do
    not depend on implementation details.
 7. Do not adopt another project's private transcript parser as a hidden source
    of truth. Such parsers can be optional compatibility fallbacks later.

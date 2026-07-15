@@ -108,15 +108,15 @@ jobs:
                   assert int(registry.metadata()["schema_version"]) == CURRENT_SCHEMA_VERSION
           PY
           done
-      - name: Smoke installed agentctl entry points
+      - name: Smoke installed swbctl entry points
         working-directory: /tmp
         run: |
-          for agentctl in \
-            /tmp/switchboard-wheel-smoke/bin/agentctl \
-            /tmp/switchboard-sdist-smoke/bin/agentctl
+          for swbctl in \
+            /tmp/switchboard-wheel-smoke/bin/swbctl \
+            /tmp/switchboard-sdist-smoke/bin/swbctl
           do
-            test "$("$agentctl" --version)" = "agentctl 0.1.0"
-            "$agentctl" --help | \
+            test "$("$swbctl" --version)" = "swbctl 0.1.0"
+            "$swbctl" --help | \
               grep -F "Inspect and route provider-native coding-agent sessions."
           done
       - uses: actions/upload-artifact@v4

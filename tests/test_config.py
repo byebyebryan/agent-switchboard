@@ -4,9 +4,11 @@ from pathlib import Path
 
 import pytest
 
+import agent_switchboard.config as config_module
 from agent_switchboard.config import (
     ConfigError,
     WorkingDirectoryPolicy,
+    load_config,
     merge_project_catalogs,
     parse_config,
 )
@@ -95,6 +97,35 @@ def test_minimal_configuration_has_documented_defaults() -> None:
     assert all(provider.enabled for provider in config.providers)
     assert config.defaults.transport is Transport.TMUX
     assert config.tmux.naming_prefix == "as"
+
+
+def test_missing_implicit_configuration_uses_defaults(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "configuration" / "agent-switchboard" / "config.toml"
+    monkeypatch.setattr(config_module, "config_path", lambda: source)
+
+    config = load_config(host_id=HOST_A)
+
+    assert config.host.host_id == HOST_A
+    assert [provider.provider for provider in config.providers] == [
+        ProviderId.CODEX,
+        ProviderId.CLAUDE,
+    ]
+    assert config.remotes == ()
+    assert config.projects == ()
+    assert config.locations == ()
+    assert config.defaults.transport is Transport.TMUX
+    assert not source.exists()
+
+
+def test_missing_explicit_configuration_is_rejected(tmp_path: Path) -> None:
+    source = tmp_path / "missing.toml"
+
+    with pytest.raises(
+        ConfigError, match=r"cannot read configuration at .*missing.toml"
+    ):
+        load_config(source, host_id=HOST_A)
 
 
 @pytest.mark.parametrize(

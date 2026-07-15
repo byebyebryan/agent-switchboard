@@ -116,6 +116,7 @@ def audit_contents(wheel: Path, sdist: Path) -> dict[str, object]:
         relative: (ROOT / relative).read_bytes()
         for relative in (
             ".gitignore",
+            "LICENSE",
             "README.md",
             "docs/design.md",
             "docs/phase-1-validation.md",
@@ -130,6 +131,7 @@ def audit_contents(wheel: Path, sdist: Path) -> dict[str, object]:
         f"{dist_info}/RECORD",
         f"{dist_info}/WHEEL",
         f"{dist_info}/entry_points.txt",
+        f"{dist_info}/licenses/LICENSE",
     }
     if set(wheel_content) != expected_wheel:
         raise DistributionError(
@@ -162,29 +164,26 @@ def audit_contents(wheel: Path, sdist: Path) -> dict[str, object]:
             raise DistributionError(
                 f"sdist project file differs from checkout: {relative}"
             )
+    if wheel_content[f"{dist_info}/licenses/LICENSE"] != project_files["LICENSE"]:
+        raise DistributionError("wheel license differs from checkout")
 
     metadata = wheel_content[f"{dist_info}/METADATA"].decode("utf-8")
     for expected in (
         "Name: agent-switchboard",
         "Version: 0.1.0",
+        "License-Expression: MIT",
+        "License-File: LICENSE",
         "Requires-Python: >=3.12",
     ):
         if expected not in metadata:
             raise DistributionError(f"wheel metadata is missing {expected!r}")
-    if any(
-        marker in metadata
-        for marker in ("\nLicense:", "\nLicense-Expression:", "\nLicense-File:")
-    ):
-        raise DistributionError("wheel metadata makes an unselected license claim")
     package_info = sdist_content[f"{sdist_root}/PKG-INFO"].decode("utf-8")
-    if any(
-        marker in package_info
-        for marker in ("\nLicense:", "\nLicense-Expression:", "\nLicense-File:")
-    ):
-        raise DistributionError("sdist metadata makes an unselected license claim")
+    for expected in ("License-Expression: MIT", "License-File: LICENSE"):
+        if expected not in package_info:
+            raise DistributionError(f"sdist metadata is missing {expected!r}")
     entry_points = wheel_content[f"{dist_info}/entry_points.txt"].decode("utf-8")
-    if "agentctl = agent_switchboard.cli:main" not in entry_points:
-        raise DistributionError("wheel is missing the agentctl console entry point")
+    if "swbctl = agent_switchboard.cli:main" not in entry_points:
+        raise DistributionError("wheel is missing the swbctl console entry point")
 
     required_migrations = {
         "agent_switchboard/migrations/__init__.py",

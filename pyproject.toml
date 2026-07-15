@@ -7,11 +7,13 @@ name = "agent-switchboard"
 version = "0.1.0"
 description = "A local session router for coding agents"
 readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.12"
 dependencies = []
 
 [project.scripts]
-agentctl = "agent_switchboard.cli:main"
+swbctl = "agent_switchboard.cli:main"
 
 [tool.hatch.build]
 reproducible = true

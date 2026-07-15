@@ -1,4 +1,4 @@
-"""Provisional ``agentctl`` command entry point."""
+"""Provisional ``swbctl`` command entry point."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ from . import __version__
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="agentctl",
+        prog="swbctl",
         description="Inspect and route provider-native coding-agent sessions.",
     )
     parser.add_argument(

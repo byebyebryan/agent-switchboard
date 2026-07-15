@@ -10,7 +10,7 @@ bootstrap, Codex discovery/hooks, and Claude supervisor/native-TUI contracts
 all have working evidence.
 
 Phase 1 and the read-only portion of Phase 2 can proceed. Frontend migration
-remains gated on exercising the implemented `agentctl` structured
+remains gated on exercising the implemented `swbctl` structured
 prepare/select/attach path end to end; that command does not exist yet. This is
 an implementation-order gate, not an architecture blocker.
 
@@ -119,7 +119,7 @@ a fresh exact attach view is created.
 
 1. Run contract tests against the first real registry/provider adapters using
    these versioned fixtures.
-2. Exercise `agentctl` remote prepare/select/attach and structured error
+2. Exercise `swbctl` remote prepare/select/attach and structured error
    responses before launching Ghostty.
 3. Serialize the niri focus test so user input cannot race the assertion.
 4. Treat unknown provider versions and disabled Agent View as explicit

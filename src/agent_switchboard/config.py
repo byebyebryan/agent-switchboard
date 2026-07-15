@@ -516,9 +516,15 @@ def load_config(
     *,
     host_id: HostId | None = None,
 ) -> SwitchboardConfig:
+    """Load host-local config, defaulting only when its implicit path is absent."""
+
     source = Path(path) if path is not None else config_path()
     try:
         data = source.read_bytes()
+    except FileNotFoundError as exc:
+        if path is not None:
+            raise ConfigError(f"cannot read configuration at {source}: {exc}") from exc
+        data = b""
     except OSError as exc:
         raise ConfigError(f"cannot read configuration at {source}: {exc}") from exc
     return parse_config(data, host_id=host_id or load_or_create_host_id())

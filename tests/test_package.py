@@ -17,11 +17,12 @@ def test_static_pep_621_metadata_and_stdlib_runtime() -> None:
     assert project["name"] == "agent-switchboard"
     assert project["version"] == __version__
     assert project["readme"] == "README.md"
+    assert project["license"] == "MIT"
+    assert project["license-files"] == ["LICENSE"]
     assert project["requires-python"] == ">=3.12"
     assert project["dependencies"] == []
-    assert project["scripts"]["agentctl"] == "agent_switchboard.cli:main"
+    assert project["scripts"]["swbctl"] == "agent_switchboard.cli:main"
     assert "dynamic" not in project
-    assert "license" not in project
     assert metadata["build-system"] == {
         "requires": ["hatchling==1.31.0"],
         "build-backend": "hatchling.build",
@@ -37,11 +38,11 @@ def test_static_pep_621_metadata_and_stdlib_runtime() -> None:
     assert metadata["tool"]["pytest"]["ini_options"]["pythonpath"] == ["src"]
 
 
-def test_readme_states_phase_and_license_boundaries() -> None:
+def test_readme_states_phase_and_license() -> None:
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
     assert "Phase 1 core implementation" in readme
     assert "not implemented yet" in readme
-    assert "No license has been selected" in readme
+    assert "MIT License" in readme
     assert "SOURCE_DATE_EPOCH=1784073600" in readme
 
 
@@ -50,7 +51,7 @@ def test_ci_smokes_wheel_and_source_distribution_installations() -> None:
     assert "/tmp/switchboard-wheel-smoke/bin/python" in workflow
     assert "/tmp/switchboard-sdist-smoke/bin/python" in workflow
     assert "--no-deps /tmp/switchboard-build-a/*.tar.gz" in workflow
-    assert "/tmp/switchboard-sdist-smoke/bin/agentctl" in workflow
+    assert "/tmp/switchboard-sdist-smoke/bin/swbctl" in workflow
 
 
 def test_provisional_cli_help_and_version(capsys: pytest.CaptureFixture[str]) -> None:
@@ -58,4 +59,4 @@ def test_provisional_cli_help_and_version(capsys: pytest.CaptureFixture[str]) ->
     with pytest.raises(SystemExit) as exit_info:
         main(["--version"])
     assert exit_info.value.code == 0
-    assert capsys.readouterr().out.strip() == f"agentctl {__version__}"
+    assert capsys.readouterr().out.strip() == f"swbctl {__version__}"

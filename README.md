@@ -12,7 +12,7 @@ status metadata, then hands the user back to the unmodified provider UI.
 
 The current checkout is the Phase 1 core implementation:
 
-- Python package and provisional `agentctl` entry point
+- Python package and finalized `swbctl` executable name
 - stable host identity and strict TOML configuration
 - provider-neutral domain and state models
 - versioned machine protocols and privacy validation
@@ -53,10 +53,10 @@ installation when pytest itself is available.
 The PEP 517 backend is Hatchling. Artifact selection is explicit:
 
 - wheels contain `agent_switchboard`, including migration modules, plus wheel
-  metadata;
+  metadata and the MIT license;
 - source distributions contain the package source, the design and Phase 1
-  validation documents referenced here, and the minimum project files needed
-  to build it;
+  validation documents referenced here, the MIT license, and the minimum
+  project files needed to build it;
 - tests, fixtures, caches, databases, prompts, and credentials are excluded
   from both distribution formats.
 
@@ -90,8 +90,6 @@ Safe additive fields from newer senders are tolerated and discarded during
 canonicalization. Explicit capability reports and structured degraded reasons
 remain part of the stable protocol.
 
-## License status
+## License
 
-No license has been selected for this repository. The package metadata does
-not claim one. A license must be chosen explicitly before public distribution;
-none should be inferred from the presence of source code.
+Switchboard is licensed under the [MIT License](LICENSE).
