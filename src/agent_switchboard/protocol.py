@@ -1,0 +1,1520 @@
+"""Versioned, forward-field-tolerant machine protocol envelopes."""
+
+from __future__ import annotations
+
+import json
+import re
+import unicodedata
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
+from enum import StrEnum
+from typing import Any, Self
+from uuid import UUID
+
+from .domain import (
+    Activity,
+    ActivityReason,
+    Attachment,
+    BindingConfidence,
+    HandoffId,
+    HostId,
+    LaunchId,
+    LocationId,
+    PresentationContext,
+    ProjectId,
+    ProviderId,
+    Resumability,
+    RuntimePresence,
+    SessionKey,
+    StateConfidence,
+    SurfaceId,
+    SurfaceRole,
+    Transport,
+    ValidationError,
+)
+
+SCHEMA_VERSION = 1
+PROTOCOL_VERSION = 1
+MAX_JSON_DEPTH = 32
+MAX_JSON_BYTES = 8 * 1024 * 1024
+MAX_JSON_STRING_LENGTH = 64 * 1024
+MAX_JSON_ARRAY_ITEMS = 100_000
+MAX_JSON_OBJECT_KEYS = 256
+MAX_SNAPSHOT_RECORDS = 100_000
+
+_SENSITIVE_KEY_PARTS = (
+    "accesskey",
+    "apikey",
+    "argv",
+    "authorization",
+    "cookie",
+    "credential",
+    "environment",
+    "history",
+    "input",
+    "modelresponse",
+    "password",
+    "passphrase",
+    "privatekey",
+    "refreshtoken",
+    "accesstoken",
+    "authtoken",
+    "secret",
+    "toolresult",
+)
+_SENSITIVE_KEYS = {
+    "argv",
+    "body",
+    "content",
+    "conversation",
+    "conversationhistory",
+    "cookie",
+    "environment",
+    "hookpayload",
+    "messages",
+    "modeloutput",
+    "output",
+    "payload",
+    "prompt",
+    "prompts",
+    "prompttext",
+    "providerargv",
+    "providerpayload",
+    "rawpayload",
+    "rawprompt",
+    "requestpayload",
+    "responsepayload",
+    "secret",
+    "secrets",
+    "setcookie",
+    "stderr",
+    "stdin",
+    "stdout",
+    "systemprompt",
+    "tooloutput",
+    "transcript",
+    "transcriptbody",
+    "transcripts",
+    "userprompt",
+}
+_KEY_NORMALIZER = re.compile(r"[^a-z0-9]")
+_SAFE_DETAIL_STRING_FIELDS = frozenset({"capability", "fallback"})
+_SAFE_DETAIL_NUMBER_FIELDS = frozenset({"latency"})
+_SAFE_DETAIL_HASH_FIELDS = frozenset({"payloadHash"})
+_SAFE_DETAIL_FIELDS = (
+    _SAFE_DETAIL_STRING_FIELDS | _SAFE_DETAIL_NUMBER_FIELDS | _SAFE_DETAIL_HASH_FIELDS
+)
+
+JsonScalar = None | bool | int | float | str
+JsonValue = JsonScalar | list["JsonValue"] | dict[str, "JsonValue"]
+
+
+class ProtocolError(ValidationError):
+    """A machine envelope is malformed or incompatible."""
+
+    code = "invalid_protocol_message"
+
+
+class IncompatibleSchemaError(ProtocolError):
+    code = "incompatible_schema_version"
+
+
+class IncompatibleProtocolError(ProtocolError):
+    code = "incompatible_protocol_version"
+
+
+class ErrorScope(StrEnum):
+    HOST = "host"
+    PROJECT = "project"
+    PROVIDER = "provider"
+    SESSION = "session"
+    LAUNCH = "launch"
+    SURFACE = "surface"
+
+
+class PresentationPlanKind(StrEnum):
+    FOCUS = "focus"
+    SWITCH = "switch"
+    ATTACH = "attach"
+    BLOCKED = "blocked"
+
+
+def _decode(raw: str | bytes | bytearray) -> Mapping[str, Any]:
+    try:
+        size = len(raw.encode("utf-8")) if isinstance(raw, str) else len(raw)
+    except (AttributeError, UnicodeEncodeError) as exc:
+        raise ProtocolError("protocol message must be UTF-8 JSON") from exc
+    if size > MAX_JSON_BYTES:
+        raise ProtocolError(f"protocol message exceeds the {MAX_JSON_BYTES}-byte limit")
+    try:
+        value = json.loads(raw)
+    except (json.JSONDecodeError, TypeError, UnicodeDecodeError) as exc:
+        raise ProtocolError(f"invalid JSON: {exc}") from exc
+    return _object(value, "envelope")
+
+
+def _object(value: object, path: str) -> Mapping[str, Any]:
+    if not isinstance(value, Mapping) or not all(isinstance(key, str) for key in value):
+        raise ProtocolError(f"{path} must be an object")
+    return value
+
+
+def _array(value: object, path: str) -> Sequence[Any]:
+    if isinstance(value, (str, bytes, bytearray)) or not isinstance(value, Sequence):
+        raise ProtocolError(f"{path} must be an array")
+    return value
+
+
+def _required(table: Mapping[str, Any], key: str, path: str) -> Any:
+    if key not in table:
+        raise ProtocolError(f"{path}.{key} is required")
+    return table[key]
+
+
+def _string(
+    value: object,
+    path: str,
+    *,
+    optional: bool = False,
+    maximum: int = 4096,
+) -> str | None:
+    if optional and value is None:
+        return None
+    if not isinstance(value, str) or not value or len(value) > maximum:
+        raise ProtocolError(f"{path} must be a non-empty bounded string")
+    if any(unicodedata.category(character) == "Cc" for character in value):
+        raise ProtocolError(f"{path} contains terminal control characters")
+    return value
+
+
+def _integer(value: object, path: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ProtocolError(f"{path} must be a non-negative integer")
+    return value
+
+
+def _boolean(value: object, path: str) -> bool:
+    if not isinstance(value, bool):
+        raise ProtocolError(f"{path} must be boolean")
+    return value
+
+
+def _versions(table: Mapping[str, Any]) -> None:
+    safe_table = _json_value(table, "envelope")
+    encoded = json.dumps(
+        safe_table,
+        ensure_ascii=False,
+        allow_nan=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    if len(encoded) > MAX_JSON_BYTES:
+        raise ProtocolError(f"protocol message exceeds the {MAX_JSON_BYTES}-byte limit")
+    schema = _integer(
+        _required(table, "schemaVersion", "envelope"), "envelope.schemaVersion"
+    )
+    protocol = _integer(
+        _required(table, "protocolVersion", "envelope"),
+        "envelope.protocolVersion",
+    )
+    if schema != SCHEMA_VERSION:
+        raise IncompatibleSchemaError(
+            f"schema version {schema} is not supported; expected {SCHEMA_VERSION}"
+        )
+    if protocol != PROTOCOL_VERSION:
+        raise IncompatibleProtocolError(
+            f"protocol version {protocol} is not supported; expected {PROTOCOL_VERSION}"
+        )
+
+
+def _normalized_key(value: str) -> str:
+    normalized = unicodedata.normalize("NFKC", value).casefold()
+    return _KEY_NORMALIZER.sub("", normalized)
+
+
+def _reject_sensitive_key(value: str, path: str) -> None:
+    if any(unicodedata.category(character) == "Cc" for character in value):
+        raise ProtocolError(f"{path} contains a terminal control in an object key")
+    normalized = _normalized_key(value)
+    if not normalized or len(value) > 256:
+        raise ProtocolError(f"{path} contains an invalid object key")
+    if normalized in _SENSITIVE_KEYS or any(
+        part in normalized for part in _SENSITIVE_KEY_PARTS
+    ):
+        raise ProtocolError(f"{path} contains forbidden sensitive field {value!r}")
+    if "prompt" in normalized or "transcript" in normalized:
+        raise ProtocolError(f"{path} contains forbidden content field {value!r}")
+    if any(
+        part in normalized
+        for part in ("conversation", "messages", "output", "response", "result")
+    ):
+        raise ProtocolError(f"{path} contains forbidden content field {value!r}")
+    if normalized.startswith("raw"):
+        raise ProtocolError(f"{path} contains forbidden raw field {value!r}")
+    if "payload" in normalized and not normalized.endswith("payloadhash"):
+        raise ProtocolError(f"{path} contains forbidden payload field {value!r}")
+    if "token" in normalized and normalized != "desktoptoken":
+        raise ProtocolError(f"{path} contains forbidden token field {value!r}")
+
+
+def _json_value(value: object, path: str, *, depth: int = 0) -> JsonValue:
+    if depth > MAX_JSON_DEPTH:
+        raise ProtocolError(f"{path} exceeds maximum JSON nesting depth")
+    if value is None or isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        if len(value) > MAX_JSON_STRING_LENGTH:
+            raise ProtocolError(f"{path} contains an oversized string")
+        if any(unicodedata.category(character) == "Cc" for character in value):
+            raise ProtocolError(f"{path} contains terminal control characters")
+        return value
+    if isinstance(value, int) and not isinstance(value, bool):
+        return value
+    if isinstance(value, float):
+        if value != value or value in {float("inf"), float("-inf")}:
+            raise ProtocolError(f"{path} contains a non-finite number")
+        return value
+    if isinstance(value, list):
+        if len(value) > MAX_JSON_ARRAY_ITEMS:
+            raise ProtocolError(f"{path} contains too many array items")
+        return [
+            _json_value(item, f"{path}[{index}]", depth=depth + 1)
+            for index, item in enumerate(value)
+        ]
+    if isinstance(value, Mapping) and all(isinstance(key, str) for key in value):
+        if len(value) > MAX_JSON_OBJECT_KEYS:
+            raise ProtocolError(f"{path} contains too many object keys")
+        for key in value:
+            _reject_sensitive_key(key, path)
+        return {
+            key: _json_value(item, f"{path}.{key}", depth=depth + 1)
+            for key, item in value.items()
+        }
+    raise ProtocolError(f"{path} contains a non-JSON value")
+
+
+def _record(value: object, path: str) -> dict[str, JsonValue]:
+    table = _object(value, path)
+    safe_table = _json_value(table, path)
+    assert isinstance(safe_table, dict)
+    return safe_table
+
+
+def _uuid[T: HostId | ProjectId | LocationId | LaunchId | HandoffId | SurfaceId](
+    value: object, path: str, value_type: type[T]
+) -> T:
+    try:
+        return value_type(_string(value, path))
+    except ValidationError as exc:
+        raise ProtocolError(f"{path}: {exc}") from exc
+
+
+def _provider(value: object, path: str, *, optional: bool = False) -> ProviderId | None:
+    text = _string(value, path, optional=optional)
+    if text is None:
+        return None
+    try:
+        return ProviderId(text)
+    except ValueError as exc:
+        raise ProtocolError(f"{path} has unsupported provider {text!r}") from exc
+
+
+def _envelope(payload: dict[str, JsonValue]) -> dict[str, JsonValue]:
+    return {
+        "schemaVersion": SCHEMA_VERSION,
+        "protocolVersion": PROTOCOL_VERSION,
+        **payload,
+    }
+
+
+def _dump(value: Mapping[str, JsonValue]) -> str:
+    safe_value = _json_value(value, "envelope")
+    assert isinstance(safe_value, dict)
+    return json.dumps(
+        safe_value,
+        ensure_ascii=False,
+        allow_nan=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+
+
+def _enum[T: StrEnum](value: object, path: str, enum_type: type[T]) -> T:
+    text = _string(value, path, maximum=128)
+    assert text is not None
+    try:
+        return enum_type(text)
+    except ValueError as exc:
+        raise ProtocolError(f"{path} has unsupported value {text!r}") from exc
+
+
+def _positive_integer(value: object, path: str) -> int:
+    result = _integer(value, path)
+    if result == 0:
+        raise ProtocolError(f"{path} must be a positive integer")
+    return result
+
+
+def _hash(value: object, path: str) -> str:
+    text = _string(value, path, maximum=64)
+    assert text is not None
+    if len(text) != 64 or any(
+        character not in "0123456789abcdef" for character in text
+    ):
+        raise ProtocolError(f"{path} must be a lowercase SHA-256 digest")
+    return text
+
+
+def _details_record(value: object, path: str) -> dict[str, JsonValue]:
+    """Validate the small, retained diagnostic-details contract.
+
+    Unlike additive envelope fields, details survive canonicalization. Keep
+    their field names and value shapes explicit so generic dictionaries cannot
+    become an accidental content or credential channel.
+    """
+
+    table = _record(value, path)
+    unknown = set(table) - _SAFE_DETAIL_FIELDS
+    if unknown:
+        raise ProtocolError(
+            f"{path} contains unsupported retained detail fields: {sorted(unknown)}"
+        )
+
+    result: dict[str, JsonValue] = {}
+    for key, value in table.items():
+        field_path = f"{path}.{key}"
+        if key in _SAFE_DETAIL_STRING_FIELDS:
+            result[key] = _string(value, field_path, maximum=512)
+        elif key in _SAFE_DETAIL_NUMBER_FIELDS:
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or value < 0
+            ):
+                raise ProtocolError(f"{field_path} must be a non-negative number")
+            result[key] = value
+        else:
+            result[key] = _hash(value, field_path)
+    return result
+
+
+def _uuid_text[T: HostId | ProjectId | LocationId | LaunchId | HandoffId | SurfaceId](
+    value: object, path: str, value_type: type[T]
+) -> str:
+    return str(_uuid(value, path, value_type))
+
+
+def _session_key(value: object, path: str) -> SessionKey:
+    text = _string(value, path, maximum=512)
+    assert text is not None
+    try:
+        return SessionKey.parse(text)
+    except ValidationError as exc:
+        raise ProtocolError(f"{path}: {exc}") from exc
+
+
+def _string_array(
+    value: object,
+    path: str,
+    *,
+    maximum_items: int = 10_000,
+    maximum_string: int = 4096,
+) -> list[JsonValue]:
+    raw_items = _array(value, path)
+    if len(raw_items) > maximum_items:
+        raise ProtocolError(f"{path} contains too many items")
+    items: list[JsonValue] = []
+    for index, item in enumerate(raw_items):
+        text = _string(item, f"{path}[{index}]", maximum=maximum_string)
+        assert text is not None
+        if text not in items:
+            items.append(text)
+    return items
+
+
+def _optional_string(
+    result: dict[str, JsonValue],
+    table: Mapping[str, Any],
+    key: str,
+    path: str,
+    *,
+    maximum: int = 4096,
+) -> None:
+    if key in table:
+        result[key] = _string(
+            table[key], f"{path}.{key}", optional=True, maximum=maximum
+        )
+
+
+def _optional_integer(
+    result: dict[str, JsonValue],
+    table: Mapping[str, Any],
+    key: str,
+    path: str,
+) -> None:
+    if key in table:
+        result[key] = (
+            None if table[key] is None else _integer(table[key], f"{path}.{key}")
+        )
+
+
+def _optional_boolean(
+    result: dict[str, JsonValue],
+    table: Mapping[str, Any],
+    key: str,
+    path: str,
+) -> None:
+    if key in table:
+        result[key] = _boolean(table[key], f"{path}.{key}")
+
+
+def _optional_uuid[
+    T: HostId | ProjectId | LocationId | LaunchId | HandoffId | SurfaceId
+](
+    result: dict[str, JsonValue],
+    table: Mapping[str, Any],
+    key: str,
+    path: str,
+    value_type: type[T],
+) -> None:
+    if key in table:
+        result[key] = (
+            None
+            if table[key] is None
+            else _uuid_text(table[key], f"{path}.{key}", value_type)
+        )
+
+
+def _project_record(value: object, path: str) -> dict[str, JsonValue]:
+    table = _object(value, path)
+    _json_value(table, path)
+    result: dict[str, JsonValue] = {
+        "projectId": _uuid_text(
+            _required(table, "projectId", path), f"{path}.projectId", ProjectId
+        ),
+        "name": _string(_required(table, "name", path), f"{path}.name", maximum=256),
+    }
+    if "aliases" in table:
+        result["aliases"] = _string_array(
+            table["aliases"], f"{path}.aliases", maximum_string=128
+        )
+    if "defaultProvider" in table:
+        result["defaultProvider"] = (
+            None
+            if table["defaultProvider"] is None
+            else _provider(table["defaultProvider"], f"{path}.defaultProvider")
+        )
+    if "defaultTransport" in table:
+        result["defaultTransport"] = _enum(
+            table["defaultTransport"], f"{path}.defaultTransport", Transport
+        )
+    if "contextSources" in table:
+        result["contextSources"] = _string_array(
+            table["contextSources"],
+            f"{path}.contextSources",
+            maximum_string=1024,
+        )
+    _optional_boolean(result, table, "declared", path)
+    _optional_integer(result, table, "createdAt", path)
+    _optional_integer(result, table, "updatedAt", path)
+    return result
+
+
+def _location_record(
+    value: object, path: str, *, expected_host_id: HostId
+) -> dict[str, JsonValue]:
+    table = _object(value, path)
+    _json_value(table, path)
+    host_id = _uuid(_required(table, "hostId", path), f"{path}.hostId", HostId)
+    if host_id != expected_host_id:
+        raise ProtocolError(f"{path}.hostId does not match envelope.host.hostId")
+    result: dict[str, JsonValue] = {
+        "locationId": _uuid_text(
+            _required(table, "locationId", path), f"{path}.locationId", LocationId
+        ),
+        "projectId": _uuid_text(
+            _required(table, "projectId", path), f"{path}.projectId", ProjectId
+        ),
+        "hostId": str(host_id),
+        "path": _string(_required(table, "path", path), f"{path}.path", maximum=4096),
+    }
+    _optional_string(result, table, "displayName", path, maximum=256)
+    _optional_string(result, table, "repositoryIdentity", path, maximum=2048)
+    if "providerOverride" in table:
+        result["providerOverride"] = (
+            None
+            if table["providerOverride"] is None
+            else _provider(table["providerOverride"], f"{path}.providerOverride")
+        )
+    if "transportOverride" in table:
+        result["transportOverride"] = (
+            None
+            if table["transportOverride"] is None
+            else _enum(
+                table["transportOverride"],
+                f"{path}.transportOverride",
+                Transport,
+            )
+        )
+    _optional_boolean(result, table, "isDefault", path)
+    _optional_boolean(result, table, "declared", path)
+    _optional_integer(result, table, "lastObservedAt", path)
+    _optional_integer(result, table, "createdAt", path)
+    _optional_integer(result, table, "updatedAt", path)
+    return result
+
+
+def _runtime_locator(value: object, path: str) -> dict[str, JsonValue]:
+    table = _object(value, path)
+    _json_value(table, path)
+    result: dict[str, JsonValue] = {}
+    if "pid" in table:
+        result["pid"] = (
+            None
+            if table["pid"] is None
+            else _positive_integer(table["pid"], f"{path}.pid")
+        )
+    for key in ("providerRuntimeId", "tmuxSession", "tmuxWindow", "tmuxPane"):
+        _optional_string(result, table, key, path, maximum=1024)
+    _optional_integer(result, table, "observedAt", path)
+    return result
+
+
+def _session_record(
+    value: object, path: str, *, expected_host_id: HostId
+) -> dict[str, JsonValue]:
+    table = _object(value, path)
+    _json_value(table, path)
+    key = _session_key(_required(table, "sessionKey", path), f"{path}.sessionKey")
+    host_id = _uuid(_required(table, "hostId", path), f"{path}.hostId", HostId)
+    provider = _provider(_required(table, "provider", path), f"{path}.provider")
+    provider_session_id = _string(
+        _required(table, "providerSessionId", path),
+        f"{path}.providerSessionId",
+        maximum=256,
+    )
+    assert provider is not None and provider_session_id is not None
+    try:
+        parsed_provider_session_id = UUID(provider_session_id)
+    except ValueError as exc:
+        raise ProtocolError(f"{path}.providerSessionId must be a UUID") from exc
+    if host_id != expected_host_id or key.host_id != expected_host_id:
+        raise ProtocolError(f"{path} belongs to a different host")
+    if (
+        key.provider is not provider
+        or key.provider_session_id != parsed_provider_session_id
+    ):
+        raise ProtocolError(f"{path} identity fields disagree with sessionKey")
+
+    result: dict[str, JsonValue] = {
+        "sessionKey": str(key),
+        "hostId": str(host_id),
+        "provider": provider,
+        "providerSessionId": str(parsed_provider_session_id),
+        "firstObservedAt": _integer(
+            _required(table, "firstObservedAt", path), f"{path}.firstObservedAt"
+        ),
+        "lastObservedAt": _integer(
+            _required(table, "lastObservedAt", path), f"{path}.lastObservedAt"
+        ),
+        "metadataSource": _string(
+            _required(table, "metadataSource", path),
+            f"{path}.metadataSource",
+            maximum=64,
+        ),
+    }
+    _optional_uuid(result, table, "projectId", path, ProjectId)
+    _optional_uuid(result, table, "locationId", path, LocationId)
+    _optional_string(result, table, "name", path, maximum=512)
+    _optional_string(result, table, "purpose", path, maximum=4096)
+    _optional_string(result, table, "cwd", path, maximum=4096)
+    for field in (
+        "createdAt",
+        "providerUpdatedAt",
+        "lastActivityAt",
+        "stateObservedAt",
+        "wrappedAt",
+    ):
+        _optional_integer(result, table, field, path)
+    for field, enum_type in (
+        ("runtimePresence", RuntimePresence),
+        ("resumability", Resumability),
+        ("activity", Activity),
+        ("activityReason", ActivityReason),
+        ("attachment", Attachment),
+        ("stateConfidence", StateConfidence),
+    ):
+        result[field] = _enum(
+            _required(table, field, path), f"{path}.{field}", enum_type
+        )
+    if "runtimeLocator" in table:
+        result["runtimeLocator"] = (
+            None
+            if table["runtimeLocator"] is None
+            else _runtime_locator(table["runtimeLocator"], f"{path}.runtimeLocator")
+        )
+    _optional_uuid(result, table, "surfaceId", path, SurfaceId)
+    _optional_uuid(result, table, "latestHandoffId", path, HandoffId)
+    _optional_uuid(result, table, "continuedFromHandoffId", path, HandoffId)
+    _optional_boolean(result, table, "pinned", path)
+    return result
+
+
+def _runtime_record(
+    value: object, path: str, *, expected_host_id: HostId
+) -> dict[str, JsonValue]:
+    table = _object(value, path)
+    _json_value(table, path)
+    host_id = _uuid(_required(table, "hostId", path), f"{path}.hostId", HostId)
+    provider = _provider(_required(table, "provider", path), f"{path}.provider")
+    assert provider is not None
+    if host_id != expected_host_id:
+        raise ProtocolError(f"{path}.hostId does not match envelope.host.hostId")
+    result: dict[str, JsonValue] = {
+        "hostId": str(host_id),
+        "provider": provider,
+        "runtimePresence": _enum(
+            _required(table, "runtimePresence", path),
+            f"{path}.runtimePresence",
+            RuntimePresence,
+        ),
+        "resumability": _enum(
+            _required(table, "resumability", path),
+            f"{path}.resumability",
+            Resumability,
+        ),
+        "activity": _enum(
+            _required(table, "activity", path), f"{path}.activity", Activity
+        ),
+        "activityReason": _enum(
+            _required(table, "activityReason", path),
+            f"{path}.activityReason",
+            ActivityReason,
+        ),
+        "attachment": _enum(
+            _required(table, "attachment", path),
+            f"{path}.attachment",
+            Attachment,
+        ),
+        "observedAt": _integer(
+            _required(table, "observedAt", path), f"{path}.observedAt"
+        ),
+    }
+    if "sessionKey" in table:
+        if table["sessionKey"] is None:
+            result["sessionKey"] = None
+        else:
+            key = _session_key(table["sessionKey"], f"{path}.sessionKey")
+            if key.host_id != host_id or key.provider is not provider:
+                raise ProtocolError(f"{path}.sessionKey does not match host/provider")
+            result["sessionKey"] = str(key)
+    _optional_uuid(result, table, "launchId", path, LaunchId)
+    for key in ("observationId", "observationKey", "source", "providerRuntimeId"):
+        _optional_string(result, table, key, path, maximum=256)
+    if "sourcePriority" in table:
+        result["sourcePriority"] = _integer(
+            table["sourcePriority"], f"{path}.sourcePriority"
+        )
+    if "pid" in table:
+        result["pid"] = (
+            None
+            if table["pid"] is None
+            else _positive_integer(table["pid"], f"{path}.pid")
+        )
+    for key in ("tmuxSession", "tmuxWindow", "tmuxPane"):
+        _optional_string(result, table, key, path, maximum=256)
+    _optional_integer(result, table, "receivedAt", path)
+    if "payloadHash" in table:
+        result["payloadHash"] = (
+            None
+            if table["payloadHash"] is None
+            else _hash(table["payloadHash"], f"{path}.payloadHash")
+        )
+    return result
+
+
+def _surface_record(
+    value: object, path: str, *, expected_host_id: HostId
+) -> dict[str, JsonValue]:
+    table = _object(value, path)
+    _json_value(table, path)
+    host_id = _uuid(_required(table, "hostId", path), f"{path}.hostId", HostId)
+    provider = _provider(_required(table, "provider", path), f"{path}.provider")
+    assert provider is not None
+    if host_id != expected_host_id:
+        raise ProtocolError(f"{path}.hostId does not match envelope.host.hostId")
+    role = _enum(_required(table, "role", path), f"{path}.role", SurfaceRole)
+    binding_confidence = _enum(
+        _required(table, "bindingConfidence", path),
+        f"{path}.bindingConfidence",
+        BindingConfidence,
+    )
+    created_at = _integer(_required(table, "createdAt", path), f"{path}.createdAt")
+    last_observed_at = _integer(
+        _required(table, "lastObservedAt", path), f"{path}.lastObservedAt"
+    )
+    if last_observed_at < created_at:
+        raise ProtocolError(f"{path} observation timestamps are reversed")
+    result: dict[str, JsonValue] = {
+        "surfaceId": _uuid_text(
+            _required(table, "surfaceId", path), f"{path}.surfaceId", SurfaceId
+        ),
+        "hostId": str(host_id),
+        "provider": provider,
+        "transport": _enum(
+            _required(table, "transport", path), f"{path}.transport", Transport
+        ),
+        "transportLocator": _string(
+            _required(table, "transportLocator", path),
+            f"{path}.transportLocator",
+            maximum=1024,
+        ),
+        "role": role,
+        "bindingConfidence": binding_confidence,
+        "createdAt": created_at,
+        "lastObservedAt": last_observed_at,
+        "clientAttached": _boolean(
+            _required(table, "clientAttached", path), f"{path}.clientAttached"
+        ),
+    }
+    if (
+        role is SurfaceRole.PROVIDER_MANAGER
+        and binding_confidence is not BindingConfidence.UNKNOWN
+    ):
+        raise ProtocolError(
+            f"{path}.bindingConfidence must be unknown for provider_manager"
+        )
+    if "currentSessionKey" in table:
+        if table["currentSessionKey"] is None:
+            result["currentSessionKey"] = None
+        else:
+            key = _session_key(table["currentSessionKey"], f"{path}.currentSessionKey")
+            if key.host_id != host_id or key.provider is not provider:
+                raise ProtocolError(
+                    f"{path}.currentSessionKey does not match host/provider"
+                )
+            if role is SurfaceRole.PROVIDER_MANAGER:
+                raise ProtocolError(
+                    f"{path}.currentSessionKey is invalid for provider_manager"
+                )
+            result["currentSessionKey"] = str(key)
+    if (
+        binding_confidence is BindingConfidence.CONFIRMED
+        and result.get("currentSessionKey") is None
+    ):
+        raise ProtocolError(
+            f"{path}.bindingConfidence confirmed requires currentSessionKey"
+        )
+    _optional_uuid(result, table, "launchId", path, LaunchId)
+    _optional_string(result, table, "workspaceId", path, maximum=256)
+    _optional_integer(result, table, "retiredAt", path)
+    retired_at = result.get("retiredAt")
+    if retired_at is not None and not created_at <= int(retired_at) <= last_observed_at:
+        raise ProtocolError(f"{path}.retiredAt is outside the observation lifetime")
+    if retired_at is not None and (
+        result.get("currentSessionKey") is not None
+        or binding_confidence is not BindingConfidence.UNKNOWN
+        or result["clientAttached"] is not False
+    ):
+        raise ProtocolError(f"{path} retired surface is still bound or attached")
+    return result
+
+
+@dataclass(frozen=True, slots=True)
+class HostRecord:
+    host_id: HostId
+    display_name: str
+
+    @classmethod
+    def from_dict(cls, value: object, path: str = "host") -> Self:
+        table = _object(value, path)
+        display_name = _string(
+            _required(table, "displayName", path), f"{path}.displayName", maximum=256
+        )
+        assert display_name is not None
+        return cls(
+            host_id=_uuid(_required(table, "hostId", path), f"{path}.hostId", HostId),
+            display_name=display_name,
+        )
+
+    def to_dict(self) -> dict[str, JsonValue]:
+        return {"hostId": str(self.host_id), "displayName": self.display_name}
+
+
+@dataclass(frozen=True, slots=True)
+class CapabilityDegradation:
+    code: str
+    message: str
+    retryable: bool
+    feature: str | None = None
+    details: dict[str, JsonValue] | None = None
+
+    @classmethod
+    def from_dict(cls, value: object, path: str) -> Self:
+        table = _object(value, path)
+        code = _string(_required(table, "code", path), f"{path}.code", maximum=128)
+        message = _string(
+            _required(table, "message", path), f"{path}.message", maximum=2048
+        )
+        assert code is not None and message is not None
+        details = (
+            _details_record(table["details"], f"{path}.details")
+            if table.get("details") is not None
+            else None
+        )
+        return cls(
+            code=code,
+            message=message,
+            retryable=_boolean(
+                _required(table, "retryable", path), f"{path}.retryable"
+            ),
+            feature=_string(
+                table.get("feature"),
+                f"{path}.feature",
+                optional=True,
+                maximum=256,
+            ),
+            details=details,
+        )
+
+    def to_dict(self) -> dict[str, JsonValue]:
+        result: dict[str, JsonValue] = {
+            "code": self.code,
+            "message": self.message,
+            "retryable": self.retryable,
+        }
+        if self.feature is not None:
+            result["feature"] = self.feature
+        if self.details is not None:
+            result["details"] = self.details
+        return result
+
+
+@dataclass(frozen=True, slots=True)
+class Capability:
+    provider: ProviderId
+    available: bool
+    provider_version: str | None
+    tested_contract_min: str
+    tested_contract_max: str
+    features: tuple[str, ...]
+    schema_fingerprint: str | None = None
+    degraded_reasons: tuple[CapabilityDegradation, ...] = ()
+
+    @classmethod
+    def from_dict(cls, value: object, path: str = "capability") -> Self:
+        table = _object(value, path)
+        contract = _object(
+            _required(table, "testedContractRange", path),
+            f"{path}.testedContractRange",
+        )
+        minimum = _string(
+            _required(contract, "minimum", f"{path}.testedContractRange"),
+            f"{path}.testedContractRange.minimum",
+            maximum=256,
+        )
+        maximum = _string(
+            _required(contract, "maximum", f"{path}.testedContractRange"),
+            f"{path}.testedContractRange.maximum",
+            maximum=256,
+        )
+        assert minimum is not None and maximum is not None
+        raw_features = _array(_required(table, "features", path), f"{path}.features")
+        features: list[str] = []
+        for index, raw_feature in enumerate(raw_features):
+            feature = _string(raw_feature, f"{path}.features[{index}]", maximum=256)
+            assert feature is not None
+            if feature not in features:
+                features.append(feature)
+        raw_degraded = _array(
+            _required(table, "degradedReasons", path),
+            f"{path}.degradedReasons",
+        )
+        available = _boolean(_required(table, "available", path), f"{path}.available")
+        degraded_reasons = tuple(
+            CapabilityDegradation.from_dict(item, f"{path}.degradedReasons[{index}]")
+            for index, item in enumerate(raw_degraded)
+        )
+        if not available and not degraded_reasons:
+            raise ProtocolError(
+                f"{path}.degradedReasons must explain unavailable provider"
+            )
+        return cls(
+            provider=_provider(_required(table, "provider", path), f"{path}.provider"),
+            available=available,
+            provider_version=_string(
+                table.get("providerVersion"),
+                f"{path}.providerVersion",
+                optional=True,
+                maximum=256,
+            ),
+            tested_contract_min=minimum,
+            tested_contract_max=maximum,
+            features=tuple(features),
+            schema_fingerprint=(
+                None
+                if table.get("schemaFingerprint") is None
+                else _hash(table["schemaFingerprint"], f"{path}.schemaFingerprint")
+            ),
+            degraded_reasons=degraded_reasons,
+        )
+
+    def to_dict(self) -> dict[str, JsonValue]:
+        result: dict[str, JsonValue] = {
+            "provider": self.provider,
+            "available": self.available,
+            "testedContractRange": {
+                "minimum": self.tested_contract_min,
+                "maximum": self.tested_contract_max,
+            },
+            "features": list(self.features),
+            "degradedReasons": [reason.to_dict() for reason in self.degraded_reasons],
+        }
+        if self.provider_version is not None:
+            result["providerVersion"] = self.provider_version
+        if self.schema_fingerprint is not None:
+            result["schemaFingerprint"] = self.schema_fingerprint
+        return result
+
+
+@dataclass(frozen=True, slots=True)
+class CapabilityEnvelope:
+    capability: Capability
+
+    @classmethod
+    def from_dict(cls, value: object) -> Self:
+        table = _object(value, "envelope")
+        _versions(table)
+        return cls(Capability.from_dict(_required(table, "capability", "envelope")))
+
+    @classmethod
+    def from_json(cls, raw: str | bytes | bytearray) -> Self:
+        return cls.from_dict(_decode(raw))
+
+    def _raw_dict(self) -> dict[str, JsonValue]:
+        return _envelope({"capability": self.capability.to_dict()})
+
+    def to_dict(self) -> dict[str, JsonValue]:
+        normalized = type(self).from_dict(self._raw_dict())
+        return normalized._raw_dict()
+
+    def to_json(self) -> str:
+        return _dump(self.to_dict())
+
+
+@dataclass(frozen=True, slots=True)
+class ErrorRecord:
+    code: str
+    message: str
+    scope: ErrorScope
+    retryable: bool
+    observed_at: int
+    host_id: HostId | None = None
+    provider: ProviderId | None = None
+    session_key: SessionKey | None = None
+    details: dict[str, JsonValue] | None = None
+
+    @classmethod
+    def from_dict(cls, value: object, path: str = "error") -> Self:
+        table = _object(value, path)
+        code = _string(_required(table, "code", path), f"{path}.code", maximum=128)
+        message = _string(
+            _required(table, "message", path), f"{path}.message", maximum=4096
+        )
+        assert code is not None and message is not None
+        try:
+            scope = ErrorScope(
+                _string(_required(table, "scope", path), f"{path}.scope")
+            )
+        except ValueError as exc:
+            raise ProtocolError(f"{path}.scope is not supported") from exc
+        session_key: SessionKey | None = None
+        if table.get("sessionKey") is not None:
+            try:
+                session_key = SessionKey.parse(
+                    _string(table["sessionKey"], f"{path}.sessionKey") or ""
+                )
+            except ValidationError as exc:
+                raise ProtocolError(f"{path}.sessionKey: {exc}") from exc
+        host_id = (
+            _uuid(table["hostId"], f"{path}.hostId", HostId)
+            if table.get("hostId") is not None
+            else None
+        )
+        provider = _provider(table.get("provider"), f"{path}.provider", optional=True)
+        if session_key is not None:
+            if host_id is not None and session_key.host_id != host_id:
+                raise ProtocolError(f"{path} session/host routing fields disagree")
+            if provider is not None and session_key.provider is not provider:
+                raise ProtocolError(f"{path} session/provider routing fields disagree")
+        return cls(
+            code=code,
+            message=message,
+            scope=scope,
+            host_id=host_id,
+            provider=provider,
+            session_key=session_key,
+            retryable=_boolean(
+                _required(table, "retryable", path), f"{path}.retryable"
+            ),
+            observed_at=_integer(
+                _required(table, "observedAt", path), f"{path}.observedAt"
+            ),
+            details=(
+                _details_record(table["details"], f"{path}.details")
+                if table.get("details") is not None
+                else None
+            ),
+        )
+
+    def to_dict(self) -> dict[str, JsonValue]:
+        result: dict[str, JsonValue] = {
+            "code": self.code,
+            "message": self.message,
+            "scope": self.scope,
+            "retryable": self.retryable,
+            "observedAt": self.observed_at,
+        }
+        if self.host_id is not None:
+            result["hostId"] = str(self.host_id)
+        if self.provider is not None:
+            result["provider"] = self.provider
+        if self.session_key is not None:
+            result["sessionKey"] = str(self.session_key)
+        if self.details is not None:
+            result["details"] = self.details
+        return result
+
+
+@dataclass(frozen=True, slots=True)
+class ErrorEnvelope:
+    error: ErrorRecord
+
+    @classmethod
+    def from_dict(cls, value: object) -> Self:
+        table = _object(value, "envelope")
+        _versions(table)
+        return cls(ErrorRecord.from_dict(_required(table, "error", "envelope")))
+
+    @classmethod
+    def from_json(cls, raw: str | bytes | bytearray) -> Self:
+        return cls.from_dict(_decode(raw))
+
+    def _raw_dict(self) -> dict[str, JsonValue]:
+        return _envelope({"error": self.error.to_dict()})
+
+    def to_dict(self) -> dict[str, JsonValue]:
+        normalized = type(self).from_dict(self._raw_dict())
+        return normalized._raw_dict()
+
+    def to_json(self) -> str:
+        return _dump(self.to_dict())
+
+
+@dataclass(frozen=True, slots=True)
+class PresentationPlan:
+    kind: PresentationPlanKind
+    host_id: HostId
+    surface_id: SurfaceId | None = None
+    workspace_id: str | None = None
+    tmux_target: str | None = None
+    tmux_client: str | None = None
+    desktop_token: str | None = None
+    lease_expires_at: int | None = None
+    error: ErrorRecord | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.host_id, HostId):
+            object.__setattr__(self, "host_id", HostId(self.host_id))
+        if self.surface_id is not None and not isinstance(self.surface_id, SurfaceId):
+            object.__setattr__(self, "surface_id", SurfaceId(self.surface_id))
+        try:
+            kind = (
+                self.kind
+                if isinstance(self.kind, PresentationPlanKind)
+                else PresentationPlanKind(self.kind)
+            )
+        except ValueError as exc:
+            raise ProtocolError(
+                f"unsupported presentation plan kind: {self.kind}"
+            ) from exc
+        object.__setattr__(self, "kind", kind)
+        for field_name, maximum in (
+            ("workspace_id", 1024),
+            ("tmux_target", 2048),
+            ("tmux_client", 1024),
+            ("desktop_token", 2048),
+        ):
+            value = getattr(self, field_name)
+            if value is not None:
+                object.__setattr__(
+                    self,
+                    field_name,
+                    _string(value, field_name, maximum=maximum),
+                )
+        if self.lease_expires_at is not None:
+            object.__setattr__(
+                self,
+                "lease_expires_at",
+                _integer(self.lease_expires_at, "lease_expires_at"),
+            )
+        if self.error is not None and not isinstance(self.error, ErrorRecord):
+            raise ProtocolError("error must be an ErrorRecord")
+        if kind is PresentationPlanKind.BLOCKED:
+            if self.error is None:
+                raise ProtocolError("blocked plan requires an error")
+            if any(
+                value is not None
+                for value in (
+                    self.surface_id,
+                    self.workspace_id,
+                    self.tmux_target,
+                    self.tmux_client,
+                    self.desktop_token,
+                    self.lease_expires_at,
+                )
+            ):
+                raise ProtocolError("blocked plan cannot contain surface locators")
+            return
+        if self.error is not None:
+            raise ProtocolError("non-blocked plan cannot contain an error")
+        if self.surface_id is None:
+            raise ProtocolError("executable plan requires surface_id")
+        if kind is PresentationPlanKind.FOCUS:
+            if self.desktop_token is None:
+                raise ProtocolError("focus plan requires desktop_token")
+            if any((self.tmux_target, self.tmux_client, self.lease_expires_at)):
+                raise ProtocolError("focus plan contains non-applicable fields")
+        elif kind is PresentationPlanKind.SWITCH:
+            if self.tmux_target is None or self.tmux_client is None:
+                raise ProtocolError("switch plan requires tmux_target and tmux_client")
+        elif kind is PresentationPlanKind.ATTACH:
+            if self.tmux_target is None:
+                raise ProtocolError("attach plan requires tmux_target")
+            if self.tmux_client is not None:
+                raise ProtocolError("attach plan contains non-applicable fields")
+
+    @classmethod
+    def from_dict(cls, value: object, path: str = "plan") -> Self:
+        table = _object(value, path)
+        try:
+            kind = PresentationPlanKind(
+                _string(_required(table, "kind", path), f"{path}.kind")
+            )
+        except ValueError as exc:
+            raise ProtocolError(f"{path}.kind is not supported") from exc
+        host_id = _uuid(_required(table, "hostId", path), f"{path}.hostId", HostId)
+        return cls(
+            kind=kind,
+            host_id=host_id,
+            surface_id=(
+                _uuid(table["surfaceId"], f"{path}.surfaceId", SurfaceId)
+                if table.get("surfaceId") is not None
+                else None
+            ),
+            workspace_id=_string(
+                table.get("workspaceId"),
+                f"{path}.workspaceId",
+                optional=True,
+                maximum=1024,
+            ),
+            tmux_target=_string(
+                table.get("tmuxTarget"),
+                f"{path}.tmuxTarget",
+                optional=True,
+                maximum=2048,
+            ),
+            tmux_client=_string(
+                table.get("tmuxClient"),
+                f"{path}.tmuxClient",
+                optional=True,
+                maximum=1024,
+            ),
+            desktop_token=_string(
+                table.get("desktopToken"),
+                f"{path}.desktopToken",
+                optional=True,
+                maximum=2048,
+            ),
+            lease_expires_at=(
+                _integer(table["leaseExpiresAt"], f"{path}.leaseExpiresAt")
+                if table.get("leaseExpiresAt") is not None
+                else None
+            ),
+            error=(
+                ErrorRecord.from_dict(table["error"], f"{path}.error")
+                if table.get("error") is not None
+                else None
+            ),
+        )
+
+    def to_dict(self) -> dict[str, JsonValue]:
+        result: dict[str, JsonValue] = {"kind": self.kind, "hostId": str(self.host_id)}
+        for key, value in (
+            ("surfaceId", self.surface_id),
+            ("workspaceId", self.workspace_id),
+            ("tmuxTarget", self.tmux_target),
+            ("tmuxClient", self.tmux_client),
+            ("desktopToken", self.desktop_token),
+            ("leaseExpiresAt", self.lease_expires_at),
+        ):
+            if value is not None:
+                result[key] = (
+                    str(value) if isinstance(value, (HostId, SurfaceId)) else value
+                )
+        if self.error is not None:
+            result["error"] = self.error.to_dict()
+        return result
+
+    def validate_for_context(self, context: PresentationContext) -> None:
+        if self.kind is PresentationPlanKind.FOCUS and not context.can_focus_desktop:
+            raise ProtocolError("caller cannot execute a focus plan")
+        if (
+            self.kind is PresentationPlanKind.SWITCH
+            and context.current_tmux_client != self.tmux_client
+            and not context.can_focus_desktop
+        ):
+            raise ProtocolError("caller cannot revalidate the switch target")
+        if self.kind is PresentationPlanKind.ATTACH and not (
+            context.has_current_terminal or context.can_launch_terminal
+        ):
+            raise ProtocolError("caller cannot execute an attach plan")
+
+
+@dataclass(frozen=True, slots=True)
+class PresentationPlanEnvelope:
+    plan: PresentationPlan
+
+    @classmethod
+    def from_dict(cls, value: object) -> Self:
+        table = _object(value, "envelope")
+        _versions(table)
+        return cls(PresentationPlan.from_dict(_required(table, "plan", "envelope")))
+
+    @classmethod
+    def from_json(cls, raw: str | bytes | bytearray) -> Self:
+        return cls.from_dict(_decode(raw))
+
+    def _raw_dict(self) -> dict[str, JsonValue]:
+        return _envelope({"plan": self.plan.to_dict()})
+
+    def to_dict(self) -> dict[str, JsonValue]:
+        normalized = type(self).from_dict(self._raw_dict())
+        return normalized._raw_dict()
+
+    def to_json(self) -> str:
+        return _dump(self.to_dict())
+
+
+@dataclass(frozen=True, slots=True)
+class SnapshotEnvelope:
+    generated_at: int
+    host: HostRecord
+    projects: tuple[dict[str, JsonValue], ...] = ()
+    locations: tuple[dict[str, JsonValue], ...] = ()
+    sessions: tuple[dict[str, JsonValue], ...] = ()
+    runtimes: tuple[dict[str, JsonValue], ...] = ()
+    surfaces: tuple[dict[str, JsonValue], ...] = ()
+    capabilities: tuple[Capability, ...] = ()
+    errors: tuple[ErrorRecord, ...] = ()
+
+    @classmethod
+    def from_dict(cls, value: object) -> Self:
+        table = _object(value, "envelope")
+        _versions(table)
+        host = HostRecord.from_dict(_required(table, "host", "envelope"))
+
+        def record_values(name: str) -> Sequence[Any]:
+            values = _array(_required(table, name, "envelope"), f"envelope.{name}")
+            if len(values) > MAX_SNAPSHOT_RECORDS:
+                raise ProtocolError(f"envelope.{name} contains too many records")
+            return values
+
+        projects = tuple(
+            _project_record(item, f"envelope.projects[{index}]")
+            for index, item in enumerate(record_values("projects"))
+        )
+        locations = tuple(
+            _location_record(
+                item,
+                f"envelope.locations[{index}]",
+                expected_host_id=host.host_id,
+            )
+            for index, item in enumerate(record_values("locations"))
+        )
+        sessions = tuple(
+            _session_record(
+                item,
+                f"envelope.sessions[{index}]",
+                expected_host_id=host.host_id,
+            )
+            for index, item in enumerate(record_values("sessions"))
+        )
+        runtimes = tuple(
+            _runtime_record(
+                item,
+                f"envelope.runtimes[{index}]",
+                expected_host_id=host.host_id,
+            )
+            for index, item in enumerate(record_values("runtimes"))
+        )
+        surfaces = tuple(
+            _surface_record(
+                item,
+                f"envelope.surfaces[{index}]",
+                expected_host_id=host.host_id,
+            )
+            for index, item in enumerate(record_values("surfaces"))
+        )
+        raw_capabilities = _array(
+            _required(table, "capabilities", "envelope"),
+            "envelope.capabilities",
+        )
+        raw_errors = _array(_required(table, "errors", "envelope"), "envelope.errors")
+        capabilities = tuple(
+            Capability.from_dict(item, f"envelope.capabilities[{index}]")
+            for index, item in enumerate(raw_capabilities)
+        )
+        errors = tuple(
+            ErrorRecord.from_dict(item, f"envelope.errors[{index}]")
+            for index, item in enumerate(raw_errors)
+        )
+
+        def unique(records: Sequence[Mapping[str, JsonValue]], key: str) -> set[str]:
+            values = [str(record[key]) for record in records]
+            if len(values) != len(set(values)):
+                raise ProtocolError(f"envelope contains duplicate {key} values")
+            return set(values)
+
+        project_ids = unique(projects, "projectId")
+        unique(locations, "locationId")
+        session_keys = unique(sessions, "sessionKey")
+        surface_ids = unique(surfaces, "surfaceId")
+        if len({capability.provider for capability in capabilities}) != len(
+            capabilities
+        ):
+            raise ProtocolError("envelope contains duplicate provider capabilities")
+
+        locations_by_id = {
+            str(location["locationId"]): location for location in locations
+        }
+        for index, location in enumerate(locations):
+            if str(location["projectId"]) not in project_ids:
+                raise ProtocolError(
+                    f"envelope.locations[{index}].projectId is not in projects"
+                )
+        for index, session in enumerate(sessions):
+            project_id = session.get("projectId")
+            location_id = session.get("locationId")
+            if project_id is not None and str(project_id) not in project_ids:
+                raise ProtocolError(
+                    f"envelope.sessions[{index}].projectId is not in projects"
+                )
+            if location_id is not None:
+                location = locations_by_id.get(str(location_id))
+                if location is None:
+                    raise ProtocolError(
+                        f"envelope.sessions[{index}].locationId is not in locations"
+                    )
+                if project_id is None or location["projectId"] != project_id:
+                    raise ProtocolError(
+                        f"envelope.sessions[{index}] location/project disagree"
+                    )
+            if int(session["lastObservedAt"]) < int(session["firstObservedAt"]):
+                raise ProtocolError(
+                    f"envelope.sessions[{index}] observation timestamps are reversed"
+                )
+            surface_id = session.get("surfaceId")
+            if surface_id is not None and str(surface_id) not in surface_ids:
+                raise ProtocolError(
+                    f"envelope.sessions[{index}].surfaceId is not in surfaces"
+                )
+        for collection_name, records, key_name in (
+            ("runtimes", runtimes, "sessionKey"),
+            ("surfaces", surfaces, "currentSessionKey"),
+        ):
+            for index, record in enumerate(records):
+                session_key = record.get(key_name)
+                if session_key is not None and str(session_key) not in session_keys:
+                    raise ProtocolError(
+                        f"envelope.{collection_name}[{index}].{key_name} "
+                        "is not in sessions"
+                    )
+        sessions_by_key = {str(session["sessionKey"]): session for session in sessions}
+        surfaces_by_id = {str(surface["surfaceId"]): surface for surface in surfaces}
+        for index, session in enumerate(sessions):
+            surface_id = session.get("surfaceId")
+            if surface_id is None:
+                continue
+            surface = surfaces_by_id[str(surface_id)]
+            if surface.get("currentSessionKey") != session["sessionKey"]:
+                raise ProtocolError(
+                    f"envelope.sessions[{index}] surface binding is inconsistent"
+                )
+        for index, surface in enumerate(surfaces):
+            session_key = surface.get("currentSessionKey")
+            if session_key is None:
+                continue
+            session = sessions_by_key[str(session_key)]
+            if session.get("surfaceId") != surface["surfaceId"]:
+                raise ProtocolError(
+                    f"envelope.surfaces[{index}] session binding is inconsistent"
+                )
+        for index, error in enumerate(errors):
+            if error.host_id is not None and error.host_id != host.host_id:
+                raise ProtocolError(
+                    f"envelope.errors[{index}].hostId belongs to another host"
+                )
+            if error.session_key is not None:
+                if error.session_key.host_id != host.host_id:
+                    raise ProtocolError(
+                        f"envelope.errors[{index}].sessionKey belongs to another host"
+                    )
+                if (
+                    error.provider is not None
+                    and error.session_key.provider is not error.provider
+                ):
+                    raise ProtocolError(
+                        f"envelope.errors[{index}] session/provider disagree"
+                    )
+
+        return cls(
+            generated_at=_integer(
+                _required(table, "generatedAt", "envelope"),
+                "envelope.generatedAt",
+            ),
+            host=host,
+            projects=projects,
+            locations=locations,
+            sessions=sessions,
+            runtimes=runtimes,
+            surfaces=surfaces,
+            capabilities=capabilities,
+            errors=errors,
+        )
+
+    @classmethod
+    def from_json(cls, raw: str | bytes | bytearray) -> Self:
+        return cls.from_dict(_decode(raw))
+
+    def _raw_dict(self) -> dict[str, JsonValue]:
+        return _envelope(
+            {
+                "generatedAt": self.generated_at,
+                "host": self.host.to_dict(),
+                "projects": list(self.projects),
+                "locations": list(self.locations),
+                "sessions": list(self.sessions),
+                "runtimes": list(self.runtimes),
+                "surfaces": list(self.surfaces),
+                "capabilities": [item.to_dict() for item in self.capabilities],
+                "errors": [item.to_dict() for item in self.errors],
+            }
+        )
+
+    def to_dict(self) -> dict[str, JsonValue]:
+        normalized = type(self).from_dict(self._raw_dict())
+        return normalized._raw_dict()
+
+    def to_json(self) -> str:
+        return _dump(self.to_dict())

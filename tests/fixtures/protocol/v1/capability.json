@@ -1,0 +1,28 @@
+{
+  "schemaVersion": 1,
+  "protocolVersion": 1,
+  "capability": {
+    "provider": "claude",
+    "available": true,
+    "providerVersion": "2.1.210",
+    "testedContractRange": {
+      "minimum": "2.1.210",
+      "maximum": "2.1.210"
+    },
+    "features": ["hooks", "native_resume"],
+    "schemaFingerprint": null,
+    "degradedReasons": [
+      {
+        "code": "agent_view_disabled",
+        "message": "Agent View supervisor discovery is disabled.",
+        "feature": "agent_view",
+        "retryable": false,
+        "details": {
+          "fallback": "native_resume"
+        }
+      }
+    ],
+    "futureField": "ignored"
+  },
+  "futureEnvelopeField": true
+}
