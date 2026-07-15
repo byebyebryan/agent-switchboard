@@ -1,0 +1,96 @@
+{
+  "providerVersion": "2.1.210 (Claude Code)",
+  "rowCount": 8,
+  "stateStatusCombinations": [
+    "background:blocked:idle",
+    "background:done:None",
+    "background:working:idle",
+    "interactive:None:idle"
+  ],
+  "rowShapes": [
+    {
+      "keys": [
+        "cwd",
+        "id",
+        "kind",
+        "name",
+        "sessionId",
+        "startedAt",
+        "state"
+      ],
+      "kind": "background",
+      "state": "done",
+      "status": null,
+      "hasRuntimeId": true,
+      "hasSessionId": true,
+      "hasPid": false,
+      "hasCwd": true,
+      "hasName": true,
+      "startedAtType": "int"
+    },
+    {
+      "keys": [
+        "cwd",
+        "id",
+        "kind",
+        "name",
+        "pid",
+        "sessionId",
+        "startedAt",
+        "state",
+        "status"
+      ],
+      "kind": "background",
+      "state": "working",
+      "status": "idle",
+      "hasRuntimeId": true,
+      "hasSessionId": true,
+      "hasPid": true,
+      "hasCwd": true,
+      "hasName": true,
+      "startedAtType": "int"
+    },
+    {
+      "keys": [
+        "cwd",
+        "id",
+        "kind",
+        "name",
+        "pid",
+        "sessionId",
+        "startedAt",
+        "state",
+        "status"
+      ],
+      "kind": "background",
+      "state": "blocked",
+      "status": "idle",
+      "hasRuntimeId": true,
+      "hasSessionId": true,
+      "hasPid": true,
+      "hasCwd": true,
+      "hasName": true,
+      "startedAtType": "int"
+    },
+    {
+      "keys": [
+        "cwd",
+        "kind",
+        "name",
+        "pid",
+        "sessionId",
+        "startedAt",
+        "status"
+      ],
+      "kind": "interactive",
+      "state": null,
+      "status": "idle",
+      "hasRuntimeId": false,
+      "hasSessionId": true,
+      "hasPid": true,
+      "hasCwd": true,
+      "hasName": true,
+      "startedAtType": "int"
+    }
+  ]
+}

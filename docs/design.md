@@ -745,14 +745,15 @@ Claude supervisor observations map as follows:
 
 ```text
 working/busy             -> live, working
-blocked on permission    -> live, needs_input, reason=permission
-blocked on question      -> live, needs_input, reason=question
+blocked                  -> live, needs_input, reason=unknown
 done with a live PID     -> live, completed
 done without a live PID  -> stopped, completed, resumable
 known resumable session  -> stopped, unknown activity, resumable
 ```
 
 Hooks cover interactive sessions and provide faster transitions than polling.
+A permission or question hook may enrich a blocked observation with a specific
+reason, but supervisor JSON alone does not expose that distinction.
 
 ### Workspace and opening
 
@@ -785,9 +786,16 @@ surface containing `claude attach` is only a terminal view. Switchboard does
 not create tmux workspaces or windows merely to keep Claude background work
 alive.
 
+On Claude Code 2.1.210, pressing Left from an interactive TUI leaves that
+process as the Agent View manager and creates a separate background runtime
+with its own provider session UUID and short runtime ID. The manager's
+interactive supervisor row is not the background session shown as current and
+must never inherit its binding.
+
 ### In-terminal session switching
 
-Interactive `/resume` switching has a documented hook sequence:
+Interactive `/resume` switching on Claude Code 2.1.210 has the observed hook
+sequence:
 
 1. Claude emits `SessionEnd` for A with the resume/switch reason.
 2. Claude emits `SessionStart` for B.
@@ -796,13 +804,14 @@ Interactive `/resume` switching has a documented hook sequence:
    evidence rather than assuming it stopped.
 5. The registry associates the existing surface with B.
 
-Agent View detach/attach is not assumed to emit that sequence. A
-provider-manager surface has no session binding. Reconciliation trusts a
-Claude surface binding only while supervisor attachment evidence or process
-correlation supports it; otherwise it clears the binding or marks it unknown.
-An unconfirmed old binding is never used to focus an exact session. The TUI and
-DMS continue to show separate rows for provider sessions plus one explicit
-workspace action.
+Agent View detach/attach does not emit that sequence in the tested version. A
+provider-manager surface has no session binding. An exact attachment is
+confirmed while a managed pane's argv contains `claude attach <short-id>` and
+that short ID matches live supervisor evidence. The attach command itself did
+not emit a lifecycle hook. Reconciliation otherwise clears the binding or
+marks it unknown. An unconfirmed old binding is never used to focus an exact
+session. The TUI and DMS continue to show separate rows for provider sessions
+plus one explicit workspace action.
 
 ## Event Ingestion
 
@@ -832,6 +841,11 @@ replace other matching hooks. Installation uses one identifiable user-level
 definition per provider. `doctor` detects duplicate Switchboard definitions,
 stale trusted hashes, a missing absolute executable, and hook latency above the
 configured budget.
+
+Claude Agent View workers spawned from a manager did not inherit a one-off
+`--settings` file in the 2.1.210 spike. User-level hook installation is
+therefore required for background-worker coverage; launch-only additional
+settings are not a supported substitute.
 
 Event writes include an observation timestamp, provider turn/session
 identifier where available, source priority, and an idempotency key derived
@@ -1638,6 +1652,8 @@ Migration should preserve those behaviors while moving ownership in stages.
 
 - Run the focused provider and transport spikes defined in the product
   landscape document.
+- Record results and retained contract fixtures in
+  `docs/phase-0-validation.md` and `spikes/fixtures/`.
 - Capture versioned Codex app-server, Codex hook, Claude supervisor, and Claude
   hook fixtures from the tested local versions.
 - Verify Claude Agent View detach/attach observability and document the exact
@@ -1809,15 +1825,16 @@ work, not an acceptance criterion for the core workflow.
 
 ### Native Claude Agent View switching
 
-Claude's supervisor is authoritative for session activity, but its preview
-Agent View does not document a hook for every manager detach/attach transition.
-Switchboard therefore treats a surface association as confirmed only when a
-fresh hook, supervisor attachment field, or process correlation supports it.
-After an unobservable transition the session list remains correct, but the
-surface may temporarily become `binding_confidence=unknown`. Opening that
-session creates or selects a fresh exact-attach window instead of focusing a
-possibly stale binding. This is an explicit degraded routing case, not a reason
-to parse terminal output or private transcript files.
+Claude's supervisor is authoritative for session activity, but the tested
+Agent View detach/attach transition emitted no corresponding hook. Switchboard
+therefore confirms a background surface only by correlating a managed pane
+running `claude attach <short-id>` with the supervisor row for that short ID.
+A manager pane is always unbound. After any transition that loses this process
+correlation, the session list remains correct but the surface becomes
+`binding_confidence=unknown`. Opening that session creates or selects a fresh
+exact-attach window instead of focusing a possibly stale binding. This is an
+explicit degraded routing case, not a reason to parse terminal output or
+private transcript files.
 
 ### Provider contract evolution
 

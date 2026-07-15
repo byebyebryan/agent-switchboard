@@ -1,0 +1,35 @@
+{
+  "providerVersion": "codex-cli 0.144.4",
+  "scenarios": {
+    "new": {
+      "events": [
+        {"event": "SessionStart", "source": "startup"},
+        {"event": "UserPromptSubmit"},
+        {"event": "PostToolUse", "toolName": "Bash"},
+        {"event": "Stop"}
+      ],
+      "sameSessionAndPane": true,
+      "launchEnvironmentInherited": true
+    },
+    "resume": {
+      "events": [
+        {"event": "SessionStart", "source": "resume"},
+        {"event": "UserPromptSubmit"},
+        {"event": "Stop"}
+      ],
+      "sameProviderSessionAsNew": true,
+      "launchEnvironmentInherited": true
+    },
+    "interactivePermission": {
+      "events": [
+        {"event": "PermissionRequest", "toolName": "Bash"}
+      ],
+      "launchEnvironmentInherited": true
+    },
+    "processExit": {
+      "sessionEndObserved": false,
+      "processExited": true,
+      "threadReadRemainedAvailable": true
+    }
+  }
+}

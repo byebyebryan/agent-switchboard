@@ -1,0 +1,116 @@
+{
+  "providerVersion": "codex-cli 0.144.4",
+  "initialize": {
+    "keys": [
+      "codexHome",
+      "platformFamily",
+      "platformOs",
+      "userAgent"
+    ],
+    "userAgentType": "str",
+    "codexHomeType": "str",
+    "platformFamily": "unix",
+    "platformOs": "linux"
+  },
+  "history": {
+    "nonArchivedInteractiveThreads": 6,
+    "pagesAt100": 1
+  },
+  "latencyMs": {
+    "normal": {
+      "median": 49.42,
+      "min": 45.79,
+      "max": 117.69
+    },
+    "stateDbOnly": {
+      "median": 0.71,
+      "min": 0.69,
+      "max": 0.87
+    }
+  },
+  "pagination": {
+    "firstPageHasNextCursor": true,
+    "firstPageHasBackwardsCursor": true,
+    "secondPageReturned": true
+  },
+  "threadShapes": [
+    {
+      "keys": [
+        "agentNickname",
+        "agentRole",
+        "cliVersion",
+        "createdAt",
+        "cwd",
+        "ephemeral",
+        "extra",
+        "forkedFromId",
+        "gitInfo",
+        "historyMode",
+        "id",
+        "modelProvider",
+        "name",
+        "parentThreadId",
+        "path",
+        "preview",
+        "recencyAt",
+        "sessionId",
+        "source",
+        "status",
+        "threadSource",
+        "turns",
+        "updatedAt"
+      ],
+      "status": {
+        "type": "notLoaded"
+      },
+      "source": "cli",
+      "cliVersion": "0.142.4",
+      "hasName": true,
+      "hasPath": true,
+      "turnCount": 0,
+      "idType": "str",
+      "cwdType": "str"
+    },
+    {
+      "keys": [
+        "agentNickname",
+        "agentRole",
+        "cliVersion",
+        "createdAt",
+        "cwd",
+        "ephemeral",
+        "extra",
+        "forkedFromId",
+        "gitInfo",
+        "historyMode",
+        "id",
+        "modelProvider",
+        "name",
+        "parentThreadId",
+        "path",
+        "preview",
+        "recencyAt",
+        "sessionId",
+        "source",
+        "status",
+        "threadSource",
+        "turns",
+        "updatedAt"
+      ],
+      "status": {
+        "type": "notLoaded"
+      },
+      "source": "cli",
+      "cliVersion": "0.140.0",
+      "hasName": true,
+      "hasPath": true,
+      "turnCount": 0,
+      "idType": "str",
+      "cwdType": "str"
+    }
+  ],
+  "schema": {
+    "name": "codex_app_server_protocol.v2.schemas.json",
+    "sha256": "93b300b8102e48bd1640fe12aec7ed29c215cd882237c70bedd32bf364dacc05"
+  }
+}

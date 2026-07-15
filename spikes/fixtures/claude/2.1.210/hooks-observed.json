@@ -1,0 +1,51 @@
+{
+  "providerVersion": "2.1.210 (Claude Code)",
+  "scenarios": {
+    "newThenExit": [
+      {"event": "SessionStart", "source": "startup"},
+      {"event": "SessionEnd", "reason": "prompt_input_exit"}
+    ],
+    "resumeThenExit": [
+      {"event": "SessionStart", "source": "resume"},
+      {"event": "SessionEnd", "reason": "prompt_input_exit"}
+    ],
+    "inTerminalResume": [
+      {"event": "SessionStart", "source": "resume", "session": "A"},
+      {"event": "SessionEnd", "reason": "resume", "session": "A"},
+      {"event": "SessionStart", "source": "resume", "session": "B"},
+      {"event": "SessionEnd", "reason": "prompt_input_exit", "session": "B"}
+    ],
+    "successfulTurn": [
+      {"event": "SessionStart", "source": "startup"},
+      {"event": "UserPromptSubmit"},
+      {"event": "PostToolUse", "toolName": "Bash"},
+      {"event": "Stop"},
+      {"event": "SessionEnd", "reason": "prompt_input_exit"}
+    ],
+    "permission": [
+      {"event": "UserPromptSubmit"},
+      {"event": "PermissionRequest", "toolName": "Bash"},
+      {"event": "Notification", "notificationType": "permission_prompt"}
+    ],
+    "agentViewDetach": {
+      "additionalHookObserved": false,
+      "managerRemainedInteractive": true,
+      "backgroundRuntimeCreated": true,
+      "managerAndBackgroundSessionIdsDiffered": true
+    },
+    "backgroundSettings": {
+      "additionalSettingsInheritedBySpawnedWorker": false,
+      "userLevelHookInstallationRequired": true
+    },
+    "exactAttach": {
+      "paneArgvIncludedShortRuntimeId": true,
+      "additionalHookObserved": false,
+      "ctrlZClosedAttachWindow": true,
+      "backgroundRuntimeSurvived": true
+    },
+    "agentViewDisabled": {
+      "agentsJsonRejected": true,
+      "nativeResumeWorked": true
+    }
+  }
+}
