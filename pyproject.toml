@@ -1,0 +1,44 @@
+[build-system]
+requires = ["hatchling==1.31.0"]
+build-backend = "hatchling.build"
+
+[project]
+name = "agent-switchboard"
+version = "0.1.0"
+description = "A local session router for coding agents"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = []
+
+[project.scripts]
+agentctl = "agent_switchboard.cli:main"
+
+[tool.hatch.build]
+reproducible = true
+skip-excluded-dirs = true
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/agent_switchboard"]
+
+[tool.hatch.build.targets.sdist]
+only-include = [
+  "src/agent_switchboard",
+  "docs/design.md",
+  "docs/phase-1-validation.md",
+]
+
+[tool.pytest.ini_options]
+addopts = "-ra"
+pythonpath = ["src"]
+testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 88
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
+
+[tool.ruff.lint.per-file-ignores]
+# Phase 0 probes are retained evidence; do not churn them as package style evolves.
+"spikes/*.py" = ["E501", "I001"]

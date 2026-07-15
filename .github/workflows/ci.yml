@@ -1,0 +1,126 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    name: Python ${{ matrix.python-version }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12", "3.13", "3.14"]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+      - name: Install package and verification tools
+        run: python -m pip install --upgrade pip build pytest ruff .
+      - name: Compile Python sources
+        run: python -m compileall -q src tests spikes
+      - name: Check formatting
+        run: ruff format --check .
+      - name: Lint
+        run: ruff check .
+      - name: Test
+        run: pytest
+      - name: Check pull-request whitespace
+        if: ${{ matrix.python-version == '3.12' && github.event_name == 'pull_request' }}
+        run: git diff --check ${{ github.event.pull_request.base.sha }}...HEAD
+      - name: Check pushed-commit whitespace
+        if: ${{ matrix.python-version == '3.12' && github.event_name == 'push' }}
+        run: git diff-tree --check --no-commit-id -r HEAD
+
+  distributions:
+    name: Reproducible distributions and installed CLI
+    needs: quality
+    runs-on: ubuntu-latest
+    env:
+      SOURCE_DATE_EPOCH: "1784073600"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install PEP 517 frontend
+        run: python -m pip install --upgrade pip build
+      - name: Build first isolated artifact set
+        run: python -m build --outdir /tmp/switchboard-build-a
+      - name: Build second isolated artifact set
+        run: python -m build --outdir /tmp/switchboard-build-b
+      - name: Compare and audit artifact contents
+        run: >-
+          python scripts/verify_distributions.py
+          /tmp/switchboard-build-a /tmp/switchboard-build-b
+      - name: Install wheel in a fresh environment
+        run: |
+          python -m venv /tmp/switchboard-wheel-smoke
+          /tmp/switchboard-wheel-smoke/bin/python -m pip install \
+            --no-deps /tmp/switchboard-build-a/*.whl
+          /tmp/switchboard-wheel-smoke/bin/python -m pip check
+      - name: Install source distribution in a fresh environment
+        run: |
+          python -m venv /tmp/switchboard-sdist-smoke
+          /tmp/switchboard-sdist-smoke/bin/python -m pip install \
+            --no-deps /tmp/switchboard-build-a/*.tar.gz
+          /tmp/switchboard-sdist-smoke/bin/python -m pip check
+      - name: Smoke installed packages and migrations
+        working-directory: /tmp
+        run: |
+          for python in \
+            /tmp/switchboard-wheel-smoke/bin/python \
+            /tmp/switchboard-sdist-smoke/bin/python
+          do
+          "$python" -I - <<'PY'
+          from importlib.metadata import version
+          from importlib.resources import files
+          from pathlib import Path
+          from tempfile import TemporaryDirectory
+
+          import agent_switchboard
+          import agent_switchboard.config
+          import agent_switchboard.domain
+          import agent_switchboard.protocol
+          import agent_switchboard.state
+          from agent_switchboard.migrations import CURRENT_SCHEMA_VERSION
+          from agent_switchboard.storage import Registry
+
+          assert version("agent-switchboard") == agent_switchboard.__version__
+          package = files("agent_switchboard")
+          for migration in (
+              "migrations/__init__.py",
+              "migrations/v0001_initial.py",
+              "migrations/v0002_remote_cache.py",
+          ):
+              assert package.joinpath(migration).is_file()
+          with TemporaryDirectory() as directory:
+              with Registry(Path(directory) / "switchboard.db") as registry:
+                  assert int(registry.metadata()["schema_version"]) == CURRENT_SCHEMA_VERSION
+          PY
+          done
+      - name: Smoke installed agentctl entry points
+        working-directory: /tmp
+        run: |
+          for agentctl in \
+            /tmp/switchboard-wheel-smoke/bin/agentctl \
+            /tmp/switchboard-sdist-smoke/bin/agentctl
+          do
+            test "$("$agentctl" --version)" = "agentctl 0.1.0"
+            "$agentctl" --help | \
+              grep -F "Inspect and route provider-native coding-agent sessions."
+          done
+      - uses: actions/upload-artifact@v4
+        with:
+          name: agent-switchboard-distributions
+          path: /tmp/switchboard-build-a/*
+          if-no-files-found: error
