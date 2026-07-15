@@ -1,10 +1,12 @@
 # Agent Switchboard Design
 
-Status: Draft
+Status: Implementation baseline
 
 Last updated: 2026-07-15
 
 Related research: [Open-source product landscape](product-landscape.md)
+
+Implementation evidence: [Phase 0 validation](phase-0-validation.md)
 
 ## Summary
 
@@ -15,16 +17,26 @@ stable projects, reports whether each session is working, needs input, is ready
 for review, is ready for the next prompt, or is parked, and opens each session
 through the provider's native resume or attach mechanism.
 
-The project has a frontend-neutral core. A terminal UI is the first full
-frontend. DankMaterialShell (DMS), niri, shell, and tmux integrations consume
-the same command and JSON interfaces rather than reimplementing discovery or
-state tracking.
+The project has a frontend-neutral core. DankMaterialShell (DMS) is the first
+production consumer and proves the local launch and desktop handoff path. A
+terminal UI follows on the resulting stable API. DMS, niri, shell, tmux, and
+the TUI consume the same command and JSON interfaces rather than reimplementing
+discovery or state tracking.
 
 Agent Switchboard does not replace provider conversation storage or agent
 execution. Codex and Claude Code remain the source of truth for transcripts,
 history, authentication, and execution. Switchboard owns a durable project and
 session index, normalized live status, concise explicit handoffs, attachment
 surfaces, context routing, and action routing.
+
+## Naming
+
+The formal project name and technical namespace are **Agent Switchboard** and
+`agent-switchboard`. Repository, package/distribution, configuration, and state
+identifiers use the technical namespace. User-facing titles and ordinary prose
+use the shorter **Switchboard** name after the project has been introduced.
+The executable name remains a separate packaging decision; the short product
+name does not require a bare `switchboard` package or command.
 
 ## Problem
 
@@ -121,6 +133,9 @@ The pre-implementation design review produced the following binding changes:
   only through versioned fixtures.
 - DMS parity proves the local core before a full TUI or agent-tool layer is
   built.
+- Presentation plans are shaped by caller capabilities: DMS may focus or
+  launch desktop windows, while the TUI may act only on its current terminal or
+  identified tmux client.
 
 ## Design Principles
 
@@ -149,16 +164,20 @@ before the provider starts. Provider-native parked history remains resumable;
 an arbitrary live process started elsewhere is only a best-effort observation.
 
 ```text
-DMS or Switchboard TUI
-          |
-    resolve open action
-          |
-focus Ghostty / attach tmux / create tmux surface
-          |
-  exec native codex or claude command
-          |
-Switchboard exits; native provider TUI owns interaction
+                         prepare open/new action
+                                  |
+                 reserve or reuse exact tmux surface
+                           /              \
+                DMS handoff                TUI handoff
+          focus niri window or       attach/switch the
+          launch Ghostty window      current terminal/client
+                           \              /
+                    native codex or claude TUI
 ```
+
+DMS owns desktop-window discovery, focus, and terminal launch. The TUI owns
+only the terminal or tmux client in which it is currently running. In either
+case, Switchboard leaves the interaction path after the handoff.
 
 ### One logical model, provider-specific actions
 
@@ -859,7 +878,7 @@ are never stored.
 
 ### Storage
 
-The proposed first implementation uses SQLite because hooks can write
+The initial implementation uses SQLite because hooks can write
 concurrently while the TUI or DMS reads, and because atomic updates, indexes,
 and schema migrations are useful without requiring a daemon.
 
@@ -984,6 +1003,13 @@ new exact attachment. It never changes every attached client as a shortcut.
 The core does not assume Ghostty or niri. Desktop-specific focus and launch
 behavior belongs to an integration adapter.
 
+Finding an existing desktop window is therefore not a TUI operation. A TUI has
+no portable identity for other terminal-emulator windows and does not ask
+Ghostty to create one. It either switches its identified current tmux client or
+attaches its current terminal in place. DMS can instead correlate opaque
+surface/workspace tokens with niri windows and launch a new configured terminal
+when no matching window exists.
+
 ### Direct transport
 
 Direct execution is excluded from the first release. Interactive frontends
@@ -998,7 +1024,8 @@ Opening or creating a session is split into atomic preparation and
 desktop/terminal presentation:
 
 ```text
-prepare_launch(LaunchRequest, request_id) -> PresentationPlan
+prepare_launch(LaunchRequest, PresentationContext, request_id)
+  -> PresentationPlan
 ```
 
 `LaunchRequest` selects `open`, `new`, or `manage`. An open request contains a
@@ -1006,6 +1033,25 @@ target session key. A new request contains provider, project, concrete
 location, and an optional source handoff. A manage request selects a supported
 provider workspace action and has no target session. All use the same intent,
 lease, surface, bootstrap, and presentation machinery.
+
+`PresentationContext` describes only what the caller can do with the prepared
+surface:
+
+```text
+PresentationContext
+  has_current_terminal
+  current_tmux_client     optional opaque client ID
+  can_focus_desktop
+  can_launch_terminal
+```
+
+A normal TUI supplies a current terminal and, when running inside tmux, its
+current client ID. It does not advertise desktop focus or terminal launch. DMS
+advertises the desktop capabilities supplied by its niri and configured
+terminal integration and does not claim a current terminal. The context is
+request-scoped, is never persisted as session truth, and does not make a
+caller-supplied tmux client authoritative; action commands revalidate opaque
+client IDs before switching them.
 
 A `PresentationPlan` is one of:
 
@@ -1032,6 +1078,16 @@ only when one client was identified unambiguously. `desktop_token` is generated
 by the core from stable workspace/surface identity but carries no desktop
 window semantics; the configured integration decides how to match it.
 
+The returned kind must be executable by the supplied presentation context. A
+caller without `can_focus_desktop` never receives `focus`. A `switch` targets
+the caller's revalidated `current_tmux_client`, or an unambiguous managed
+desktop client for a caller that can focus its window. A caller without a
+current terminal or `can_launch_terminal` never receives `attach`. When no safe
+handoff is available, preparation returns `blocked` rather than guessing at a
+window or changing an unrelated tmux client. These capability checks shape the
+presentation plan; they do not weaken launch reservation or duplicate-runtime
+prevention.
+
 Preparation performs bounded provider/runtime reconciliation, then opens a
 SQLite `BEGIN IMMEDIATE` transaction. It re-reads the current mapping and
 either returns a healthy existing surface or inserts a leased `LaunchIntent`.
@@ -1042,28 +1098,35 @@ surface and updates the intent. Creation failure marks the intent failed and
 releases the claim. The bootstrap revalidates once more before `exec` so an
 externally started runtime cannot be duplicated during the presentation delay.
 
-`request_id` is unique per host and makes frontend retries idempotent. Reusing
-one request ID with a different normalized request returns `request_conflict`;
-it never mutates the original intent. A read-only resolver may exist for
-previews, but its result is advisory and cannot authorize surface creation.
-Only launch preparation can create or reserve a surface.
+`request_id` is unique per host and makes frontend retries idempotent. It binds
+the normalized `LaunchRequest`, not the request-scoped `PresentationContext`.
+A retry may advertise different presentation capabilities and receive a newly
+shaped plan for the same reserved surface, but it cannot create a second
+intent. Reusing one request ID with a different normalized launch request
+returns `request_conflict`; it never mutates the original intent. A read-only
+resolver may exist for previews, but its result is advisory and cannot
+authorize surface creation. Only launch preparation can create or reserve a
+surface.
 
 The returned plan contains a stable surface ID and structured locator fields.
 It never contains an interpolated shell command or raw provider argv. Provider
 argv remains on the owning host inside the launch intent.
 
-The TUI can attach or switch tmux directly. DMS consumes the same presentation
-plan but delegates niri focus and Ghostty launch behavior to its integration
-code. If no client successfully views the target surface, the waiting launch
-expires without starting the provider. A desktop-focus failure after a
-successful tmux client switch does not undo that switch or kill the provider;
-the frontend reports the focus failure and the session remains routable.
+The TUI can attach or switch tmux directly using its current terminal context.
+DMS consumes the same presentation plan but delegates niri focus and Ghostty
+launch behavior to its integration code. If no client successfully views the
+target surface, the waiting launch expires without starting the provider. A
+desktop-focus failure after a successful tmux client switch does not undo that
+switch or kill the provider; the frontend reports the focus failure and the
+session remains routable.
 
-For a `switch` plan, the integration invokes `select-surface` on the owning host
-before focusing the matching desktop window. That command revalidates that the
-opaque tmux client still belongs to the expected workspace and selects only
-that client. For an `attach` plan, the current or newly launched terminal runs
-`attach-surface`. Neither command accepts a raw tmux target from the frontend.
+For a `switch` plan, the caller invokes `select-surface` on the owning host.
+That command revalidates that the opaque tmux client still belongs to the
+expected workspace and selects only that client. A desktop integration then
+focuses the matching window; a TUI is already operating its current client and
+performs no desktop action. For an `attach` plan, the current or newly launched
+terminal runs `attach-surface`. Neither command accepts a raw tmux target from
+the frontend.
 
 ## Command Interface
 
@@ -1107,6 +1170,11 @@ entry points. `open`, `new`, and `workspace open` combine their prepare
 operation with terminal-local presentation; desktop integrations call the
 corresponding prepare command and perform only the returned focus, switch, or
 attach action.
+Every prepare operation receives the versioned `PresentationContext` described
+above. Combined terminal-local commands may derive it from their process and
+tmux environment; integrations send it as structured request data. The exact
+CLI flag or standard-input encoding remains part of command usability design,
+not the core contract.
 When `new --from` receives a session key, preparation resolves and stores that
 session's latest handoff ID atomically; the launch never retains a floating
 "latest handoff" reference.
@@ -1289,6 +1357,14 @@ The TUI must work as:
 
 Selecting a row transfers the current client to the target surface. The TUI
 does not render or proxy the agent terminal stream.
+
+From a plain terminal, selection closes the picker and attaches that terminal
+to the selected surface in place. From inside tmux, including a popup or a
+dedicated manager session, selection targets only the current tmux client and
+uses window selection or `switch-client` as appropriate. The first TUI does not
+search for existing Ghostty/niri windows, focus a different desktop window, or
+launch a new OS terminal window. Those are DMS integration capabilities, not
+portable terminal behavior.
 
 ## Remote Hosts
 
@@ -1495,6 +1571,14 @@ niri and Ghostty identity use the opaque tmux workspace/surface token supplied
 by the core rather than a provider session name. A Claude desktop window is
 matched to its host workspace; exact tmux window selection remains a transport
 action inside that workspace.
+
+For each open or new action, DMS supplies a presentation context with desktop
+focus and configured-terminal launch capabilities. On `focus`, it resolves the
+opaque desktop token and focuses the matching niri window. On `switch`, it
+invokes `select-surface` for the returned tmux client and then focuses that
+client's window. On `attach`, it launches a new Ghostty window whose command is
+the structured `attach-surface` operation. The core neither enumerates niri
+windows nor launches Ghostty itself.
 
 ## Configuration
 
@@ -1846,14 +1930,22 @@ contract-test coverage; unknown fields alone do not require a release.
 
 ## Resolved Implementation Decisions
 
+### Product naming
+
+The formal project name is Agent Switchboard and the technical namespace is
+`agent-switchboard`. The user-facing product name is Switchboard. Technical
+paths remain namespaced, and executable spelling is decided independently as
+part of distribution design.
+
 ### Implementation language
 
 The initial implementation uses Python 3.12 or newer. It reuses the tested DMS
-discovery, SSH, tmux, and niri logic; the standard library covers SQLite and
-subprocess orchestration; and measured hook/CLI startup remains a Phase 0 gate.
-Release packaging must provide an absolute executable path on Arch and Ubuntu.
-A later rewrite requires measured startup, packaging, or maintenance evidence,
-not preference alone.
+discovery, SSH, tmux, and niri logic, and the standard library covers SQLite
+and subprocess orchestration. Phase 0 measured acceptable hook startup;
+installed CLI startup remains a pre-migration acceptance gate once the command
+exists. Release packaging must provide an absolute executable path on Arch and
+Ubuntu. A later rewrite requires measured startup, packaging, or maintenance
+evidence, not preference alone.
 
 ### Project authority
 
@@ -1876,6 +1968,9 @@ is built on the resulting stable API rather than serving as the first test of
 provider and transport behavior.
 
 ## Remaining Non-blocking Decisions
+
+These choices do not block Phase 1 or the read-only portion of Phase 2. Each
+must be resolved before implementation reaches the phase that owns it.
 
 ### TUI framework
 
@@ -1906,9 +2001,10 @@ Decide whether releases provide packages, standalone archives, or both, and
 whether hook configuration is generated by an explicit install command or
 managed entirely by dotfiles.
 
-## Proposed Decisions for Review
+## Accepted Design Commitments
 
-- The project name is Agent Switchboard.
+The following decisions form the implementation baseline:
+
 - The core and TUI live in this repository.
 - The DMS plugin remains a separate thin integration.
 - Opening a session always ends in the unmodified provider-native terminal UI.
