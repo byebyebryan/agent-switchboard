@@ -2,17 +2,18 @@
 
 Status: Draft
 
-Last updated: 2026-07-14
+Last updated: 2026-07-15
 
 Related research: [Open-source product landscape](product-landscape.md)
 
 ## Summary
 
-Agent Switchboard is a local-first session manager for terminal coding agents.
-It presents Codex and Claude Code conversations through one searchable session
-model, reports whether each session is working, needs input, is ready for the
-next prompt, or is parked, and opens each session through the provider's native
-resume or attach mechanism.
+Agent Switchboard is a local-first, project-aware session and context
+switchboard for terminal coding agents. It presents Codex and Claude Code
+conversations through one searchable session model, groups ongoing work under
+stable projects, reports whether each session is working, needs input, is ready
+for review, is ready for the next prompt, or is parked, and opens each session
+through the provider's native resume or attach mechanism.
 
 The project has a frontend-neutral core. A terminal UI is the first full
 frontend. DankMaterialShell (DMS), niri, shell, and tmux integrations consume
@@ -21,8 +22,9 @@ state tracking.
 
 Agent Switchboard does not replace provider conversation storage or agent
 execution. Codex and Claude Code remain the source of truth for transcripts,
-history, authentication, and execution. Switchboard owns a durable index,
-normalized live status, attachment surfaces, and action routing.
+history, authentication, and execution. Switchboard owns a durable project and
+session index, normalized live status, concise explicit handoffs, attachment
+surfaces, context routing, and action routing.
 
 ## Problem
 
@@ -38,25 +40,39 @@ have different lifecycle models:
 - Neither provider gives a single view across providers, hosts, tmux sessions,
   and desktop windows.
 
-The user should not have to remember which host, terminal window, tmux session,
-provider picker, or provider-specific command owns a conversation. One manager
-should answer:
+The user should not have to remember which host, checkout, terminal window,
+tmux session, provider picker, or provider-specific command owns a
+conversation. One manager should answer:
 
 1. What sessions exist?
 2. Which sessions are active?
 3. What is each active session doing?
 4. Which sessions need attention?
 5. How do I open the exact session I selected?
+6. Which project does this session belong to?
+7. How do I start a focused new session with the right host, directory, and
+   project context?
 
 ## Goals
 
 - List Codex and Claude Code sessions through one model.
 - Keep active and recent parked sessions searchable across configured hosts.
-- Normalize useful status into working, needs input, ready, parked, and
-  unknown/offline states.
+- Group sessions under stable user-defined projects without introducing a task
+  or backlog model.
+- Start a focused new session from project defaults or from an explicit prior
+  handoff.
+- Expose bounded project, session, and memory context to agents through stable
+  tools so semantic work remains inside the selected agent session.
+- Normalize useful status into working, needs input, completed/ready for
+  review, ready, parked, and unknown states while tracking host reachability
+  separately.
 - Open an exact session without forcing the user through another picker when
   its identity is already known.
 - Preserve provider-native history, resume, and background behavior.
+- Preserve the unmodified Codex or Claude Code terminal UI after selection;
+  Switchboard routes to the session and then leaves the interaction path.
+- Serve as the expected entry point for newly launched managed sessions so each
+  runtime receives a stable project and surface identity from startup.
 - Use tmux as the default terminal attachment transport without making tmux a
   session identity or a requirement of the core data model.
 - Support local terminal, SSH, tmux, DMS, and niri workflows through the same
@@ -69,13 +85,42 @@ should answer:
 
 - Reimplement provider transcripts or context management.
 - Parse private transcript formats as the primary history interface.
+- Proxy, capture, re-render, or synchronize the provider conversation stream.
+- Require a persistent wrapper process around Codex or Claude Code.
+- Retrofit fully routable surface identity into every live terminal that was
+  started outside Switchboard.
 - Replace Claude Code Agent View lifecycle controls.
-- Orchestrate multiple agents, assign work, or send prompts automatically.
+- Maintain tasks, backlogs, assignments, milestones, or project plans.
+- Orchestrate multiple agents, assign work, or dispatch prompts automatically.
+- Create branches, worktrees, commits, or merges on behalf of a project.
 - Add another notification system.
 - Embed a terminal emulator in the TUI.
+- Provide a standalone desktop, web, or mobile agent client.
 - Synchronize transcripts or credentials between machines.
 - Provide cloud execution or a web service.
 - Stop, delete, archive, or mutate provider sessions in the first release.
+
+## Review Resolutions
+
+The pre-implementation design review produced the following binding changes:
+
+- A leased `LaunchIntent` exists before every managed provider start and is
+  atomically bound to the provider UUID by hooks or reconciliation.
+- Open/new actions reserve and create waiting surfaces before returning a
+  presentation plan; read-only plans cannot create runtimes.
+- Project UUIDs are configuration-owned and globally stable across hosts, while
+  each host contributes its own configured locations.
+- Host reachability, runtime presence, provider resumability, activity/reason,
+  and terminal attachment remain separate state axes.
+- Claude uses one host tmux workspace with a manager window and exact session
+  attachment windows; unobservable Agent View switches degrade surface binding,
+  not session truth.
+- Handoffs are immutable records, and continuation references the exact handoff
+  used to start the next session.
+- Provider preview/experimental contracts are capability-gated and supported
+  only through versioned fixtures.
+- DMS parity proves the local core before a full TUI or agent-tool layer is
+  built.
 
 ## Design Principles
 
@@ -85,10 +130,61 @@ Codex and Claude Code own conversation content and lifecycle semantics.
 Switchboard stores only enough metadata to identify, classify, and open a
 session.
 
+### Native terminal interaction
+
+Selecting a session ends in the provider's unmodified terminal UI. Switchboard
+may resolve an action, focus Ghostty, attach tmux, or create a tmux surface, but
+it does not remain between the user and Codex or Claude Code. It does not proxy
+standard input/output, render conversation messages, or become authoritative
+for the live conversation stream.
+
+Managed launches execute the provider command directly in the selected surface.
+Any bootstrap helper must replace itself with the provider process rather than
+remaining as a wrapper. Provider-native MCP servers or plugins may expose
+Switchboard tools from inside the normal TUI; they do not replace that TUI.
+
+Switchboard is the expected launch entry point once installed. This is how a
+session receives its project, location, launch intent, and stable surface token
+before the provider starts. Provider-native parked history remains resumable;
+an arbitrary live process started elsewhere is only a best-effort observation.
+
+```text
+DMS or Switchboard TUI
+          |
+    resolve open action
+          |
+focus Ghostty / attach tmux / create tmux surface
+          |
+  exec native codex or claude command
+          |
+Switchboard exits; native provider TUI owns interaction
+```
+
 ### One logical model, provider-specific actions
 
 Frontends see one `AgentSession` model. Provider adapters decide how to
 discover, resume, attach, and reconcile each kind of session.
+
+### Projects are context and launch boundaries
+
+A project groups related sessions and records where that work exists on each
+host. It supplies launch defaults and context sources; it does not own tasks,
+branches, worktrees, plans, or completion criteria. Under the recommended
+workflow, one focused provider session represents one task, but Switchboard
+does not enforce or model that convention.
+
+### Deterministic core, agent-driven semantics
+
+The core owns identity, state, validation, storage, and command routing.
+Agents may propose session names, prepare concise handoffs, and query relevant
+project history through explicit tools. Semantic output is attributable,
+editable, and never required to list or open sessions.
+
+### Context is retrieved on demand
+
+Starting a session does not inject an entire project history. The agent receives
+a project identity and can request stable project sources, active and recent
+session handoffs, and optional memory search after it knows the current task.
 
 ### Session identity is not terminal identity
 
@@ -117,6 +213,26 @@ than silently showing incorrect data.
 **Provider session**
 : A durable Codex thread or Claude Code conversation.
 
+**Project**
+: A stable user-defined grouping for ongoing work, with one or more host-local
+  locations, launch defaults, and context-source declarations.
+
+**Project location**
+: A checkout or working directory for a project on one host. Multiple
+  locations may represent remote clones or local worktrees; Switchboard does
+  not create or synchronize them.
+
+**Session handoff**
+: An optional concise summary and next action explicitly supplied by the user
+  or current agent. Handoffs are immutable, versioned records rather than
+  mutable fields on a session. They are not copied transcripts or inferred task
+  state.
+
+**Launch intent**
+: A durable, short-lived record created before a provider process starts. It
+  carries the selected project, location, action, and surface until a provider
+  session ID exists and can be bound to them.
+
 **Runtime**
 : A live provider process or provider-supervised background job associated with
   a session.
@@ -125,6 +241,11 @@ than silently showing incorrect data.
 : A terminal endpoint through which a user can interact with a runtime. The
   first implementation uses a tmux session/window/pane target.
 
+**Provider workspace**
+: An optional provider-specific tmux workspace that can contain manager and
+  session surfaces. Claude uses one workspace per host so Agent View and exact
+  attachment windows can share one desktop terminal workflow.
+
 **Attachment**
 : The current association between a provider session and a terminal surface.
 
@@ -132,8 +253,8 @@ than silently showing incorrect data.
 : A known durable session with no live provider runtime.
 
 **Registry**
-: Switchboard's durable local index of sessions, runtime observations, surfaces,
-  and last-known remote snapshots.
+: Switchboard's durable local index of projects, sessions, runtime observations,
+  surfaces, handoffs, and last-known remote snapshots.
 
 **Frontend**
 : A user interface or integration that lists sessions and asks the core to
@@ -152,14 +273,14 @@ than silently showing incorrect data.
                                 |
  Hooks -----------------> event ingestion
                                 |
-                         registry + reconciler
+                 project/session registry + reconciler
                                 |
-                    agentctl command / JSON API
+               agentctl command / JSON / agent tools
                   +-------------+-------------+
                   |             |             |
-                 TUI        DMS plugin     shell/tmux
-                                |
-                         niri window adapter
+                 TUI        DMS plugin     agent session
+                  |             |             |
+              shell/tmux  niri adapter   MCP or CLI tools
 ```
 
 The initial implementation is process-based rather than service-based:
@@ -170,10 +291,92 @@ The initial implementation is process-based rather than service-based:
 - Each remote host maintains its own registry. Aggregators fetch a versioned
   snapshot over SSH.
 
-A daemon can be introduced later if measured latency, event fan-out, or remote
-refresh costs justify it. The storage and command contracts must not require one.
+When Switchboard frontends are closed, no host-wide Switchboard controller or
+wrapper remains resident. The provider runtime, its native supervisor where
+applicable, and tmux own the normal long-lived path. Hook handlers, remote
+snapshots, and command actions are short-lived. If explicitly enabled, a stdio
+agent-tool process may live only for the lifetime of the provider session that
+launched it.
+
+An optional indexing daemon can be considered later only if measured latency or
+event fan-out justifies it. Core behavior must remain available without one,
+and such a daemon must never proxy provider input/output or become a relay for
+conversation content.
 
 ## Core Domain Model
+
+### Project
+
+```text
+Project
+  project_id
+  name
+  aliases
+  default_provider
+  default_transport
+  context_sources
+  created_at
+  updated_at
+
+ProjectLocation
+  location_id
+  project_id
+  host_id
+  path
+  display_name
+  repository_identity
+  provider_override
+  transport_override
+  is_default
+  last_observed_at
+```
+
+`project_id` is a globally stable user-owned UUID shared by every host that has
+a location for the project. It is declared in configuration and is never
+derived from a path, hostname, or Git remote. Each host normally declares only
+its own locations; remote snapshots with the same `project_id` merge into one
+logical project. Conflicting names or launch defaults for the same ID produce a
+configuration error instead of silently creating divergent projects.
+
+`location_id` is also a configured UUID so a path can move without changing
+the location identity. Project-level defaults must agree across hosts;
+provider or transport differences that are intentionally host-specific belong
+on the location override. Aliases are unioned after sanitization, while
+incompatible names or global defaults remain visible conflicts.
+
+Project configuration is authoritative for identity, names, locations, launch
+defaults, and context-source declarations. SQLite materializes configured
+projects and retains runtime/session assignments, but it does not become a
+second editable source for those fields. Removing a configured project marks
+its materialized record undeclared; it does not erase historical sessions or
+handoffs. `agentctl project add` performs an atomic structured edit of the
+project catalog, and `--print-config` can emit the equivalent declaration for a
+dotfiles workflow.
+
+Discovery may suggest a project from Git roots, repository remotes, and
+repeated session directories, but it does not silently promote every directory
+into a durable project. `repository_identity` assists matching and diagnostics;
+it is not the project key.
+
+A session observed without a launch intent may be assigned to an existing
+project only when its canonical cwd has one unambiguous configured location:
+
+1. Normalize the configured and observed paths to absolute paths and resolve
+   symlinks where the paths exist.
+2. Select configured locations that contain the cwd on the same host.
+3. Choose the longest matching location path.
+4. If equally specific matches disagree, leave the session unassigned and
+   report the ambiguity.
+
+This permits Claude Agent View dispatches and ordinary provider launches inside
+known repositories to join the right project without manufacturing projects or
+using a Git remote as identity. The assignment records
+`metadata_source=location_match` and remains user-editable.
+
+A project can contain multiple locations on one host, including worktrees. A
+new session chooses a concrete location before launch. Switchboard may warn
+when multiple live sessions share one mutable checkout, but concurrency and
+worktree policy remain the user's and agents' responsibility.
 
 ### Session identity
 
@@ -191,14 +394,75 @@ SessionKey = HostId + ProviderId + ProviderSessionId
 Claude's short background-agent ID is a runtime locator, not a durable session
 identity.
 
+### LaunchIntent
+
+The provider session ID does not exist when a new Codex or Claude session is
+requested. A managed launch therefore starts with this record:
+
+```text
+LaunchIntent
+  launch_id
+  request_id
+  host_id
+  provider
+  action                 new | resume | attach | manage
+  project_id
+  location_id
+  cwd
+  source_handoff_id
+  target_session_key
+  surface_id
+  transport
+  state
+  lease_owner
+  capability_hash
+  created_at
+  expires_at
+  failure_code
+```
+
+`launch_id` is generated by Switchboard and is passed to the bootstrap and
+provider process through `AGENT_SWITCHBOARD_LAUNCH_ID`. For a new conversation,
+`target_session_key` is absent until `SessionStart` supplies the provider UUID.
+The hook atomically creates or updates `AgentSession`, binds it to the launch's
+project and location, updates the surface metadata, and marks the intent
+`bound`.
+
+For resume or attach, the hook-provided provider UUID must match
+`target_session_key`. A mismatch marks the intent failed with
+`provider_identity_mismatch`, leaves both provider records intact, and prevents
+the surface from being presented as a confirmed binding.
+
+The launch states are:
+
+```text
+reserved -> surface_ready -> waiting_for_client -> provider_started -> bound
+    |             |                  |              +-----> manager_ready
+    |             |                  |                    |
+    +-------------+------------------+--------------------+-> failed | expired
+```
+
+`manage` is used for a provider manager such as `claude agents`. It creates a
+`provider_manager` surface with no target session and reaches `manager_ready`
+through process reconciliation rather than a session-binding hook.
+
+Intents use bounded leases. A failed terminal launch, provider startup, or hook
+binding does not leave an indefinite reservation. Expired intents and empty
+surfaces are reclaimed by reconciliation, while a bounded record is retained
+for diagnostics. Provider discovery may bind a started intent after a missed
+hook when the surface, process, and provider ID can be correlated safely.
+
 ### AgentSession
 
 ```text
 AgentSession
   key
+  project_id
+  location_id
   provider
   provider_session_id
   name
+  purpose
   cwd
   host_id
   created_at
@@ -206,17 +470,51 @@ AgentSession
   last_activity_at
   first_observed_at
   last_observed_at
-  presence
+  runtime_presence
+  resumability
   activity
+  activity_reason
   attachment
   runtime_locator
   surface_id
   metadata_source
   state_confidence
+  state_observed_at
+  latest_handoff_id
+  wrapped_at
+  continued_from_handoff_id
+  pinned
 ```
 
 Names and working directories are display metadata. They are not used as keys
-and may change.
+and may change. Project assignment, purpose, handoff references, lineage,
+wrapping, and pinning are optional curation metadata. They do not alter
+provider-native session identity or execution state.
+
+`wrapped_at` means the user or current agent considers the conversation a
+completed handoff. It does not delete provider history. Resuming a wrapped
+session clears the wrapped state while retaining every prior handoff.
+
+### Handoff
+
+```text
+Handoff
+  handoff_id
+  session_key
+  sequence
+  summary
+  next_action
+  source             user | agent | imported
+  source_host_id
+  created_at
+  content_hash
+```
+
+Handoffs are append-only. `latest_handoff_id` is a convenience pointer, not the
+record itself. A continued session references the exact source handoff so later
+updates to the source conversation cannot rewrite the context from which it was
+started. Size limits and control-character filtering apply before storage or
+transport.
 
 ### Runtime locator
 
@@ -244,26 +542,52 @@ Surface
   host_id
   transport
   transport_locator
+  role                  session | provider_manager
   current_session_key
+  binding_confidence
+  launch_id
   created_at
   last_observed_at
   client_attached
 ```
 
-`current_session_key` is mutable. If a Claude terminal switches from session A
-to session B, the surface stays the same while its session association changes.
+`current_session_key` is mutable and nullable. A manager surface has no current
+session. If a Claude terminal switches from session A to B, the surface stays
+the same while its session association changes. A binding learned only from an
+old hook is not sufficient to focus an exact session; opening requires current
+provider attachment evidence, process correlation, or a fresh managed attach.
 
 ## State Model
 
-Status is represented on separate axes so that execution and presentation do
-not become conflated.
+Status is represented on separate axes so host connectivity, provider
+retention, process liveness, attention, and presentation do not become
+conflated.
 
-### Presence
+### Host reachability
+
+- `online`: the owning host answered the current local query.
+- `offline`: the aggregator could not currently query the owning host.
+- `unknown`: no current reachability observation exists.
+
+Reachability belongs to the host snapshot or cache entry, not `AgentSession`.
+An offline cache preserves the session's last-known runtime and activity state
+alongside the snapshot observation time.
+
+### Runtime presence
 
 - `live`: a provider runtime is confirmed alive.
-- `parked`: the session is durable but no runtime is alive.
-- `offline`: the owning host cannot currently be queried.
+- `stopped`: no provider runtime is alive.
 - `unknown`: available evidence is incomplete or contradictory.
+
+### Resumability
+
+- `resumable`: the provider still reports durable history or a tested resume
+  path exists.
+- `missing`: the provider no longer reports a resumable conversation.
+- `unknown`: resumability has not been established.
+
+`parked` is a derived display state for `stopped + resumable`; it is not a
+runtime-presence value.
 
 ### Activity
 
@@ -271,11 +595,14 @@ not become conflated.
 - `needs_input`: the provider is blocked on a permission, question, or explicit
   user decision.
 - `ready`: a live provider is waiting for the next prompt.
+- `completed`: the provider reports finished work that remains available for
+  review, even if it has already stopped the worker process.
 - `unknown`: activity cannot be established.
 
-Activity is meaningful primarily while presence is `live`. The last known
-activity may be retained for diagnostics but does not override `parked` or
-`offline` in the UI.
+`activity_reason` is structured where evidence permits. Initial values are
+`permission`, `question`, `elicitation`, `turn_complete`, `provider_complete`,
+`error`, and `unknown`. Provider adapters may expose a more specific reason
+without changing the primary activity value.
 
 ### Attachment
 
@@ -289,28 +616,41 @@ activity may be retained for diagnostics but does not override `parked` or
 Frontends derive one primary label using this precedence:
 
 ```text
-offline -> parked -> needs input -> working -> ready -> unknown
+offline host
+  -> needs input
+  -> working
+  -> completed / ready for review
+  -> ready
+  -> parked
+  -> unavailable
+  -> unknown
 ```
 
-Attachment is displayed separately. Examples include `working, detached` for a
-Claude background agent and `ready, attached` for Codex waiting in Ghostty.
+The offline label includes snapshot age and does not erase the last-known
+status. `unavailable` means `stopped + missing`. Attachment is displayed
+separately. Examples include `working, detached` for a Claude background agent,
+`completed, detached` for a supervisor-stopped result, and `ready, attached` for
+Codex waiting in Ghostty.
 
 ### Hook-driven transitions
 
 The initial normalized transitions are:
 
 ```text
-SessionStart       -> presence=live, activity=ready
-UserPromptSubmit   -> presence=live, activity=working
-PermissionRequest  -> presence=live, activity=needs_input
-PostToolUse        -> presence=live, activity=working
-Stop               -> presence=live, activity=ready
-SessionEnd         -> provisional presence=parked
+SessionStart       -> runtime_presence=live, activity=ready
+UserPromptSubmit   -> runtime_presence=live, activity=working
+PermissionRequest  -> runtime_presence=live, activity=needs_input,
+                      activity_reason=permission
+PostToolUse        -> runtime_presence=live, activity=working
+Stop               -> runtime_presence=live, activity=ready,
+                      activity_reason=turn_complete
+SessionEnd         -> provisional runtime_presence=stopped
 ```
 
 Provider-native state and liveness reconciliation may override provisional hook
 state. In particular, a Claude session can detach from a terminal while
-remaining live under the supervisor.
+remaining live under the supervisor, and a completed Claude session may remain
+`completed` after its worker process stops.
 
 ## Provider Adapter Contract
 
@@ -331,8 +671,17 @@ capabilities()           -> detected feature/version support
 Commands are represented as argument arrays, never interpolated shell strings.
 The transport layer decides where and how to execute them.
 
-Adapters must tolerate missing providers and version-specific capability gaps.
-The core exposes those gaps to frontends instead of fabricating support.
+Every adapter returns a versioned capability report containing the provider
+version, tested-contract range, discovered features, schema fingerprint where
+available, and structured degraded reasons. Adapters must tolerate missing
+providers and version-specific capability gaps. The core exposes those gaps to
+frontends instead of fabricating support.
+
+The initial fixture baseline is the locally verified Codex `0.144.4` and Claude
+Code `2.1.210`, but these are not permanent pins. Codex app-server schemas are
+generated from each supported CLI version and contract-tested. Claude Agent
+View and supervisor discovery are capability-gated because administrators can
+disable them and their preview interface may change.
 
 ## Codex Provider
 
@@ -351,15 +700,17 @@ process. Live activity comes from hooks and liveness observations.
 ### Status
 
 Codex hooks provide turn-level state. Codex does not currently provide the same
-reliable end-of-session signal as Claude, so a session becomes parked when its
-recorded process is gone and no replacement runtime is found.
+reliable end-of-session signal as Claude, so reconciliation changes
+`runtime_presence` to `stopped` when its recorded process is gone and no
+replacement runtime is found. The session displays as parked only when its
+history remains resumable.
 
 ### Opening
 
 - A live session with an existing tmux surface is focused or attached.
-- A live process outside a managed surface is adopted when it can be located;
-  otherwise the frontend reports that it is active but cannot safely duplicate
-  it.
+- A live process outside a managed surface is attached only when a trustworthy
+  existing tmux locator is available. Otherwise the frontend reports that it is
+  live but unroutable and does not start a duplicate runtime.
 - A parked session creates a managed surface running `codex resume <uuid>`.
 - A new session creates a managed surface running `codex` in the selected
   working directory.
@@ -394,37 +745,64 @@ Claude supervisor observations map as follows:
 
 ```text
 working/busy             -> live, working
-blocked or needs input   -> live, needs_input
-done with a live PID     -> live, ready
-known session, no PID    -> parked
+blocked on permission    -> live, needs_input, reason=permission
+blocked on question      -> live, needs_input, reason=question
+done with a live PID     -> live, completed
+done without a live PID  -> stopped, completed, resumable
+known resumable session  -> stopped, unknown activity, resumable
 ```
 
 Hooks cover interactive sessions and provide faster transitions than polling.
 
-### Opening
+### Workspace and opening
 
-- An already visible interactive session is focused.
+The first release preserves the existing one-workspace-per-host Claude
+workflow. The default tmux layout is:
+
+```text
+claude workspace: as-claude-<host-id-prefix>
+  manager window: claude agents
+  attach windows: claude attach <short-runtime-id>
+  resume windows: claude --resume <provider-session-id>
+```
+
+The workspace is a transport container, not a provider runtime. Agent View and
+background workers remain owned by Claude's supervisor. Exact attachment
+windows are created only when the selected session is not already confirmed in
+a managed surface. They let one Ghostty/tmux workspace contain several exact
+session views without opening a separate desktop terminal for every
+conversation.
+
+- An interactive session is focused only when current supervisor attachment
+  evidence or process correlation confirms its surface.
 - A background session with a short runtime ID uses `claude attach <id>`.
 - A parked known session uses `claude --resume <uuid>`.
 - A new interactive session runs `claude` in the selected working directory.
+- `Open Claude workspace` selects or creates the manager window.
 
 Claude's supervisor is the persistence backend for background sessions. A tmux
-surface containing `claude attach` is only a stable terminal view. Switchboard
-does not create tmux sessions merely to keep Claude background work alive.
+surface containing `claude attach` is only a terminal view. Switchboard does
+not create tmux workspaces or windows merely to keep Claude background work
+alive.
 
 ### In-terminal session switching
 
-When an interactive Claude terminal switches from session A to B:
+Interactive `/resume` switching has a documented hook sequence:
 
 1. Claude emits `SessionEnd` for A with the resume/switch reason.
 2. Claude emits `SessionStart` for B.
 3. The hook inherits the stable Switchboard surface identifier.
-4. The registry removes A's surface association and marks A parked unless the
-   supervisor still reports it live.
+4. The registry removes A's surface association and updates A from supervisor
+   evidence rather than assuming it stopped.
 5. The registry associates the existing surface with B.
 
-The TUI and DMS continue to show separate rows for A and B. Only the attachment
-moves.
+Agent View detach/attach is not assumed to emit that sequence. A
+provider-manager surface has no session binding. Reconciliation trusts a
+Claude surface binding only while supervisor attachment evidence or process
+correlation supports it; otherwise it clears the binding or marks it unknown.
+An unconfirmed old binding is never used to focus an exact session. The TUI and
+DMS continue to show separate rows for provider sessions plus one explicit
+workspace action.
 
 ## Event Ingestion
 
@@ -438,19 +816,30 @@ The provider event JSON is read from standard input. The handler:
 
 1. Validates the provider and event schema.
 2. Extracts only identity, lifecycle, cwd, and timing fields.
-3. Reads `AGENT_SWITCHBOARD_SURFACE_ID` and tmux environment metadata when
-   present.
-4. Applies the normalized transition in one database transaction.
-5. Exits without network access or provider queries.
+3. Reads `AGENT_SWITCHBOARD_LAUNCH_ID`,
+   `AGENT_SWITCHBOARD_SURFACE_ID`, and tmux environment metadata when present.
+4. Applies the normalized transition and launch binding in one database
+   transaction.
+5. Exits without network access or provider queries and writes no stdout that
+   could be injected into provider context.
 
 Hooks must not delay the agent loop. They never contact remote hosts, launch a
 frontend, or wait for tmux. Provider-specific hook trust and enablement remain
 visible through `agentctl doctor`.
 
-Event writes include an observation timestamp and a source priority. Older
-events cannot overwrite newer authoritative observations. A bounded event log
-may be retained for diagnostics, but prompts and transcript content are never
-stored.
+Switchboard hooks coexist with provider plugins such as claude-mem and do not
+replace other matching hooks. Installation uses one identifiable user-level
+definition per provider. `doctor` detects duplicate Switchboard definitions,
+stale trusted hashes, a missing absolute executable, and hook latency above the
+configured budget.
+
+Event writes include an observation timestamp, provider turn/session
+identifier where available, source priority, and an idempotency key derived
+from the normalized event fields. Older or duplicate events cannot overwrite
+newer authoritative observations. Event-kind precedence resolves the small
+window where hook processes from one turn complete out of order. A bounded
+event log may be retained for diagnostics, but prompts and transcript content
+are never stored.
 
 ## Registry and Reconciliation
 
@@ -467,16 +856,22 @@ ${XDG_STATE_HOME:-~/.local/state}/agent-switchboard/switchboard.db
 The database contains:
 
 - hosts and their stable IDs
+- materialized configured projects, project locations, and launch/context
+  preferences
 - provider sessions and display metadata
-- last normalized presence/activity/attachment state
+- launch intents, leases, and bounded launch diagnostics
+- explicit session purposes, immutable handoffs, wrapping, pinning, and lineage
+- last normalized runtime/resumability/activity/attachment state
 - runtime observations
 - surfaces and their current session association
 - bounded hook event metadata
 - cached snapshots from remote hosts
 - schema and protocol versions
 
-It does not contain prompts, model output, transcript bodies, authentication
-tokens, or copied provider configuration.
+It does not contain prompts, transcript bodies, authentication tokens, copied
+provider configuration, or automatically harvested model output. A concise
+handoff explicitly submitted through the session tools is permitted and is
+identified by its source.
 
 SQLite runs in WAL mode with a bounded busy timeout. Hook writes are short
 transactions. Schema migrations are explicit and backward compatibility is
@@ -490,8 +885,9 @@ Reconciliation repairs the materialized registry from current evidence:
 2. Inspect known process and tmux locators.
 3. Mark dead runtimes and release stale surface associations.
 4. Merge newly discovered provider sessions.
-5. Preserve parked registry records that remain resumable.
-6. Record capability or provider errors without deleting known sessions.
+5. Bind recoverable launch intents and expire abandoned leases/surfaces.
+6. Preserve stopped registry records that remain resumable.
+7. Record capability or provider errors without deleting known sessions.
 
 Local reconciliation can run on TUI startup, on explicit refresh, and at a
 bounded interval while a frontend is open. Remote reconciliation runs on the
@@ -504,11 +900,14 @@ remote host, not over a shared database.
 tmux is the default first transport. It provides a consistent way for a TUI,
 plain shell, SSH client, or desktop terminal to reach a session.
 
-A managed surface uses an opaque stable name rather than user-controlled
-session text:
+A managed Codex surface uses an opaque stable tmux session name rather than
+user-controlled session text. Claude surfaces are windows inside one opaque
+host workspace:
 
 ```text
-tmux session: as-<surface-id-prefix>
+Codex tmux session:    as-<surface-id-prefix>
+Claude tmux workspace: as-claude-<host-id-prefix>
+Claude window:         as-<surface-id-prefix>
 ```
 
 Switchboard stores metadata as tmux user options at the narrowest available
@@ -518,15 +917,38 @@ scope:
 @agent_switchboard_surface_id
 @agent_switchboard_session_key
 @agent_switchboard_provider
+@agent_switchboard_launch_id
+@agent_switchboard_surface_role
 ```
 
-The full locator includes tmux session, window, and pane IDs. Managed launches
-start with one agent process, but discovery must tolerate user-created windows,
-panes, and layouts.
+Before a new provider UUID exists, the surface carries `launch_id` instead of a
+session key. The binding hook replaces that provisional metadata atomically.
+The full locator includes tmux session, window, and pane IDs. Discovery must
+tolerate user-created windows, panes, and layouts.
 
-The default policy is at most one managed surface per logical session. The
-surface identity remains stable if an in-terminal provider action changes the
-conversation associated with it.
+The surface starts a short-lived `agentctl bootstrap <launch-id>` process. The
+bootstrap waits until the target surface has a real viewing client so terminal
+capability and color probes observe the actual terminal. For a one-window Codex
+tmux session, `session_attached > 0` is sufficient. For a Claude workspace, at
+least one attached client must currently select the target window; a client
+viewing another workspace window does not release the bootstrap. The bootstrap
+then performs one final target-session liveness check and replaces itself with
+the adapter's native `codex` or `claude` argv. tmux persists the provider
+process and terminal state; Switchboard does not keep a wrapper alive after
+startup.
+
+If no client attaches within the configured launch timeout, the bootstrap marks
+the intent expired and exits. Reconciliation removes the empty surface. This
+preserves the proven DMS attach-before-provider behavior without creating a
+persistent wrapper.
+
+The default policy is at most one confirmed managed session surface per logical
+session on one host. A Claude manager surface is exempt because it is not bound
+to a provider session. The surface identity remains stable if an observable
+in-terminal provider action changes the conversation associated with it.
+SQLite enforces uniqueness for confirmed managed bindings. An unknown binding
+does not reserve a session, and reconciliation unbinds rather than guesses when
+two observations cannot be ordered safely.
 
 ### Attachment behavior
 
@@ -538,40 +960,96 @@ When opening a tmux surface:
 - From a desktop frontend, focus an existing terminal client when possible;
   otherwise launch a terminal that attaches to the target.
 
+The normal Claude workspace policy expects zero or one managed desktop client.
+With exactly one attached client, the core may switch that client to the target
+window and DMS then focuses the workspace's niri window. With multiple clients,
+Switchboard switches only a client that the integration can identify
+unambiguously; otherwise it leaves existing clients untouched and launches a
+new exact attachment. It never changes every attached client as a shortcut.
+
 The core does not assume Ghostty or niri. Desktop-specific focus and launch
 behavior belongs to an integration adapter.
 
 ### Direct transport
 
-A direct terminal transport is compatible with the model but is not required
-for the first milestone. It would suspend the TUI and run a provider command in
-the current terminal. Direct transport does not give Codex process persistence
-and requires a separate way to identify desktop windows.
+Direct execution is excluded from the first release. Interactive frontends
+require tmux so launch identity, persistence, exact attachment, and duplicate
+prevention have one tested transport contract. A future direct transport would
+need its own durable surface and desktop-window identity rather than weakening
+the tmux invariants.
 
-## Open Resolution
+## Launch Preparation
 
-Opening is split into resolution and presentation:
+Opening or creating a session is split into atomic preparation and
+desktop/terminal presentation:
 
 ```text
-resolve_open(SessionKey) -> OpenPlan
+prepare_launch(LaunchRequest, request_id) -> PresentationPlan
 ```
 
-An `OpenPlan` is one of:
+`LaunchRequest` selects `open`, `new`, or `manage`. An open request contains a
+target session key. A new request contains provider, project, concrete
+location, and an optional source handoff. A manage request selects a supported
+provider workspace action and has no target session. All use the same intent,
+lease, surface, bootstrap, and presentation machinery.
+
+A `PresentationPlan` is one of:
 
 - focus an existing surface
 - attach or switch to an existing tmux target
-- create a surface with a provider attach command
-- create a surface with a provider resume command
+- attach or switch to a newly prepared waiting surface
 - report a blocked action with a concrete reason
 
-The plan contains structured argv and locator fields. It does not contain a
-shell command string.
+```text
+PresentationPlan
+  kind                  focus | switch | attach | blocked
+  host_id
+  surface_id
+  workspace_id
+  tmux_target
+  tmux_client
+  desktop_token
+  lease_expires_at
+  error
+```
 
-The TUI can execute a terminal transport directly. DMS consumes the same plan
-but delegates niri focus and Ghostty launch behavior to its integration code.
+Fields that do not apply to a plan kind are absent. `tmux_client` is returned
+only when one client was identified unambiguously. `desktop_token` is generated
+by the core from stable workspace/surface identity but carries no desktop
+window semantics; the configured integration decides how to match it.
 
-Before creating a surface, the executor revalidates provider liveness and
-existing mappings to avoid opening duplicate interactive clients.
+Preparation performs bounded provider/runtime reconciliation, then opens a
+SQLite `BEGIN IMMEDIATE` transaction. It re-reads the current mapping and
+either returns a healthy existing surface or inserts a leased `LaunchIntent`.
+A partial unique constraint permits only one active or pending launch for a
+target session. Provider-manager launches are similarly unique by host,
+provider, and manager role. After commit, the core creates the waiting tmux
+surface and updates the intent. Creation failure marks the intent failed and
+releases the claim. The bootstrap revalidates once more before `exec` so an
+externally started runtime cannot be duplicated during the presentation delay.
+
+`request_id` is unique per host and makes frontend retries idempotent. Reusing
+one request ID with a different normalized request returns `request_conflict`;
+it never mutates the original intent. A read-only resolver may exist for
+previews, but its result is advisory and cannot authorize surface creation.
+Only launch preparation can create or reserve a surface.
+
+The returned plan contains a stable surface ID and structured locator fields.
+It never contains an interpolated shell command or raw provider argv. Provider
+argv remains on the owning host inside the launch intent.
+
+The TUI can attach or switch tmux directly. DMS consumes the same presentation
+plan but delegates niri focus and Ghostty launch behavior to its integration
+code. If no client successfully views the target surface, the waiting launch
+expires without starting the provider. A desktop-focus failure after a
+successful tmux client switch does not undo that switch or kill the provider;
+the frontend reports the focus failure and the session remains routable.
+
+For a `switch` plan, the integration invokes `select-surface` on the owning host
+before focusing the matching desktop window. That command revalidates that the
+opaque tmux client still belongs to the expected workspace and selects only
+that client. For an `attach` plan, the current or newly launched terminal runs
+`attach-surface`. Neither command accepts a raw tmux target from the frontend.
 
 ## Command Interface
 
@@ -581,15 +1059,43 @@ operations:
 ```text
 agentctl list [filters] [--refresh] [--json]
 agentctl show <session-key> [--json]
+agentctl project list [--json]
+agentctl project show <project-id> [--json]
+agentctl project add --name <name> --location <path> [--id <uuid>]
+                     [--print-config]
+agentctl project context <project-id> [--query <text>] [--json]
 agentctl reconcile [--host <host>]
 agentctl refresh [--host <host>]
-agentctl new --provider <provider> --cwd <path>
-agentctl resolve-open <session-key> --json
-agentctl open <session-key> [--transport tmux|direct]
+agentctl new [--project <project-id>] [--location <location-id>]
+             [--provider <provider>] [--cwd <path>]
+agentctl new --from <handoff-id>|<session-key> [--provider <provider>]
+agentctl prepare-new [--project <project-id>] [--location <location-id>]
+                     [--provider <provider>] [--from <handoff-id>]
+                     --request-id <uuid> --json
+agentctl current [--json]
+agentctl session name [<session-key>|--current] <name>
+agentctl session handoff [<session-key>|--current] --json-stdin
+agentctl session wrap [<session-key>|--current] --json-stdin
+agentctl session pin <session-key> [--off]
+agentctl prepare-open <session-key> --request-id <uuid> --json
+agentctl open <session-key> [--transport tmux]
+agentctl prepare-workspace <provider> --request-id <uuid> --json
+agentctl workspace open <provider>
+agentctl select-surface <surface-id> --client <tmux-client-id>
+agentctl attach-surface <surface-id>
 agentctl event --provider <provider>
 agentctl snapshot [--reconcile none|live|full] --json
 agentctl doctor
 ```
+
+`bootstrap` and launch-intent cleanup are internal commands, not normal user
+entry points. `open`, `new`, and `workspace open` combine their prepare
+operation with terminal-local presentation; desktop integrations call the
+corresponding prepare command and perform only the returned focus, switch, or
+attach action.
+When `new --from` receives a session key, preparation resolves and stores that
+session's latest handoff ID atomically; the launch never retains a floating
+"latest handoff" reference.
 
 `snapshot` is always host-local. It reads the registry on the machine where it
 runs and never recursively queries configured remotes. `refresh` is the
@@ -609,25 +1115,117 @@ Machine output is versioned independently of human-readable output:
 ```json
 {
   "schemaVersion": 1,
+  "protocolVersion": 1,
   "generatedAt": 0,
-  "host": {},
+  "host": {
+    "hostId": "...",
+    "displayName": "..."
+  },
+  "projects": [],
+  "locations": [],
   "sessions": [],
+  "runtimes": [],
+  "surfaces": [],
+  "capabilities": [],
   "errors": []
 }
 ```
 
 Unknown fields must be ignored by clients. Incompatible schema versions produce
-an explicit error.
+an explicit error. Host-local snapshots do not contain `offline` session state;
+the aggregator records reachability, receipt time, and staleness around the
+validated snapshot. Snapshots expose opaque surface IDs and state but not raw
+provider argv or credentials. Project records with the same globally stable ID
+are merged only after conflict validation.
+
+Machine-readable errors use stable codes rather than requiring clients to
+parse prose:
+
+```text
+ErrorRecord
+  code
+  message
+  scope                 host | project | provider | session | launch | surface
+  host_id
+  provider
+  session_key
+  retryable
+  observed_at
+  details
+```
+
+`details` is versioned structured data with no credentials or raw provider
+payload. Human-readable wording may change without breaking frontend routing.
+
+## Project Context and Agent Tools
+
+Project context is a structured, bounded view assembled from sources with
+different authority and freshness:
+
+```text
+stable     configured files such as AGENTS.md, README, and selected docs
+live       active sessions, locations, host availability, and observed Git state
+recent     explicit purposes and handoffs from active or recently wrapped sessions
+historical optional memory search and provider-native history references
+```
+
+There is no single project-level task status or next action. Concurrent
+sessions can have independent purposes and next actions. Context responses
+preserve source, host, observation time, and staleness so an agent can decide
+what is relevant.
+
+The same core operations are exposed to agents through a small MCP server,
+provider plugin, or equivalent structured CLI. The initial read-mostly tool
+surface is:
+
+```text
+project_get_current()
+project_list_sessions(project_id, filters?)
+project_get_context(project_id, query?)
+session_get_handoff(session_key)
+session_list_handoffs(session_key)
+session_search(project_id, query)
+memory_search(project_id, query)
+session_set_name(current_session, name)
+session_set_handoff(current_session, summary, next_action)
+session_wrap(current_session, summary, next_action)
+```
+
+Mutating agent tools are restricted to the calling session's curation fields.
+They cannot launch, stop, attach to, archive, or send prompts to other
+sessions. `memory_search` is an optional adapter; claude-mem is the first
+target, but core session routing remains usable when it is absent.
+
+`session_search` searches Switchboard metadata, purposes, and explicit
+handoffs; it does not search provider transcripts. Historical transcript search
+belongs to `memory_search` or a future documented provider adapter. Every
+context result is bounded and includes source, host, record ID, observation
+time, and staleness.
+
+Managed launches generate a random session-scoped capability whose hash is
+stored with the launch. Optional MCP/plugin tools receive the capability and
+surface ID through their process environment. Agent mutations require the
+capability and the surface's current confirmed binding. This is a same-user
+guardrail and attribution mechanism, not a defense against the local account
+owner. Human `agentctl ... --current` commands may instead resolve through the
+current tmux pane metadata.
+
+An optional provider skill can guide the current agent to prepare a concise
+handoff and invoke `session_wrap`. Switchboard stores the supplied result; it
+does not decide that the underlying work is complete.
 
 ## Terminal UI
 
-The TUI is the first complete frontend and exercises the public core contract.
-It does not import provider implementation details directly.
+The existing DMS picker is the first production consumer during migration. A
+small TUI follows once local discovery and atomic open preparation pass parity
+tests. It exercises the same public core contract and does not import provider
+implementation details directly.
 
 ### Primary view
 
 The default view presents:
 
+- project
 - provider
 - session name
 - normalized status
@@ -640,21 +1238,29 @@ Sessions are sorted by attention and recency:
 
 1. needs input
 2. working
-3. ready
-4. recently parked
-5. offline or unknown
+3. completed / ready for review
+4. ready
+5. recently parked
+6. offline or unknown
 
 All known sessions remain searchable. An empty query may limit parked rows to a
 configurable recent count so active work stays scannable.
 
+The TUI can group sessions by project. A project row exposes its available
+locations and active, parked, pinned, and recently wrapped sessions. An
+unassigned group retains ad-hoc and legacy sessions.
+
 ### Initial actions
 
 - Open the selected session.
-- Start a new Codex or Claude session.
-- Filter by provider, host, state, and working directory.
+- Start a new Codex or Claude session from a project or explicit cwd.
+- Start a new focused session from a prior handoff.
+- Filter by project, provider, host, state, and working directory.
+- Pin, name, hand off, or wrap a session without managing tasks.
 - Refresh/reconcile.
 - Open the provider-native history picker when Switchboard cannot enumerate old
   provider history.
+- Open the host's Claude workspace/Agent View independently of any session row.
 - Inspect an error or degraded capability.
 
 Destructive actions are excluded from the first release.
@@ -733,7 +1339,7 @@ The local aggregator:
 - records the remote observation and receipt timestamps
 - atomically replaces the cached snapshot after successful validation
 - retains the last successful snapshot when a host is unreachable
-- marks retained sessions offline rather than removing them
+- marks the host cache offline without overwriting last-known session state
 - keeps connection targets separate from stable host IDs and display aliases
 
 Frontends render cached rows immediately and refresh stale hosts
@@ -769,25 +1375,59 @@ The owning host always revalidates an action against current provider, runtime,
 and surface state. A cached local snapshot is never sufficient authority to
 create or duplicate a runtime.
 
-A terminal frontend can open a remote session with an interactive command:
+A desktop frontend first prepares the action noninteractively on the owning
+host:
 
 ```text
-ssh -t <target> agentctl open <session-key> --transport tmux
+ssh <target> agentctl prepare-open <session-key> \
+  --request-id <uuid> --json
 ```
 
-The remote command resolves the current action, adopts or creates the correct
-surface, and attaches the SSH terminal. For a Claude background session, that
-surface runs the provider-native attach command. For a parked Codex session, it
-runs the provider-native resume command under tmux.
+The remote command returns a structured error, an existing surface, or a newly
+prepared waiting surface. Only after success does the frontend focus an
+existing local terminal or launch the configured terminal around:
 
-DMS uses the same remote action but first asks its local niri integration to
-focus an existing terminal already attached to the host and surface. If none
-exists, DMS launches the configured terminal around the interactive SSH
-command.
+```text
+ssh -t <target> agentctl attach-surface <surface-id>
+```
+
+`attach-surface` revalidates the surface and any pending lease, then replaces
+itself with an exact tmux attach/current-client switch operation. The provider
+bootstrap starts only after a client views the target surface. A failed
+preparation therefore does not flash a disposable Ghostty window, and
+concurrent local/remote frontends share the same launch reservation.
+
+When preparation returns a `switch` plan for one already attached remote tmux
+client, DMS first runs:
+
+```text
+ssh <target> agentctl select-surface <surface-id> --client <opaque-client-id>
+```
+
+After the owning host confirms the switch, DMS focuses the existing local
+Ghostty/niri window associated with that host workspace. If the client changed
+or disappeared, the command returns a structured stale-plan error and DMS may
+prepare again; it does not guess another client.
 
 New-session and other future mutating actions follow the same rule: send an
 explicit command to the owning host, validate there, and return structured
 errors. They do not mutate cached remote rows locally.
+
+For cross-host `new --from`, the initiating host resolves an exact immutable
+handoff and sends a bounded JSON envelope on SSH standard input to the target.
+The envelope contains the handoff ID, source session/host, project ID, summary,
+next action, timestamp, and content hash. SSH authenticates the caller; the
+target validates size, schema, hash, and that it has a configured location for
+the project before recording an imported handoff and launch intent. No target
+host reaches back to the source and no transcript content is transferred.
+
+```text
+ssh <target> agentctl prepare-new --request-id <uuid> --json-stdin --json
+```
+
+The request envelope also selects the target's configured location. A local
+frontend then presents the returned surface through the same
+`attach-surface` path used by remote open.
 
 ### Why inter-host push is excluded
 
@@ -827,8 +1467,9 @@ The existing DMS Agent Picker remains functional during migration. Its final
 responsibilities are intentionally narrow:
 
 - invoke `agentctl list --json`
+- present project groups and project-aware new-session actions
 - translate sessions into DMS launcher items
-- invoke open-plan resolution
+- invoke atomic open/new preparation
 - focus a matching niri terminal window when one exists
 - launch the configured terminal when no matching client exists
 - expose DMS-specific appearance and refresh settings
@@ -836,9 +1477,10 @@ responsibilities are intentionally narrow:
 Provider discovery, SSH host configuration, status transitions, and tmux
 creation move out of QML and the DMS plugin helper into Agent Switchboard.
 
-niri and Ghostty identity should use a stable surface token supplied by the
-core rather than a provider session name. This lets a terminal switch Claude
-sessions without making the desktop window impossible to find.
+niri and Ghostty identity use the opaque tmux workspace/surface token supplied
+by the core rather than a provider session name. A Claude desktop window is
+matched to its host workspace; exact tmux window selection remains a transport
+action inside that workspace.
 
 ## Configuration
 
@@ -850,14 +1492,50 @@ ${XDG_CONFIG_HOME:-~/.config}/agent-switchboard/config.toml
 
 Expected settings include:
 
-- local display name and stable host identity
+- local display name
 - remote SSH targets and display aliases
+- globally stable project IDs, names, host-local locations, and defaults
+- configured stable context sources
 - provider enablement and executable overrides
 - default transport
 - tmux naming prefix and behavior
 - refresh and staleness intervals
 - recent parked-session limit
 - default working-directory selection behavior
+
+Illustrative host-local configuration:
+
+```toml
+[host]
+display_name = "starship"
+
+[projects."7e5945a5-39e0-48b0-a0c1-a1599b32af93"]
+name = "cubey"
+default_provider = "codex"
+default_transport = "tmux"
+context_sources = ["AGENTS.md", "README.md", "docs"]
+
+[[projects."7e5945a5-39e0-48b0-a0c1-a1599b32af93".locations]]
+location_id = "f246cc26-bb02-4fd7-b00d-d3b834f932ec"
+display_name = "starship checkout"
+path = "/home/bryan/code/cubey"
+is_default = true
+
+[remotes.snap]
+ssh_target = "snap.lan"
+display_name = "snap"
+```
+
+Another host declares the same project UUID and a different location UUID/path.
+The UUIDs, project name, and global defaults are shared; host-local location
+overrides may differ.
+
+The generated host UUID is stored separately under the state directory with
+mode `0600` at `.../agent-switchboard/host-id`; it is not regenerated from the
+hostname and is not normally edited in shared configuration. Hosts
+participating in the same project use the same configured `project_id` while
+declaring their own local paths. Chezmoi may render those host-local location
+blocks from one shared project catalog.
 
 Frontend appearance and keybindings do not belong in core configuration.
 
@@ -879,14 +1557,16 @@ trust requirement.
 
 ### Stale runtime
 
-Process and provider reconciliation marks the session parked and releases stale
-surface mappings. Codex must not remain active indefinitely because it lacks an
-end event.
+Process and provider reconciliation marks runtime presence stopped and releases
+stale surface mappings. The display becomes parked only if the provider session
+remains resumable. Codex must not remain active indefinitely because it lacks
+an end event.
 
 ### Offline remote host
 
-Retain the last snapshot, mark it offline with its observation time, and reject
-open actions before launching a terminal.
+Retain the last snapshot and its session states, mark the host cache offline
+with its observation time, and reject open preparation before launching a
+terminal.
 
 ### Provider schema change
 
@@ -895,17 +1575,48 @@ data is not written into the registry as authoritative state.
 
 ### Duplicate surface
 
-Revalidate immediately before creation. Prefer an existing healthy surface and
-retire stale mappings. Never start a second interactive process merely because
-the frontend cache is old.
+Atomic launch leases and a partial unique constraint select one winner. Prefer
+an existing healthy surface, return the same result for an idempotent retry,
+and retire stale mappings. Never start a second interactive process merely
+because the frontend cache is old.
+
+### Launch never attaches or binds
+
+The waiting bootstrap expires without starting the provider, marks the intent
+failed or expired, and exits. Reconciliation removes the empty surface. If the
+provider started but its hook was missed, bounded provider/process correlation
+may bind the intent; otherwise the runtime remains visible as unbound and is
+never duplicated automatically.
+
+### Project definition conflict
+
+Snapshots containing the same `project_id` with incompatible identity fields
+are retained under their owning hosts but are not merged. Frontends show a
+configuration error with both sources. Session data is never discarded to
+resolve the conflict.
+
+### Missing project location
+
+Retain the project and its known sessions, but reject a new launch on a host
+where no configured location currently exists. Do not guess a checkout path or
+clone a repository automatically.
+
+### Memory provider unavailable
+
+Return project metadata and explicit handoffs without historical memory
+results. Report the optional adapter error without blocking list, open, or new
+session actions.
 
 ## Security and Privacy
 
-- Do not store prompts, transcript bodies, model output, or credentials.
+- Do not store prompts, transcript bodies, credentials, or automatically
+  harvested model output. Explicit concise handoffs are allowed.
 - Treat provider names, cwd values, and remote metadata as untrusted display
   input; remove terminal control characters.
 - Build commands as argv arrays and validate provider IDs, session IDs, tmux
   locators, and SSH targets.
+- Use request IDs and unguessable launch capabilities; store capability hashes,
+  not bearer values.
 - Keep the registry and event files user-readable only.
 - Hooks perform local database writes only and must return quickly.
 - Preserve normal SSH host-key verification and use batch mode for background
@@ -914,6 +1625,8 @@ the frontend cache is old.
   mechanism.
 - Do not silently install hooks, alter provider settings, or enable remote
   access from a frontend action.
+- Use an absolute installed `agentctl` path in generated hook configuration and
+  verify noninteractive local/SSH PATH behavior in `doctor`.
 
 ## Migration from DMS Agent Picker
 
@@ -921,50 +1634,76 @@ The current plugin already provides useful Codex discovery, process-to-tmux
 mapping, remote SSH aggregation, exact session resume, and niri window focus.
 Migration should preserve those behaviors while moving ownership in stages.
 
-### Phase 0: Design and scaffold
+### Phase 0: Contract spikes and scaffold
 
-- Agree on this design.
-- Select the implementation language and TUI framework.
-- Define versioned JSON fixtures and provider interfaces.
-- Establish formatting, tests, CI, license, and release packaging.
+- Run the focused provider and transport spikes defined in the product
+  landscape document.
+- Capture versioned Codex app-server, Codex hook, Claude supervisor, and Claude
+  hook fixtures from the tested local versions.
+- Verify Claude Agent View detach/attach observability and document the exact
+  degraded behavior when no binding signal exists.
+- Verify attach-before-provider startup, concurrent open reservations, and
+  niri/Ghostty focus on an isolated tmux socket.
+- Scaffold the Python package, formatting, tests, CI, license, and release
+  packaging.
 
-### Phase 1: Read-only local core
+### Phase 1: Domain, configuration, and storage
+
+- Add the stable host-ID file and configuration parser.
+- Add globally stable configured projects and host-local locations.
+- Add the SQLite schema and migrations for sessions, immutable handoffs,
+  launch intents, runtime observations, surfaces, events, and remote cache.
+- Define versioned snapshot, capability, error, and presentation-plan fixtures.
+- Implement pure merge, state derivation, launch transition, and validation
+  logic before provider subprocess integration.
+
+### Phase 2: Read-only providers, hooks, and reconciliation
 
 - Port Codex app-server discovery and metadata normalization.
-- Add Claude supervisor discovery.
-- Implement the session model and versioned `list --json` output.
-- Add provider capability detection and fixtures.
-
-### Phase 2: Registry and hooks
-
-- Add SQLite schema and migrations.
-- Add Codex and Claude hook ingestion.
+- Add capability-gated Claude supervisor discovery.
+- Add Codex and Claude hook ingestion with launch binding and idempotency.
 - Implement normalized state transitions and liveness reconciliation.
-- Verify Claude A-to-B in-terminal switching.
-- Retain observed sessions after they become parked.
+- Retain observed sessions after runtimes stop and preserve resumability and
+  completed-attention state independently.
+- Implement versioned local `snapshot` and `list --json` output.
 
-### Phase 3: tmux transport and TUI
+### Phase 3: Atomic launch, tmux, and DMS parity
 
-- Implement stable surfaces and tmux metadata.
-- Implement open-plan resolution and duplicate prevention.
-- Build the searchable status-oriented TUI.
+- Implement launch leases, waiting bootstrap, stable surfaces, and tmux
+  metadata.
+- Implement `prepare-open`, `prepare-new`, `prepare-workspace`,
+  `select-surface`, `attach-surface`, project-aware new-session flows, and final
+  pre-exec duplicate checks.
+- Implement the one-workspace Claude tmux policy and manager/session windows.
+- Change DMS local rows to consume core JSON and presentation plans while
+  preserving niri focus, Unicode behavior, and current failure reporting. Its
+  existing remote helper remains the fallback until Phase 5.
+- Pass local parity tests before removing equivalent local discovery or tmux
+  paths from the existing helper.
+
+### Phase 4: Curation, context, and TUI
+
+- Add current-session resolution, immutable handoffs, wrapping, pinning, and
+  continuation metadata.
+- Build the searchable status-oriented TUI on the already proven core API.
 - Support normal terminal, tmux popup, and switch-client flows.
+- Add the session-scoped agent tool surface and optional memory adapter only
+  after current-session authorization and bounded retrieval contracts pass.
 
-### Phase 4: Remote hosts
+### Phase 5: Remote hosts
 
-- Add stable host identity and snapshot protocol.
+- Add SSH snapshot transport around the existing stable host identity and
+  snapshot protocol.
 - Add host-local snapshot reconciliation modes.
 - Add concurrent pull-based SSH aggregation and atomic caching.
-- Preserve stale snapshots and expose explicit offline state.
-- Add owning-host action revalidation and interactive remote attachment.
+- Preserve stale snapshots and expose host reachability without overwriting
+  last-known session state.
+- Add remote `prepare-open`, `prepare-new`, `select-surface`, `attach-surface`,
+  and bounded handoff envelopes.
+- Move DMS remote rows to the snapshot/presentation protocol only after SSH
+  bounds, stale-cache, Unicode, and error-path parity tests pass; then remove the
+  remaining legacy helper paths.
 - Measure polling with SSH multiplexing before considering `watch --jsonl`.
-
-### Phase 5: DMS migration
-
-- Change DMS to consume Agent Switchboard JSON.
-- Add per-session Claude rows and normalized statuses.
-- Move shared host/provider settings into core configuration.
-- Remove duplicated Python discovery and tmux logic after parity tests pass.
 
 No phase should require a flag day. The existing DMS helper remains available
 until its replacement passes equivalent discovery and open-path tests.
@@ -974,10 +1713,17 @@ until its replacement passes equivalent discovery and open-path tests.
 ### Unit tests
 
 - Session identity and merge rules
+- Global project identity, cross-host conflict detection, location selection,
+  canonical path containment, ambiguous matches, and session assignment
+- Launch-intent transitions, lease expiry, idempotent retries, binding, and
+  recovery after missed hooks
+- Immutable handoff, wrapping, pinning, import, and continuation semantics
+- Agent tool current-session authorization
 - Hook transition ordering and stale-event rejection
-- Presence/activity/attachment derivation
+- Host reachability, runtime, resumability, activity/reason, and attachment
+  derivation
 - Provider schema validation
-- Open-plan resolution
+- Atomic prepare/presentation resolution
 - Command argument escaping and validation
 - Remote snapshot version handling
 - Snapshot reconciliation mode boundaries
@@ -986,71 +1732,156 @@ until its replacement passes equivalent discovery and open-path tests.
 
 ### Provider contract tests
 
-Use captured, redacted fixtures for Codex app-server and Claude JSON output.
-Fixtures must cover missing fields, incompatible versions, completed sessions,
-background work, interactive sessions, and provider errors.
+Use captured, redacted fixtures for Codex app-server/hooks and Claude
+supervisor/hooks. Fixtures must record the provider version and schema
+fingerprint and cover missing fields, incompatible versions, disabled Agent
+View, completed sessions with and without PIDs, background work, interactive
+sessions, and provider errors.
 
 ### tmux integration tests
 
 Use an isolated tmux server/socket to verify:
 
 - surface creation and metadata
+- provider does not start before a real client views the target surface,
+  including a non-selected window in an already attached Claude workspace
+- bootstrap replaces itself with the provider and expires cleanly without a
+  client
 - attach and switch behavior
+- stale or mismatched client IDs cannot switch another tmux client
 - pane discovery in user-modified layouts
-- session rebinding from Claude A to B
+- one Claude workspace with manager and exact-attach windows
+- manager launch reaches `manager_ready` without manufacturing a provider
+  session binding
+- confirmed session rebinding from Claude A to B and clearing an unconfirmed
+  manager binding
 - stale surface cleanup
-- duplicate prevention
+- concurrent prepare calls across processes create exactly one surface
 
 ### End-to-end tests
 
 - Start, park, resume, and reopen a Codex session.
+- Start multiple independent sessions under one project.
+- Bind a provider UUID back to a new launch's project and surface.
+- Start a new session from project defaults and from an exact immutable
+  handoff.
+- Wrap a session through the current-session agent tool and reopen it.
+- Continue operating when the optional memory adapter is unavailable.
 - Start, background, attach, and reopen a Claude session.
-- Switch Claude conversations inside one surface and verify both rows.
+- Open several Claude sessions as windows in one workspace.
+- Switch Claude conversations through `/resume` and Agent View and verify that
+  only confirmed surface bindings are focused.
 - Miss a hook event and repair state through reconciliation.
 - Verify remote hooks never perform network operations.
 - Confirm a remote snapshot never recursively queries other hosts.
-- Disconnect a remote host and retain offline cached rows.
-- Reject a stale remote open plan when owning-host revalidation disagrees.
+- Disconnect a remote host and retain last-known cached session state under an
+  offline host observation.
+- Reject stale remote preparation when owning-host revalidation disagrees,
+  without launching a terminal.
+- Send a bounded handoff envelope from one host to another and retain its source
+  attribution.
 - Open the same session from TUI and DMS without creating duplicate runtimes.
+- List a manually launched live session without a trusted surface as
+  unroutable, and refuse to duplicate it.
 
-## Open Decisions
+## Known Gaps and Accepted Limitations
+
+### Manually launched live sessions
+
+Switchboard is expected to be the entry point for new managed Codex and Claude
+Code sessions. Launching through Switchboard establishes the project, location,
+launch intent, and stable tmux surface before the provider starts.
+
+Sessions launched manually outside Switchboard may still be discovered through
+provider-native queries or hooks. Provider-native parked history remains
+resumable through a new managed surface. A currently live manual session is
+handled on a best-effort basis:
+
+- If a trustworthy tmux pane locator is available, Switchboard may attach it.
+- If no routable surface is known, the session remains visible as live with an
+  unavailable open action and an `unmanaged_surface` reason.
+- Switchboard never starts a second interactive runtime merely to compensate
+  for a missing terminal locator.
+
+The first release does not attempt to retrofit stable identity into arbitrary
+bare Ghostty windows or other terminals. Improving that case is optional future
+work, not an acceptance criterion for the core workflow.
+
+### Native Claude Agent View switching
+
+Claude's supervisor is authoritative for session activity, but its preview
+Agent View does not document a hook for every manager detach/attach transition.
+Switchboard therefore treats a surface association as confirmed only when a
+fresh hook, supervisor attachment field, or process correlation supports it.
+After an unobservable transition the session list remains correct, but the
+surface may temporarily become `binding_confidence=unknown`. Opening that
+session creates or selects a fresh exact-attach window instead of focusing a
+possibly stale binding. This is an explicit degraded routing case, not a reason
+to parse terminal output or private transcript files.
+
+### Provider contract evolution
+
+Codex app-server schemas are version-specific and Claude Agent View is a
+preview capability. Unsupported versions retain registry-known sessions and
+provider-native history actions, but structured discovery/status features may
+be marked unavailable. Shipping a new supported version requires fixture and
+contract-test coverage; unknown fields alone do not require a release.
+
+## Resolved Implementation Decisions
 
 ### Implementation language
 
-The architecture is language-independent. Selection should compare:
+The initial implementation uses Python 3.12 or newer. It reuses the tested DMS
+discovery, SSH, tmux, and niri logic; the standard library covers SQLite and
+subprocess orchestration; and measured hook/CLI startup remains a Phase 0 gate.
+Release packaging must provide an absolute executable path on Arch and Ubuntu.
+A later rewrite requires measured startup, packaging, or maintenance evidence,
+not preference alone.
 
-- reuse of the existing tested Python helper
-- startup latency for frequent hooks
-- TUI ecosystem and testability
-- SQLite support
-- subprocess, PTY, SSH, and tmux handling
-- cross-platform packaging for Arch, Ubuntu, macOS, and WSL
-- ability to ship a self-contained executable
+### Project authority
 
-Python offers the lowest migration cost. Go and Rust offer simpler standalone
-distribution at the cost of a rewrite. This decision should be made before
-Phase 1 implementation.
+Configuration owns globally stable project identity and launch/context fields.
+Each host materializes those declarations and contributes host-local locations.
+SQLite owns observed sessions, assignments, handoffs, launches, runtimes,
+surfaces, and cache. Git identity suggests locations but never creates or merges
+projects automatically.
+
+### Interactive transport
+
+tmux is required for first-release interactive actions. Direct transport is
+deferred until it can satisfy the same surface identity and duplicate
+prevention contracts.
+
+### First production frontend
+
+DMS is migrated immediately after the local launch path reaches parity. The TUI
+is built on the resulting stable API rather than serving as the first test of
+provider and transport behavior.
+
+## Remaining Non-blocking Decisions
 
 ### TUI framework
 
-Select after the language decision. The framework must support asynchronous
+Select before Phase 4. The framework must support asynchronous
 refresh, fuzzy filtering, deterministic model tests, status styling that does
 not rely on color alone, and clean suspension or tmux switching.
-
-### Direct terminal transport
-
-Decide whether direct execution is required in the first release or whether
-tmux is an explicit initial dependency of the interactive frontends.
 
 ### Legacy Claude history
 
 Keep the native history fallback unless Claude publishes a structured listing
 API. A one-time importer based on private files is out of scope by default.
 
-### Surface adoption
+### Agent tool transport
 
-Define how aggressively Switchboard should adopt agent terminals that were
-started outside Switchboard, especially direct Ghostty windows without tmux.
+Choose between a stdio MCP server, provider-specific plugins, and a structured
+CLI wrapper. All transports must enforce current-session-only mutations and
+share the same tested core operations.
+
+### Project context sources
+
+Define how configured files, Git observations, session handoffs, and optional
+memory results are bounded, timestamped, and exposed without automatically
+loading an entire project history into every new session.
 
 ### Distribution and hook installation
 
@@ -1063,14 +1894,37 @@ managed entirely by dotfiles.
 - The project name is Agent Switchboard.
 - The core and TUI live in this repository.
 - The DMS plugin remains a separate thin integration.
+- Opening a session always ends in the unmodified provider-native terminal UI.
+- Switchboard does not proxy terminal I/O and leaves no persistent wrapper
+  around provider processes.
+- No host-wide Switchboard daemon or wrapper remains resident merely because
+  managed sessions are running; optional agent tools are session-scoped.
+- Switchboard is the expected entry point for new managed sessions; arbitrary
+  live terminals launched elsewhere are a documented best-effort gap.
+- Projects are stable context and launch profiles, not task containers.
+- One focused session per task is a recommended convention, not an enforced
+  domain model.
+- The deterministic core exposes bounded tools that let the selected agent
+  perform semantic naming, handoff, and context retrieval.
 - Provider-native storage remains authoritative.
 - SQLite is the initial registry; no daemon is required.
-- The TUI is the first complete frontend.
-- tmux is the default first transport, not a session identity.
+- Python is the initial implementation language.
+- DMS is the first production consumer; the TUI follows the proven core API.
+- tmux is the required first-release interactive transport, not a session
+  identity.
+- Every managed provider start is represented by a leased launch intent before
+  a provider session ID exists.
+- Opening atomically prepares a surface before presentation; read-only plans do
+  not authorize creation.
+- Projects have globally stable configured IDs and merge host-local locations
+  through snapshots.
 - Codex uses tmux for runtime persistence.
-- Claude uses its supervisor for runtime persistence and tmux only as a terminal
-  surface.
+- Claude uses its supervisor for runtime persistence and one host tmux workspace
+  for manager and exact-attachment surfaces.
+- Host reachability, runtime presence, resumability, activity/reason, and
+  attachment are separate state axes.
+- Handoffs are immutable records and continuation references an exact handoff.
 - Hooks provide live status and reconciliation repairs stale state.
 - The first milestone is local-only.
-- Notifications, orchestration, transcript parsing, and destructive management
-  are outside the first release.
+- Task management, notifications, orchestration, transcript parsing, and
+  destructive provider management are outside the first release.
