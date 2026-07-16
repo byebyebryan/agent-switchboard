@@ -76,6 +76,12 @@ class TmuxConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class HooksConfig:
+    timeout_seconds: int = 1
+    latency_budget_ms: int = 100
+
+
+@dataclass(frozen=True, slots=True)
 class ProjectCatalog:
     projects: tuple[Project, ...]
     locations: tuple[ProjectLocation, ...]
@@ -89,6 +95,7 @@ class SwitchboardConfig:
     catalog: ProjectCatalog
     defaults: DefaultsConfig
     tmux: TmuxConfig
+    hooks: HooksConfig
 
     @property
     def projects(self) -> tuple[Project, ...]:
@@ -480,6 +487,25 @@ def _parse_tmux(raw: object) -> TmuxConfig:
     )
 
 
+def _parse_hooks(raw: object) -> HooksConfig:
+    table = _table(raw, "hooks")
+    _known(table, {"timeout_seconds", "latency_budget_ms"}, "hooks")
+    return HooksConfig(
+        timeout_seconds=_integer(
+            table.get("timeout_seconds", 1),
+            "hooks.timeout_seconds",
+            minimum=1,
+            maximum=60,
+        ),
+        latency_budget_ms=_integer(
+            table.get("latency_budget_ms", 100),
+            "hooks.latency_budget_ms",
+            minimum=1,
+            maximum=60_000,
+        ),
+    )
+
+
 def parse_config(data: bytes | str, *, host_id: HostId) -> SwitchboardConfig:
     """Parse and validate a complete host-local TOML document."""
 
@@ -495,7 +521,15 @@ def parse_config(data: bytes | str, *, host_id: HostId) -> SwitchboardConfig:
         raise ConfigError(f"invalid TOML value: {exc}") from exc
     _known(
         document,
-        {"host", "providers", "remotes", "projects", "defaults", "tmux"},
+        {
+            "host",
+            "providers",
+            "remotes",
+            "projects",
+            "defaults",
+            "tmux",
+            "hooks",
+        },
         "configuration",
     )
     if not isinstance(host_id, HostId):
@@ -510,6 +544,7 @@ def parse_config(data: bytes | str, *, host_id: HostId) -> SwitchboardConfig:
         catalog=_parse_projects(document.get("projects", {}), host_id),
         defaults=_parse_defaults(document.get("defaults", {})),
         tmux=_parse_tmux(document.get("tmux", {})),
+        hooks=_parse_hooks(document.get("hooks", {})),
     )
 
 

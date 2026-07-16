@@ -41,8 +41,8 @@ def test_static_pep_621_metadata_and_stdlib_runtime() -> None:
 
 def test_readme_states_phase_and_license() -> None:
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
-    assert "Phase 1 core plus a bounded, read-only Codex" in readme
-    assert "slice of Phase 2" in readme
+    assert "Phase 1 core plus the local Codex portion" in readme
+    assert "Phase 2" in readme
     assert "docs/phase-2-validation.md" in readme
     assert "MIT License" in readme
     assert "SOURCE_DATE_EPOCH=1784073600" in readme
@@ -57,6 +57,8 @@ def test_ci_smokes_wheel_and_source_distribution_installations() -> None:
     assert "/tmp/switchboard-sdist-smoke" in workflow
     for module in (
         "agent_switchboard.cli",
+        "agent_switchboard.doctor",
+        "agent_switchboard.hook_config",
         "agent_switchboard.hooks",
         "agent_switchboard.local",
         "agent_switchboard.local_events",
@@ -71,6 +73,9 @@ def test_ci_smokes_wheel_and_source_distribution_installations() -> None:
     assert "migrations/v0004_runtime_truth_ordering.py" in workflow
     assert 'snapshot --help | grep -F -- "--reconcile {none,live,full}"' in workflow
     assert 'list --help | grep -F -- "--refresh"' in workflow
+    assert 'hooks install --help | grep -F -- "--dry-run"' in workflow
+    assert 'hooks uninstall --help | grep -F -- "--dry-run"' in workflow
+    assert 'doctor --help | grep -F "usage: swbctl doctor"' in workflow
     assert 'snapshot --json > "$smoke_root/snapshot.json"' in workflow
     assert 'list --json > "$smoke_root/list.json"' in workflow
     assert "Path(sys.argv[1]).read_bytes()" in workflow

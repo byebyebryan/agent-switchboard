@@ -1,11 +1,11 @@
-# Phase 2 Validation: Read-only Codex Slice
+# Phase 2 Validation: Local Codex Runtime Truth
 
-Date: 2026-07-15
+Date: 2026-07-16
 
 ## Status and boundary
 
-Phase 2 is partially implemented. The shipped slice is a bounded, read-only
-local Codex path built on the Phase 1 core:
+Phase 2 is partially implemented. The shipped slice now completes the local
+Codex path built on the Phase 1 core:
 
 - production Codex app-server capability probing and paginated session
   discovery;
@@ -14,19 +14,30 @@ local Codex path built on the Phase 1 core:
   project-location assignment;
 - versioned canonical `snapshot` and `list` JSON;
 - retained no-refresh reads, structured provider degradation, and explicit
-  session truncation.
+  session truncation;
+- privacy-safe lifecycle event ingestion with deterministic idempotency,
+  ordering, launch binding, and normalized activity transitions;
+- bounded same-user process and tmux reconciliation with non-destructive
+  degradation on ambiguous or unavailable evidence;
+- explicit user-level hook install/uninstall that preserves unrelated hooks;
+- effective hook, trust, executable, provider-version, source, and isolated
+  latency diagnostics through `swbctl doctor`.
 
-This record does not claim Claude discovery, Codex or Claude hook ingestion,
-runtime/process/tmux liveness, normalized live-state transitions, hook
-installation, launch/tmux actions, DMS integration, remote transport, or a TUI.
+This record does not claim Claude discovery/hooks/liveness, launch/tmux
+actions, DMS selection, remote transport, or a TUI.
 
 ## Command behavior
 
 ```sh
 swbctl snapshot --json
+swbctl snapshot --reconcile live --json
 swbctl snapshot --reconcile full --json
 swbctl list --json
 swbctl list --refresh --json
+swbctl event --provider codex
+swbctl hooks install --provider codex [--dry-run]
+swbctl hooks uninstall --provider codex [--dry-run]
+swbctl doctor
 ```
 
 The implicit config path is
@@ -44,6 +55,37 @@ app-server discovery. A complete scan is reconciled in one database transaction.
 An incomplete or unavailable provider result becomes structured capability/error
 metadata while previously retained sessions remain unchanged. Configuration,
 storage, migration, and protocol failures produce no partial JSON.
+
+Live reconciliation is a separately bounded repair level. It reads same-user
+Linux process evidence and only known/current/default tmux sockets, validates
+process birth identity instead of trusting a reused PID, and never starts,
+stops, resumes, or focuses a runtime. Missing tools, permissions, timeouts,
+malformed output, and ambiguous process/session evidence preserve retained
+state and produce structured degradation.
+
+The event path reads one bounded Codex JSON object from stdin, immediately
+allowlists lifecycle/identity fields, destroys the raw payload, and applies the
+event and any exact launch/surface binding in one immediate transaction. It
+does not invoke Codex, tmux, SSH, or the network and writes no stdout.
+
+Hook management targets only `${CODEX_HOME:-~/.codex}/hooks.json`. Installation
+removes recognized Switchboard duplicates, adds the five canonical handlers,
+and publishes a private file by fsync and atomic replacement. Existing input is
+opened once without following links, read with a hard byte bound, and identified
+by its directory, inode, version, and content digest. Install and uninstall
+serialize cooperating Switchboard writers with a private no-follow `0600`
+advisory lock held from before load and merge through atomic publish and file
+and directory fsync. A stable, no-follow `CODEX_HOME` directory descriptor
+anchors the lock and destination, including when the directory must be created.
+The publisher also revalidates its best-effort source token and refuses external
+edits or path swaps observed before the final replacement; it does not claim
+serialization against arbitrary noncooperating writers in the remaining narrow
+window. Uninstallation removes only recognized Switchboard handlers. Both
+preserve unrelated valid hook sources, support a non-writing dry run, and never
+edit Codex trust state. `doctor` uses app-server `hooks/list`, reports
+effective source warnings/errors and handler trust/enablement/path drift, and
+benchmarks `swbctl event` only inside temporary HOME, `CODEX_HOME`, and XDG
+roots after removing inherited Switchboard and tmux attachment metadata.
 
 Snapshot reads cap deterministic session candidates before Python allocation
 and then select rows using their canonical UTF-8 encoded size. Runtime and
@@ -119,19 +161,18 @@ would make the source archive digest self-referential and stale on every edit.
 
 | Gate | Environment | Recorded result |
 | --- | --- | --- |
-| Read-only Codex slice | Current development environment | 216 focused provider, reconciliation, storage, snapshot, CLI, protocol, config, and live-smoke tests passed |
-| Package/protocol integration | Current development environment | 60 focused tests passed |
-| Full source suite and static checks | Current development environment | 299 tests passed; compileall, Ruff format, Ruff lint, and diff checks passed |
+| Codex hook management and diagnostics | Isolated temporary `CODEX_HOME`, HOME, and XDG roots | 31 focused tests passed, including semantic validation, bounded FIFO/symlink reads, serialized Switchboard writers, best-effort external-edit/path-swap refusal, safe missing-home creation, private lock validation, `hooks/list` environment propagation, trust/path/source diagnostics, dry run, entry-point resolution, attachment stripping, capped diagnostics, and default-budget latency isolation |
+| Provider/config/CLI integration | Current development environment | 162 focused tests passed |
+| Full source suite and static checks | Current development environment | 410 tests passed; compileall, Ruff format, Ruff lint, and diff checks passed |
 | Live production path | `/usr/bin/codex`, expected `0.144.4` contract | Clean capability with `app_server_thread_list` and `schema_fingerprint`; canonical fingerprint `5d8251e1e2f713a3c567c927386f84f2f94692d4721b90d8ff36d0ff92877621`; 4 sessions; 767 ms |
-| Reproducible wheel/source builds | Fixed `SOURCE_DATE_EPOCH=1784073600` | Byte-identical rebuilds passed the verifier; 17 package files, 22 wheel members, and 25 source-distribution members matched the exact allowlists |
-| Installed artifacts | Separate fresh environments | Wheel and source distribution passed `pip check`, expanded import coverage, migration v3/current-registry creation, version and command help, isolated-XDG snapshot/list, and installed `SnapshotEnvelope` parsing |
+| Reproducible wheel/source builds | Fixed `SOURCE_DATE_EPOCH=1784073600` | Byte-identical rebuilds passed the verifier; 23 package files, 28 wheel members, and 31 source-distribution members matched the exact allowlists |
+| Installed artifacts | Separate fresh environments | Wheel and source distribution passed `pip check`, hook/doctor imports and command help, migration v4/current-registry creation, and isolated-XDG snapshot/list smoke tests |
 
 ## Remaining implementation scope
 
 - Claude supervisor discovery and capability-gated fallback behavior.
-- Codex and Claude hooks, idempotent ingestion, process/tmux liveness, and
-  normalized runtime/activity/attachment transitions.
-- Explicit hook installation, coexistence checks, and `doctor` diagnostics.
+- Claude discovery, hooks, process/supervisor liveness, and normalized runtime
+  transitions.
 - Launch preparation, leases, tmux surface actions, and project-aware new or
   resume flows.
 - DMS local migration and niri/Ghostty presentation parity.

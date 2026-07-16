@@ -10,8 +10,8 @@ status metadata, then hands the user back to the unmodified provider UI.
 
 ## Implementation status
 
-The current checkout contains the Phase 1 core plus a bounded, read-only Codex
-slice of Phase 2:
+The current checkout contains the Phase 1 core plus the local Codex portion of
+Phase 2:
 
 - Python package and finalized `swbctl` executable name
 - stable host identity and strict TOML configuration
@@ -22,25 +22,35 @@ slice of Phase 2:
   reconciliation, and canonical local snapshots
 - retained no-refresh reads, structured provider degradation, and explicit
   snapshot-session truncation
+- privacy-safe Codex lifecycle hook ingestion with atomic launch binding and
+  deterministic event ordering
+- bounded `/proc` and tmux reconciliation for normalized live activity,
+  attachment, and parked state
+- explicit, ownership-safe Codex hook installation and effective hook/trust
+  diagnostics through the supported app-server contract
 - unit, migration, concurrency, provider, protocol, and packaging tests
 
-The Phase 2 implementation is deliberately partial. Claude discovery,
-provider hooks and live-state reconciliation, launch/tmux actions, DMS
-migration, remote SSH transport, and the TUI are not implemented. See
+Phase 2 remains partial because Claude discovery, hooks, and liveness are not
+implemented. Launch/tmux actions, DMS selection, remote SSH transport, and the
+TUI also remain later phases. See
 [the design](docs/design.md), the
 [Phase 1 validation record](docs/phase-1-validation.md), and the
 [Phase 2 validation record](docs/phase-2-validation.md) for the exact boundary
 and evidence.
 
-## Local read-only commands
+## Local commands
 
 The implemented command surface emits one versioned snapshot envelope:
 
 ```sh
 swbctl snapshot --json
+swbctl snapshot --reconcile live --json
 swbctl snapshot --reconcile full --json
 swbctl list --json
 swbctl list --refresh --json
+swbctl hooks install --provider codex --dry-run
+swbctl hooks uninstall --provider codex --dry-run
+swbctl doctor
 ```
 
 `snapshot --reconcile none` is the default and is equivalent to the retained
@@ -51,12 +61,32 @@ uses documented defaults without creating that file. Once the registry is
 bootstrapped, no-refresh commands read retained state without parsing config or
 invoking Codex.
 
-`snapshot --reconcile full` and `list --refresh` load configuration,
+`snapshot --reconcile live` repairs retained process and tmux evidence without
+querying Codex history. `snapshot --reconcile full` and `list --refresh` load configuration,
 materialize configured projects, and run the bounded Codex adapter when Codex
 is enabled. Provider absence, timeouts, incompatible results, and incomplete
 pagination return a valid snapshot with structured capability degradation;
 they do not erase retained sessions. Core configuration, storage, migration,
 or protocol failures exit nonzero with no partial JSON.
+
+Codex invokes `swbctl event --provider codex` from lifecycle hooks. That
+internal fast path accepts one bounded JSON object on stdin, discards prompts,
+transcripts, and tool payloads, performs one short local transaction, and emits
+no stdout. It does not query providers, tmux, SSH, or the network.
+
+Hook installation is always explicit. `hooks install` atomically merges five
+identifiable Switchboard handlers into `${CODEX_HOME:-~/.codex}/hooks.json`
+with mode `0600`, preserving unrelated matchers and handlers. Install and
+uninstall serialize with other Switchboard hook writers through a private
+advisory lock; source-token checks also refuse external changes observed before
+the final atomic replacement. `CODEX_HOME` itself is opened through a stable
+directory descriptor without following a final-component symlink. Run with
+`--dry-run` to inspect intent without creating or rewriting anything. Codex
+requires the exact definitions to be reviewed and trusted through `/hooks`;
+Switchboard never edits Codex trust state. `doctor` checks the effective
+`hooks/list` result, executable paths, trust and enablement, source warnings or
+errors, and isolated cold/warm event latency. Its latency probe uses temporary
+HOME, `CODEX_HOME`, and XDG roots and never writes the user's registry.
 
 Snapshot assembly reads a bounded deterministic session candidate set and
 applies an actual UTF-8 byte budget. If sessions are omitted, the registry is

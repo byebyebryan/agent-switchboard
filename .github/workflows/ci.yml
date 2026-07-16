@@ -90,7 +90,9 @@ jobs:
           import agent_switchboard
           import agent_switchboard.cli
           import agent_switchboard.config
+          import agent_switchboard.doctor
           import agent_switchboard.domain
+          import agent_switchboard.hook_config
           import agent_switchboard.hooks
           import agent_switchboard.local
           import agent_switchboard.local_events
@@ -133,6 +135,9 @@ jobs:
               grep -F "Inspect and route provider-native coding-agent sessions."
             "$swbctl" snapshot --help | grep -F -- "--reconcile {none,live,full}"
             "$swbctl" list --help | grep -F -- "--refresh"
+            "$swbctl" hooks install --help | grep -F -- "--dry-run"
+            "$swbctl" hooks uninstall --help | grep -F -- "--dry-run"
+            "$swbctl" doctor --help | grep -F "usage: swbctl doctor"
 
             smoke_root="/tmp/$(basename "$environment")-xdg"
             rm -rf "$smoke_root"

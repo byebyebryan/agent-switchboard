@@ -76,6 +76,39 @@ _INITIALIZE_STRING_FIELDS: Final = (
     "platformFamily",
     "platformOs",
 )
+_HOOK_EVENT_NAMES: Final = frozenset(
+    {
+        "preToolUse",
+        "permissionRequest",
+        "postToolUse",
+        "preCompact",
+        "postCompact",
+        "sessionStart",
+        "userPromptSubmit",
+        "subagentStart",
+        "subagentStop",
+        "stop",
+    }
+)
+_HOOK_HANDLER_TYPES: Final = frozenset({"command", "prompt", "agent"})
+_HOOK_SOURCES: Final = frozenset(
+    {
+        "system",
+        "user",
+        "project",
+        "mdm",
+        "sessionFlags",
+        "plugin",
+        "cloudRequirements",
+        "cloudManagedConfig",
+        "legacyManagedConfigFile",
+        "legacyManagedConfigMdm",
+        "unknown",
+    }
+)
+_HOOK_TRUST_STATUSES: Final = frozenset({"managed", "untrusted", "trusted", "modified"})
+_MAX_HOOKS: Final = 10_000
+_MAX_HOOK_DIAGNOSTICS: Final = 1_000
 
 
 class _InvalidJsonValue(ValueError):
@@ -197,6 +230,38 @@ class CodexDiscoveryResult:
     capability: CodexCapabilityReport
 
 
+@dataclass(frozen=True, slots=True)
+class CodexHookMetadata:
+    event_name: str
+    handler_type: str
+    command: str | None
+    matcher: str | None
+    source: str
+    source_path: Path
+    timeout_seconds: int
+    status_message: str | None
+    enabled: bool
+    trust_status: str
+    is_managed: bool
+    current_hash: str
+
+
+@dataclass(frozen=True, slots=True)
+class CodexHookSourceEntry:
+    cwd: Path
+    hooks: tuple[CodexHookMetadata, ...]
+    warnings: tuple[str, ...]
+    errors: tuple[tuple[Path, str], ...]
+
+
+@dataclass(frozen=True, slots=True)
+class CodexHooksInspection:
+    available: bool
+    provider_version: str | None
+    entries: tuple[CodexHookSourceEntry, ...]
+    issues: tuple[CodexProviderIssue, ...]
+
+
 class _ProviderFailure(Exception):
     def __init__(self, issue: CodexProviderIssue) -> None:
         self.issue = issue
@@ -287,6 +352,7 @@ def _run_bounded_command(
     cleanup_timeout: float,
     max_stdout_bytes: int,
     max_stderr_bytes: int,
+    environment: Mapping[str, str] | None = None,
 ) -> _CommandResult:
     """Run a small provider probe without unbounded communicate buffers."""
 
@@ -297,6 +363,7 @@ def _run_bounded_command(
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             bufsize=0,
+            env=environment,
         )
     except FileNotFoundError as exc:
         raise _failure(
@@ -482,7 +549,10 @@ class _AppServer:
         max_stdout_bytes: int,
         max_stderr_bytes: int,
         max_messages: int,
+        feature: str = "app_server_thread_list",
+        environment: Mapping[str, str] | None = None,
     ) -> None:
+        self.feature = feature
         try:
             self.process = subprocess.Popen(
                 [executable, "app-server", "--stdio"],
@@ -490,6 +560,7 @@ class _AppServer:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 bufsize=0,
+                env=environment,
             )
         except FileNotFoundError as exc:
             raise _failure(
@@ -497,6 +568,7 @@ class _AppServer:
                 "The configured Codex executable was not found.",
                 retryable=False,
                 stage="spawn",
+                feature=self.feature,
             ) from exc
         except OSError as exc:
             raise _failure(
@@ -504,7 +576,7 @@ class _AppServer:
                 "The Codex app-server could not be started.",
                 retryable=True,
                 stage="discovery",
-                feature="app_server_thread_list",
+                feature=self.feature,
             ) from exc
 
         assert self.process.stdin is not None
@@ -544,6 +616,12 @@ class _AppServer:
             _validate_initialize_result(initialize)
             self.notify("initialized", {})
             return self
+        except _ProviderFailure as failure:
+            self.close()
+            tagged = self._retag(failure)
+            if tagged is failure:
+                raise
+            raise tagged from failure
         except BaseException:
             self.close()
             raise
@@ -637,11 +715,46 @@ class _AppServer:
                 with suppress(KeyError):
                     self._selector.unregister(self.process.stdin)
 
+    def _retag(self, failure: _ProviderFailure) -> _ProviderFailure:
+        issue = failure.issue
+        if issue.feature == self.feature:
+            return failure
+        return _ProviderFailure(
+            CodexProviderIssue(
+                issue.code,
+                issue.message,
+                issue.retryable,
+                issue.stage,
+                self.feature,
+            )
+        )
+
     def notify(self, method: str, params: Mapping[str, Any]) -> None:
         deadline = min(self.deadline, time.monotonic() + self.request_timeout)
-        self._send({"method": method, "params": dict(params)}, deadline)
+        try:
+            self._send({"method": method, "params": dict(params)}, deadline)
+        except _ProviderFailure as failure:
+            tagged = self._retag(failure)
+            if tagged is failure:
+                raise
+            raise tagged from failure
 
     def request(
+        self,
+        method: str,
+        params: Mapping[str, Any],
+        *,
+        request_id: int | None = None,
+    ) -> dict[str, Any]:
+        try:
+            return self._request(method, params, request_id=request_id)
+        except _ProviderFailure as failure:
+            tagged = self._retag(failure)
+            if tagged is failure:
+                raise
+            raise tagged from failure
+
+    def _request(
         self,
         method: str,
         params: Mapping[str, Any],
@@ -941,6 +1054,143 @@ def _validate_initialize_result(value: Mapping[str, Any]) -> None:
         )
 
 
+def _hook_failure(message: str) -> _ProviderFailure:
+    return _failure(
+        "invalid_hooks_list",
+        message,
+        retryable=False,
+        stage="normalization",
+        feature="hooks_list",
+    )
+
+
+def _hook_text(
+    value: object,
+    field: str,
+    *,
+    optional: bool = False,
+    maximum: int = 16_384,
+) -> str | None:
+    if optional and value is None:
+        return None
+    if not isinstance(value, str) or len(value) > maximum:
+        raise _hook_failure(f"Codex hooks/list returned an invalid {field} field.")
+    normalized = unicodedata.normalize("NFC", value)
+    if not _valid_unicode_scalar(normalized) or any(
+        unicodedata.category(character) == "Cc" for character in normalized
+    ):
+        raise _hook_failure(f"Codex hooks/list returned an invalid {field} field.")
+    return normalized
+
+
+def _hook_path(value: object, field: str, *, absolute: bool) -> Path:
+    text = _hook_text(value, field, maximum=4096)
+    assert text is not None
+    path = Path(text)
+    if absolute and not path.is_absolute():
+        raise _hook_failure(f"Codex hooks/list returned a non-absolute {field} field.")
+    return path
+
+
+def _normalize_hook_metadata(value: object) -> CodexHookMetadata:
+    if not isinstance(value, dict):
+        raise _hook_failure("Codex hooks/list returned a non-object hook.")
+    event_name = _hook_text(value.get("eventName"), "eventName", maximum=64)
+    handler_type = _hook_text(value.get("handlerType"), "handlerType", maximum=64)
+    source = _hook_text(value.get("source"), "source", maximum=64)
+    trust_status = _hook_text(value.get("trustStatus"), "trustStatus", maximum=64)
+    if event_name not in _HOOK_EVENT_NAMES:
+        raise _hook_failure("Codex hooks/list returned an unknown eventName.")
+    if handler_type not in _HOOK_HANDLER_TYPES:
+        raise _hook_failure("Codex hooks/list returned an unknown handlerType.")
+    if source not in _HOOK_SOURCES:
+        raise _hook_failure("Codex hooks/list returned an unknown source.")
+    if trust_status not in _HOOK_TRUST_STATUSES:
+        raise _hook_failure("Codex hooks/list returned an unknown trustStatus.")
+    timeout = value.get("timeoutSec")
+    if type(timeout) is not int or not 0 <= timeout <= 86_400:
+        raise _hook_failure("Codex hooks/list returned an invalid timeoutSec field.")
+    for field in ("enabled", "isManaged"):
+        if type(value.get(field)) is not bool:
+            raise _hook_failure(f"Codex hooks/list returned an invalid {field} field.")
+    current_hash = _hook_text(value.get("currentHash"), "currentHash", maximum=4096)
+    assert event_name is not None
+    assert handler_type is not None
+    assert source is not None
+    assert trust_status is not None
+    assert current_hash is not None
+    return CodexHookMetadata(
+        event_name=event_name,
+        handler_type=handler_type,
+        command=_hook_text(value.get("command"), "command", optional=True),
+        matcher=_hook_text(
+            value.get("matcher"), "matcher", optional=True, maximum=4096
+        ),
+        source=source,
+        source_path=_hook_path(value.get("sourcePath"), "sourcePath", absolute=True),
+        timeout_seconds=timeout,
+        status_message=_hook_text(
+            value.get("statusMessage"),
+            "statusMessage",
+            optional=True,
+            maximum=4096,
+        ),
+        enabled=value["enabled"],
+        trust_status=trust_status,
+        is_managed=value["isManaged"],
+        current_hash=current_hash,
+    )
+
+
+def _normalize_hooks_list(value: Mapping[str, Any]) -> tuple[CodexHookSourceEntry, ...]:
+    data = value.get("data")
+    if not isinstance(data, list) or len(data) > _MAX_HOOK_DIAGNOSTICS:
+        raise _hook_failure("Codex hooks/list returned an invalid data field.")
+    entries: list[CodexHookSourceEntry] = []
+    hook_count = 0
+    diagnostic_count = 0
+    for raw_entry in data:
+        if not isinstance(raw_entry, dict):
+            raise _hook_failure("Codex hooks/list returned a non-object entry.")
+        raw_hooks = raw_entry.get("hooks")
+        raw_warnings = raw_entry.get("warnings")
+        raw_errors = raw_entry.get("errors")
+        if not all(
+            isinstance(item, list) for item in (raw_hooks, raw_warnings, raw_errors)
+        ):
+            raise _hook_failure("Codex hooks/list returned an invalid entry shape.")
+        hook_count += len(raw_hooks)
+        diagnostic_count += len(raw_warnings) + len(raw_errors)
+        if hook_count > _MAX_HOOKS or diagnostic_count > _MAX_HOOK_DIAGNOSTICS:
+            raise _hook_failure("Codex hooks/list exceeded its bounded result limits.")
+        warnings: list[str] = []
+        for warning in raw_warnings:
+            normalized = _hook_text(warning, "warning", maximum=4096)
+            assert normalized is not None
+            warnings.append(normalized)
+        errors: list[tuple[Path, str]] = []
+        for error in raw_errors:
+            if not isinstance(error, dict):
+                raise _hook_failure("Codex hooks/list returned an invalid error.")
+            message = _hook_text(error.get("message"), "error message", maximum=4096)
+            assert message is not None
+            errors.append(
+                (
+                    _hook_path(error.get("path"), "error path", absolute=False),
+                    message,
+                )
+            )
+        entries.append(
+            CodexHookSourceEntry(
+                cwd=_hook_path(raw_entry.get("cwd"), "cwd", absolute=True),
+                hooks=tuple(_normalize_hook_metadata(hook) for hook in raw_hooks),
+                warnings=tuple(warnings),
+                errors=tuple(errors),
+            )
+        )
+    return tuple(entries)
+
+
 def _normalize_thread(value: object) -> NormalizedCodexSession | None:
     if not isinstance(value, dict):
         raise _failure(
@@ -1081,12 +1331,23 @@ class CodexProvider:
         max_sessions: int = 10_000,
         max_cursor_bytes: int = 16 * 1024,
         max_messages: int = 10_000,
+        environment: Mapping[str, str] | None = None,
     ) -> None:
         if executable is not None and (
             not isinstance(executable, str) or not executable or "\x00" in executable
         ):
             raise ValueError("Codex executable must be a non-empty string")
         self.executable = executable or "codex"
+        if environment is not None and any(
+            not isinstance(key, str)
+            or not isinstance(value, str)
+            or "\x00" in key
+            or "\x00" in value
+            or "=" in key
+            for key, value in environment.items()
+        ):
+            raise ValueError("Codex provider environment must contain safe strings")
+        self.environment = None if environment is None else dict(environment)
         self.request_timeout = request_timeout
         self.total_timeout = total_timeout
         self.command_timeout = command_timeout
@@ -1192,6 +1453,51 @@ class CodexProvider:
         )
         return CodexDiscoveryResult(True, sessions, capability)
 
+    def inspect_hooks(
+        self, *, cwds: tuple[str | Path, ...] = ()
+    ) -> CodexHooksInspection:
+        """Inspect effective Codex hooks through the supported app-server RPC."""
+
+        try:
+            provider_version = self._provider_version()
+        except _ProviderFailure as failure:
+            issue = failure.issue
+            return CodexHooksInspection(
+                False,
+                None,
+                (),
+                (
+                    CodexProviderIssue(
+                        issue.code,
+                        issue.message,
+                        issue.retryable,
+                        issue.stage,
+                        "hooks_list",
+                    ),
+                ),
+            )
+        issues: list[CodexProviderIssue] = []
+        if provider_version != CODEX_TESTED_CONTRACT_MIN:
+            issues.append(
+                _issue(
+                    "untested_provider_version",
+                    "The installed Codex version is outside the tested contract range.",
+                    retryable=False,
+                    stage="version",
+                    feature="hooks_list",
+                )
+            )
+        try:
+            entries = self._inspect_hooks(cwds)
+        except _ProviderFailure as failure:
+            return CodexHooksInspection(
+                False,
+                provider_version,
+                (),
+                (*issues, failure.issue),
+            )
+        return CodexHooksInspection(True, provider_version, entries, tuple(issues))
+
     def _failed_result(
         self,
         provider_version: str | None,
@@ -1218,6 +1524,7 @@ class CodexProvider:
             cleanup_timeout=self.cleanup_timeout,
             max_stdout_bytes=4096,
             max_stderr_bytes=self.max_stderr_bytes,
+            environment=self.environment,
         )
         if result.returncode != 0:
             raise _failure(
@@ -1264,6 +1571,7 @@ class CodexProvider:
                     cleanup_timeout=self.cleanup_timeout,
                     max_stdout_bytes=64 * 1024,
                     max_stderr_bytes=self.max_stderr_bytes,
+                    environment=self.environment,
                 )
             except _ProviderFailure as failure:
                 issue = failure.issue
@@ -1343,6 +1651,7 @@ class CodexProvider:
             max_stdout_bytes=self.max_stdout_bytes,
             max_stderr_bytes=self.max_stderr_bytes,
             max_messages=self.max_messages,
+            environment=self.environment,
         ) as server:
             for _page in range(self.max_pages):
                 params = dict(_THREAD_LIST_BASE_PARAMS)
@@ -1447,3 +1756,30 @@ class CodexProvider:
             stage="discovery",
             feature="app_server_thread_list",
         )
+
+    def _inspect_hooks(
+        self, cwds: tuple[str | Path, ...]
+    ) -> tuple[CodexHookSourceEntry, ...]:
+        if len(cwds) > 32:
+            raise _hook_failure("Codex hooks/list cwd count exceeds its bound.")
+        normalized_cwds: list[str] = []
+        for cwd in cwds:
+            path = Path(cwd)
+            if not path.is_absolute() or len(str(path)) > 4096:
+                raise _hook_failure("Codex hooks/list requires absolute bounded cwds.")
+            normalized_cwds.append(str(path))
+        with _AppServer(
+            self.executable,
+            request_timeout=self.request_timeout,
+            total_timeout=self.total_timeout,
+            cleanup_timeout=self.cleanup_timeout,
+            max_line_bytes=self.max_line_bytes,
+            max_stdout_bytes=self.max_stdout_bytes,
+            max_stderr_bytes=self.max_stderr_bytes,
+            max_messages=self.max_messages,
+            feature="hooks_list",
+            environment=self.environment,
+        ) as server:
+            return _normalize_hooks_list(
+                server.request("hooks/list", {"cwds": normalized_cwds})
+            )

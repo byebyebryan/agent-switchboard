@@ -106,6 +106,8 @@ def app_server(plan: dict[str, Any]) -> int:
             pages = app.get("pages", [[{"result": {"data": []}}]])
             actions = pages[min(page, len(pages) - 1)]
             page += 1
+        elif method == "hooks/list":
+            actions = app.get("hooks", [{"result": {"data": []}}])
         else:
             actions = [
                 {"error": {"code": -32601, "message": "unsupported fake method"}}
@@ -119,7 +121,15 @@ def app_server(plan: dict[str, Any]) -> int:
 
 def main() -> int:
     plan = load_plan()
-    append_log({"event": "invoke", "argv": sys.argv[1:]})
+    append_log(
+        {
+            "event": "invoke",
+            "argv": sys.argv[1:],
+            "environmentMarker": os.environ.get("SWITCHBOARD_TEST_ENV"),
+            "codexHome": os.environ.get("CODEX_HOME"),
+            "xdgStateHome": os.environ.get("XDG_STATE_HOME"),
+        }
+    )
     if sys.argv[1:] == ["--version"]:
         version = plan.get("version", {})
         time.sleep(float(version.get("sleep", 0)))
