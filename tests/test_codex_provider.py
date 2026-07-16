@@ -670,7 +670,7 @@ def test_unsafe_optional_name_is_omitted_without_losing_session(
 
     assert result.complete
     assert result.sessions[0].name is None
-    assert "name" not in result.sessions[0].storage_record(HOST_ID, observed_at=1)
+    assert result.sessions[0].storage_record(HOST_ID, observed_at=1)["name"] is None
 
 
 def test_recency_falls_back_to_updated_timestamp(

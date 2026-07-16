@@ -7,7 +7,11 @@ import time
 from collections.abc import Iterable
 from dataclasses import dataclass
 
-from . import v0001_initial, v0002_remote_cache
+from . import (
+    v0001_initial,
+    v0002_remote_cache,
+    v0003_name_provenance_runtime_index,
+)
 
 PROTOCOL_VERSION = 1
 
@@ -31,6 +35,11 @@ MIGRATIONS = (
         v0002_remote_cache.VERSION,
         v0002_remote_cache.NAME,
         v0002_remote_cache.STATEMENTS,
+    ),
+    Migration(
+        v0003_name_provenance_runtime_index.VERSION,
+        v0003_name_provenance_runtime_index.NAME,
+        v0003_name_provenance_runtime_index.STATEMENTS,
     ),
 )
 CURRENT_SCHEMA_VERSION = MIGRATIONS[-1].version

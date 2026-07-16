@@ -51,6 +51,8 @@ DEFAULT_BUSY_TIMEOUT_MS: Final = 5_000
 MAX_BUSY_TIMEOUT_MS: Final = 30_000
 DEFAULT_EVENT_LIMIT: Final = 1_000
 MAX_EVENT_LIMIT: Final = 100_000
+DEFAULT_SNAPSHOT_RUNTIME_LIMIT: Final = 10_000
+_SQLITE_MAX_INTEGER: Final = 2**63 - 1
 
 _ACTIVE_LAUNCH_STATES: Final = (
     "reserved",
@@ -82,6 +84,8 @@ _SESSION_FIELDS: Final = {
     "project_id",
     "location_id",
     "name",
+    "provider_name",
+    "name_source",
     "purpose",
     "cwd",
     "created_at",
@@ -123,6 +127,27 @@ _SESSION_STATE_FIELDS: Final = {
     "activity_reason",
     "state_confidence",
 }
+_PROVIDER_SESSION_FIELDS: Final = {
+    "session_key",
+    "host_id",
+    "provider",
+    "provider_session_id",
+    "name",
+    "cwd",
+    "created_at",
+    "provider_updated_at",
+    "last_activity_at",
+    "last_observed_at",
+    "metadata_source",
+}
+_REQUIRED_PROVIDER_SESSION_FIELDS: Final = _PROVIDER_SESSION_FIELDS
+_SNAPSHOT_RUNTIME_TAIL_QUERY: Final = """
+    SELECT * FROM runtime_observations
+    INDEXED BY runtime_observations_host_recent
+    WHERE host_id = ?
+    ORDER BY observed_at DESC, observation_id DESC
+    LIMIT ?
+"""
 _RUNTIME_OBSERVATION_HASH_FIELDS: Final = (
     "observation_key",
     "host_id",
@@ -196,10 +221,65 @@ class LaunchBindingResult:
     surface: dict[str, Any] | None
 
 
+@dataclass(frozen=True, slots=True)
+class ProviderSessionReconciliationResult:
+    """Outcome of one complete host/provider discovery observation.
+
+    ``updated_count`` counts previously known sessions present in the complete
+    scan, not rows whose stored columns happened to change. ``missing_count``
+    counts retained rows absent from it, including rows that were already
+    missing. This makes the result describe the reconciled input set while
+    repeated calls remain safe and deterministic.
+    """
+
+    observed_at: int
+    inserted_count: int
+    updated_count: int
+    missing_count: int
+    sessions: tuple[dict[str, Any], ...]
+
+    @property
+    def observed_count(self) -> int:
+        return self.inserted_count + self.updated_count
+
+    @property
+    def records(self) -> tuple[dict[str, Any], ...]:
+        """Alias emphasizing that the tuple is the reconciled record set."""
+
+        return self.sessions
+
+
+@dataclass(frozen=True, slots=True)
+class HostSnapshotRows:
+    """Coherent primitive rows read for one host in one transaction."""
+
+    host: dict[str, Any]
+    projects: tuple[dict[str, Any], ...]
+    locations: tuple[dict[str, Any], ...]
+    sessions: tuple[dict[str, Any], ...]
+    runtimes: tuple[dict[str, Any], ...]
+    surfaces: tuple[dict[str, Any], ...]
+
+
 def now_ms() -> int:
     """Return the current Unix time in integer milliseconds."""
 
     return int(time.time() * 1_000)
+
+
+def _nonnegative_integer(value: Any, field: str) -> int:
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, int)
+        or not 0 <= value <= _SQLITE_MAX_INTEGER
+    ):
+        raise StorageError(f"{field} must be a non-negative SQLite integer")
+    return value
+
+
+def _reject_invalid_unicode(value: str, field: str) -> None:
+    if any(0xD800 <= ord(character) <= 0xDFFF for character in value):
+        raise StorageError(f"{field} contains an invalid Unicode scalar")
 
 
 def _canonical_json(value: Any) -> str:
@@ -771,6 +851,317 @@ class Registry:
             projects.append(project)
         return projects
 
+    def reconcile_provider_sessions(
+        self,
+        host_id: str,
+        provider: str,
+        sessions: Sequence[Mapping[str, Any]],
+        *,
+        observed_at: int | None = None,
+    ) -> ProviderSessionReconciliationResult:
+        """Atomically apply one complete provider-session observation.
+
+        The caller must withhold this operation when discovery is incomplete.
+        Inputs are deliberately restricted to the privacy-safe provider
+        metadata contract. Provider discovery changes resumability, but never
+        advances the shared state clock or infers runtime presence, activity,
+        or confidence. Those axes remain available to delayed hook evidence.
+        """
+
+        host_id = _canonical_host_id(host_id)
+        provider = _canonical_provider(provider)
+        timestamp = (
+            now_ms()
+            if observed_at is None
+            else _nonnegative_integer(observed_at, "observed_at")
+        )
+        normalized = self._normalize_provider_session_scan(
+            host_id,
+            provider,
+            sessions,
+            observed_at=timestamp,
+        )
+        observed_keys = {session["session_key"] for session in normalized}
+
+        with self.transaction(immediate=True) as connection:
+            host = connection.execute(
+                "SELECT host_id FROM hosts WHERE host_id = ?", (host_id,)
+            ).fetchone()
+            if host is None:
+                raise StorageError(f"unknown host: {host_id}")
+
+            existing_rows = connection.execute(
+                """
+                SELECT * FROM sessions
+                WHERE host_id = ? AND provider = ?
+                ORDER BY session_key
+                """,
+                (host_id, provider),
+            ).fetchall()
+            existing_by_key = {str(row["session_key"]): row for row in existing_rows}
+
+            # Validate every database-dependent condition before the first
+            # effective write. The enclosing transaction still protects the
+            # entire operation if SQLite rejects a later row.
+            for session in normalized:
+                existing = existing_by_key.get(str(session["session_key"]))
+                if existing is None:
+                    continue
+                self._validate_reconciliation_target(
+                    existing,
+                    session,
+                    resumability="resumable",
+                    observed_at=timestamp,
+                )
+            for existing in existing_rows:
+                if existing["session_key"] in observed_keys:
+                    continue
+                self._validate_reconciliation_target(
+                    existing,
+                    None,
+                    resumability="missing",
+                    observed_at=timestamp,
+                )
+
+            inserted_count = 0
+            updated_count = 0
+            for session in normalized:
+                existing = existing_by_key.get(str(session["session_key"]))
+                update = self._provider_metadata_update(
+                    session,
+                    existing,
+                )
+                if existing is None:
+                    # Initial provider history is resumability evidence, but
+                    # it says nothing about activity freshness or confidence.
+                    update["resumability"] = "resumable"
+                self._upsert_session_row(connection, update)
+                if existing is None:
+                    inserted_count += 1
+                else:
+                    connection.execute(
+                        "UPDATE sessions SET resumability = 'resumable' "
+                        "WHERE session_key = ?",
+                        (existing["session_key"],),
+                    )
+                    updated_count += 1
+
+            missing_count = 0
+            for existing in existing_rows:
+                if existing["session_key"] in observed_keys:
+                    continue
+                update: dict[str, Any] = {
+                    "session_key": existing["session_key"],
+                    "last_observed_at": timestamp,
+                }
+                self._upsert_session_row(connection, update)
+                connection.execute(
+                    "UPDATE sessions SET resumability = 'missing' "
+                    "WHERE session_key = ?",
+                    (existing["session_key"],),
+                )
+                missing_count += 1
+
+            reconciled = tuple(
+                dict(row)
+                for row in connection.execute(
+                    """
+                    SELECT * FROM sessions
+                    WHERE host_id = ? AND provider = ?
+                    ORDER BY session_key
+                    """,
+                    (host_id, provider),
+                ).fetchall()
+            )
+
+        return ProviderSessionReconciliationResult(
+            observed_at=timestamp,
+            inserted_count=inserted_count,
+            updated_count=updated_count,
+            missing_count=missing_count,
+            sessions=reconciled,
+        )
+
+    @staticmethod
+    def _normalize_provider_session_scan(
+        host_id: str,
+        provider: str,
+        sessions: Sequence[Mapping[str, Any]],
+        *,
+        observed_at: int,
+    ) -> tuple[dict[str, Any], ...]:
+        if isinstance(sessions, (str, bytes, bytearray)) or not isinstance(
+            sessions, Sequence
+        ):
+            raise StorageError("provider sessions must be a complete sequence")
+
+        normalized: list[dict[str, Any]] = []
+        session_keys: set[str] = set()
+        provider_session_ids: set[str] = set()
+        for index, raw_session in enumerate(sessions):
+            if not isinstance(raw_session, Mapping) or not all(
+                isinstance(key, str) for key in raw_session
+            ):
+                raise StorageError(f"provider session {index} must be an object")
+            unknown = set(raw_session) - _PROVIDER_SESSION_FIELDS
+            if unknown:
+                raise StorageError(
+                    "provider session contains unsupported retained fields: "
+                    f"{sorted(unknown)}"
+                )
+            missing = _REQUIRED_PROVIDER_SESSION_FIELDS - set(raw_session)
+            if missing:
+                raise StorageError(f"provider session is incomplete: {sorted(missing)}")
+
+            session = dict(raw_session)
+            row_host_id = _canonical_host_id(session["host_id"])
+            row_provider = _canonical_provider(session["provider"])
+            provider_session_id = _canonical_plain_uuid(
+                session["provider_session_id"], "provider_session_id"
+            )
+            parsed_key = _canonical_session_key(session["session_key"])
+            expected_identity = (
+                host_id,
+                provider,
+                provider_session_id,
+            )
+            if (
+                row_host_id,
+                row_provider,
+                provider_session_id,
+            ) != expected_identity or (
+                str(parsed_key.host_id),
+                parsed_key.provider.value,
+                str(parsed_key.provider_session_id),
+            ) != expected_identity:
+                raise IdentityConflict(
+                    "provider session identity does not match the scan host/provider"
+                )
+
+            session_key = str(parsed_key)
+            if session_key in session_keys:
+                raise IdentityConflict(f"duplicate provider session key: {session_key}")
+            if provider_session_id in provider_session_ids:
+                raise IdentityConflict(
+                    f"duplicate provider session ID: {provider_session_id}"
+                )
+            session_keys.add(session_key)
+            provider_session_ids.add(provider_session_id)
+
+            cwd = session["cwd"]
+            if not isinstance(cwd, str) or not cwd or len(cwd) > 4096:
+                raise StorageError("provider session cwd must be a bounded string")
+            if not Path(cwd).is_absolute():
+                raise StorageError("provider session cwd must be absolute")
+            _reject_controls(cwd, "cwd")
+            _reject_invalid_unicode(cwd, "cwd")
+            name = session["name"]
+            if name is not None:
+                if not isinstance(name, str) or not name or len(name) > 256:
+                    raise StorageError(
+                        "provider session name must be null or a non-empty "
+                        "bounded string"
+                    )
+                _reject_controls(name, "name")
+                _reject_invalid_unicode(name, "name")
+                if name != unicodedata.normalize("NFC", name).strip():
+                    raise StorageError("provider session name must be normalized")
+            if (
+                not isinstance(session["metadata_source"], str)
+                or session["metadata_source"] != "provider"
+            ):
+                raise StorageError(
+                    "provider session metadata_source must be 'provider'"
+                )
+
+            created_at = _nonnegative_integer(session["created_at"], "created_at")
+            provider_updated_at = _nonnegative_integer(
+                session["provider_updated_at"], "provider_updated_at"
+            )
+            last_activity_at = _nonnegative_integer(
+                session["last_activity_at"], "last_activity_at"
+            )
+            row_observed_at = _nonnegative_integer(
+                session["last_observed_at"], "last_observed_at"
+            )
+            if row_observed_at != observed_at:
+                raise StorageError(
+                    "provider session observation time does not match its scan"
+                )
+            if provider_updated_at < created_at or last_activity_at < created_at:
+                raise StorageError("provider session timestamps are reversed")
+
+            normalized.append(session)
+
+        return tuple(sorted(normalized, key=lambda session: session["session_key"]))
+
+    @staticmethod
+    def _provider_name_update(
+        incoming: Mapping[str, Any],
+        existing: sqlite3.Row | None,
+    ) -> dict[str, Any]:
+        update = dict(incoming)
+        provider_name = update.pop("name")
+        update["provider_name"] = provider_name
+        update.pop("name_source", None)
+        if existing is None or existing["name_source"] != "curated":
+            update["name"] = provider_name
+            update["name_source"] = "provider"
+        return update
+
+    @classmethod
+    def _provider_metadata_update(
+        cls,
+        incoming: Mapping[str, Any],
+        existing: sqlite3.Row | None,
+    ) -> dict[str, Any]:
+        update = cls._provider_name_update(incoming, existing)
+        if existing is not None and existing["metadata_source"] != "provider":
+            update.pop("metadata_source", None)
+        return update
+
+    @classmethod
+    def _validate_reconciliation_target(
+        cls,
+        existing: sqlite3.Row,
+        incoming: Mapping[str, Any] | None,
+        *,
+        resumability: str,
+        observed_at: int,
+    ) -> None:
+        if observed_at < int(existing["last_observed_at"]):
+            raise StorageError(f"stale provider scan for {existing['session_key']!r}")
+        stored_resumability = str(existing["resumability"])
+        if observed_at == int(
+            existing["last_observed_at"]
+        ) and stored_resumability not in {"unknown", resumability}:
+            raise StorageError(
+                "conflicting provider presence observation at the same timestamp"
+            )
+        if (
+            incoming is not None
+            and observed_at == int(existing["last_observed_at"])
+            and stored_resumability == resumability
+        ):
+            effective = cls._provider_metadata_update(
+                incoming,
+                existing,
+            )
+            mutable_fields = {
+                "cwd",
+                "created_at",
+                "provider_updated_at",
+                "last_activity_at",
+                "provider_name",
+            }
+            mutable_fields.update(
+                {"name", "name_source", "metadata_source"}.intersection(effective)
+            )
+            if any(effective[field] != existing[field] for field in mutable_fields):
+                raise StorageError(
+                    "conflicting provider metadata observation at the same timestamp"
+                )
+
     def upsert_session(self, session: Mapping[str, Any]) -> dict[str, Any]:
         """Insert a provider session or update only explicitly supplied fields."""
 
@@ -778,10 +1169,30 @@ class Registry:
             return self._upsert_session_row(connection, session)
 
     @staticmethod
+    def _validate_effective_name_provenance(
+        changes: Mapping[str, Any],
+        existing: sqlite3.Row | None,
+    ) -> None:
+        name = changes.get("name", None if existing is None else existing["name"])
+        provider_name = changes.get(
+            "provider_name",
+            None if existing is None else existing["provider_name"],
+        )
+        name_source = changes.get(
+            "name_source",
+            "unknown" if existing is None else existing["name_source"],
+        )
+        if name_source == "provider" and name != provider_name:
+            raise StorageError("provider-owned name and provider_name must agree")
+        if name_source == "unknown" and name is not None:
+            raise StorageError("unknown name_source requires name to be null")
+
+    @staticmethod
     def _upsert_session_row(
         connection: sqlite3.Connection,
         session: Mapping[str, Any],
     ) -> dict[str, Any]:
+        session = dict(session)
         try:
             session_key = str(session["session_key"])
         except KeyError as error:
@@ -794,6 +1205,8 @@ class Registry:
             session,
             (
                 "name",
+                "provider_name",
+                "name_source",
                 "purpose",
                 "cwd",
                 "provider_runtime_id",
@@ -803,6 +1216,23 @@ class Registry:
                 "metadata_source",
             ),
         )
+        if "name_source" in session and session["name_source"] not in {
+            "unknown",
+            "provider",
+            "curated",
+        }:
+            raise StorageError("name_source must be unknown, provider, or curated")
+        if "name" in session:
+            session.setdefault("name_source", "curated")
+            if session["name_source"] == "provider":
+                if (
+                    "provider_name" in session
+                    and session["provider_name"] != session["name"]
+                ):
+                    raise StorageError(
+                        "provider-owned name and provider_name must agree"
+                    )
+                session["provider_name"] = session["name"]
         parsed_key = _canonical_session_key(session_key)
         timestamp = int(session.get("last_observed_at", now_ms()))
 
@@ -838,6 +1268,7 @@ class Registry:
             values.update(
                 {field: session[field] for field in _SESSION_FIELDS if field in session}
             )
+            Registry._validate_effective_name_provenance(values, None)
             columns = tuple(values)
             placeholders = ", ".join("?" for _ in columns)
             column_names = ", ".join(columns)
@@ -908,6 +1339,7 @@ class Registry:
             }
             updates.setdefault("last_observed_at", timestamp)
             updates.pop("first_observed_at", None)
+            Registry._validate_effective_name_provenance(updates, existing)
             assignments = ", ".join(f"{field} = ?" for field in updates)
             connection.execute(
                 f"UPDATE sessions SET {assignments} WHERE session_key = ?",
@@ -942,6 +1374,102 @@ class Registry:
                 (host_id,),
             ).fetchall()
         return [dict(row) for row in rows]
+
+    def read_host_snapshot(
+        self,
+        host_id: str,
+        *,
+        runtime_limit: int = DEFAULT_SNAPSHOT_RUNTIME_LIMIT,
+    ) -> HostSnapshotRows:
+        """Read host-local snapshot inputs from one coherent DB view.
+
+        Runtime observations are append-only, so snapshots retain only the
+        deterministic newest ``runtime_limit`` rows and present that tail in
+        stable chronological order.
+        """
+
+        host_id = _canonical_host_id(host_id)
+        if (
+            isinstance(runtime_limit, bool)
+            or not isinstance(runtime_limit, int)
+            or not 1 <= runtime_limit <= DEFAULT_SNAPSHOT_RUNTIME_LIMIT
+        ):
+            raise StorageError(
+                f"runtime_limit must be between 1 and {DEFAULT_SNAPSHOT_RUNTIME_LIMIT}"
+            )
+        with self.transaction() as connection:
+            host_row = connection.execute(
+                "SELECT * FROM hosts WHERE host_id = ?", (host_id,)
+            ).fetchone()
+            if host_row is None:
+                raise StorageError(f"unknown host: {host_id}")
+
+            locations = tuple(
+                dict(row)
+                for row in connection.execute(
+                    """
+                    SELECT * FROM project_locations
+                    WHERE host_id = ?
+                    ORDER BY project_id, location_id
+                    """,
+                    (host_id,),
+                ).fetchall()
+            )
+            sessions = tuple(
+                dict(row)
+                for row in connection.execute(
+                    """
+                    SELECT * FROM sessions
+                    WHERE host_id = ?
+                    ORDER BY session_key
+                    """,
+                    (host_id,),
+                ).fetchall()
+            )
+            projects = tuple(
+                dict(row)
+                for row in connection.execute(
+                    """
+                    SELECT * FROM projects
+                    WHERE (
+                        ? = 1 AND declared = 1
+                    ) OR project_id IN (
+                            SELECT project_id
+                            FROM project_locations WHERE host_id = ?
+                            UNION
+                            SELECT project_id FROM sessions
+                            WHERE host_id = ? AND project_id IS NOT NULL
+                        )
+                    ORDER BY project_id
+                    """,
+                    (int(bool(host_row["is_local"])), host_id, host_id),
+                ).fetchall()
+            )
+            latest_runtime_rows = connection.execute(
+                _SNAPSHOT_RUNTIME_TAIL_QUERY,
+                (host_id, runtime_limit),
+            ).fetchall()
+            runtimes = tuple(dict(row) for row in reversed(latest_runtime_rows))
+            surfaces = tuple(
+                dict(row)
+                for row in connection.execute(
+                    """
+                    SELECT * FROM surfaces
+                    WHERE host_id = ?
+                    ORDER BY surface_id
+                    """,
+                    (host_id,),
+                ).fetchall()
+            )
+
+        return HostSnapshotRows(
+            host=dict(host_row),
+            projects=projects,
+            locations=locations,
+            sessions=sessions,
+            runtimes=runtimes,
+            surfaces=surfaces,
+        )
 
     def append_handoff(
         self,
@@ -1395,6 +1923,15 @@ class Registry:
             observed_session = dict(session)
             observed_session.setdefault("first_observed_at", timestamp)
             observed_session.setdefault("last_observed_at", timestamp)
+            if "name" in observed_session:
+                existing_session = connection.execute(
+                    "SELECT * FROM sessions WHERE session_key = ?",
+                    (str(observed_session["session_key"]),),
+                ).fetchone()
+                observed_session = self._provider_name_update(
+                    observed_session,
+                    existing_session,
+                )
             if launch["action"] == "new":
                 observed_session.update(
                     project_id=launch["project_id"],
@@ -2384,8 +2921,11 @@ __all__ = [
     "CURRENT_SCHEMA_VERSION",
     "DEFAULT_BUSY_TIMEOUT_MS",
     "DEFAULT_EVENT_LIMIT",
+    "DEFAULT_SNAPSHOT_RUNTIME_LIMIT",
+    "HostSnapshotRows",
     "IdentityConflict",
     "LaunchBindingResult",
+    "ProviderSessionReconciliationResult",
     "Registry",
     "RegistryClosed",
     "RequestConflict",

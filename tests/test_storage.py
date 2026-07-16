@@ -557,6 +557,112 @@ def test_session_upsert_preserves_unsupplied_curation_and_checks_location(
         )
 
 
+def test_session_name_provenance_defaults_curated_and_syncs_explicit_provider(
+    registry: Registry,
+) -> None:
+    initial = add_session(registry)
+    assert initial["name_source"] == "unknown"
+
+    curated = registry.upsert_session(
+        {
+            "session_key": SESSION_KEY,
+            "name": "user title",
+            "last_observed_at": 40,
+        }
+    )
+    assert curated["name"] == "user title"
+    assert curated["provider_name"] is None
+    assert curated["name_source"] == "curated"
+
+    with pytest.raises(
+        StorageError, match="provider-owned name and provider_name must agree"
+    ):
+        registry.upsert_session(
+            {
+                "session_key": SESSION_KEY,
+                "name_source": "provider",
+                "last_observed_at": 45,
+            }
+        )
+    unchanged_curated = registry.get_session(SESSION_KEY)
+    assert unchanged_curated is not None
+    assert unchanged_curated["name"] == "user title"
+    assert unchanged_curated["provider_name"] is None
+    assert unchanged_curated["name_source"] == "curated"
+    assert unchanged_curated["last_observed_at"] == 40
+
+    provider_owned = registry.upsert_session(
+        {
+            "session_key": SESSION_KEY,
+            "name": "provider title",
+            "name_source": "provider",
+            "last_observed_at": 50,
+        }
+    )
+    assert provider_owned["name"] == "provider title"
+    assert provider_owned["provider_name"] == "provider title"
+    assert provider_owned["name_source"] == "provider"
+
+    with pytest.raises(
+        StorageError, match="provider-owned name and provider_name must agree"
+    ):
+        registry.upsert_session(
+            {
+                "session_key": SESSION_KEY,
+                "provider_name": "divergent provider title",
+                "last_observed_at": 60,
+            }
+        )
+    unchanged_provider = registry.get_session(SESSION_KEY)
+    assert unchanged_provider is not None
+    assert unchanged_provider["name"] == "provider title"
+    assert unchanged_provider["provider_name"] == "provider title"
+    assert unchanged_provider["name_source"] == "provider"
+    assert unchanged_provider["last_observed_at"] == 50
+
+
+@pytest.mark.parametrize(
+    ("name_fields", "message"),
+    (
+        (
+            {"name": "display", "name_source": "unknown"},
+            "unknown name_source requires name to be null",
+        ),
+        (
+            {"provider_name": "shadow", "name_source": "provider"},
+            "provider-owned name and provider_name must agree",
+        ),
+        (
+            {
+                "name": "display",
+                "provider_name": "different",
+                "name_source": "provider",
+            },
+            "provider-owned name and provider_name must agree",
+        ),
+    ),
+)
+def test_session_name_provenance_rejects_invalid_insert_combinations(
+    registry: Registry,
+    name_fields: dict[str, object],
+    message: str,
+) -> None:
+    session = {
+        "session_key": SECOND_SESSION_KEY,
+        "host_id": HOST_ID,
+        "provider": "codex",
+        "provider_session_id": SECOND_SESSION_ID,
+        "first_observed_at": 30,
+        "last_observed_at": 30,
+        **name_fields,
+    }
+
+    with pytest.raises(StorageError, match=message):
+        registry.upsert_session(session)
+
+    assert registry.get_session(SECOND_SESSION_KEY) is None
+
+
 def test_handoffs_are_hashed_sequenced_idempotent_and_append_only(
     registry: Registry,
 ) -> None:
@@ -999,6 +1105,7 @@ def test_new_launch_atomically_binds_provider_session_and_surface(
             "host_id": HOST_ID,
             "provider": "codex",
             "provider_session_id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+            "name": "Provider launch title",
             "runtime_presence": "live",
             "last_observed_at": 140,
         },
@@ -1016,6 +1123,9 @@ def test_new_launch_atomically_binds_provider_session_and_surface(
     assert result.session["location_id"] == LOCATION_ID
     assert result.session["cwd"] == "/work/switchboard"
     assert result.session["metadata_source"] == "launch"
+    assert result.session["name"] == "Provider launch title"
+    assert result.session["provider_name"] == "Provider launch title"
+    assert result.session["name_source"] == "provider"
     assert result.surface is not None
     assert result.surface["binding_confidence"] == "confirmed"
     assert result.surface["current_session_key"] == result.session["session_key"]

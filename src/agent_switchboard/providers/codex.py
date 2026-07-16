@@ -175,6 +175,7 @@ class NormalizedCodexSession:
             "host_id": str(host_id),
             "provider": ProviderId.CODEX.value,
             "provider_session_id": str(self.provider_session_id),
+            "name": self.name,
             "cwd": str(self.cwd),
             "created_at": self.created_at,
             "provider_updated_at": self.provider_updated_at,
@@ -182,8 +183,6 @@ class NormalizedCodexSession:
             "last_observed_at": observed_at,
             "metadata_source": "provider",
         }
-        if self.name is not None:
-            record["name"] = self.name
         return record
 
 

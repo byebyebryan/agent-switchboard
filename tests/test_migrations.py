@@ -43,10 +43,11 @@ def test_migrations_are_explicit_contiguous_and_idempotent(tmp_path) -> None:
     database = tmp_path / "switchboard.db"
     connection = configured_connection(str(database))
 
-    assert [migration.version for migration in MIGRATIONS] == [1, 2]
+    assert [migration.version for migration in MIGRATIONS] == [1, 2, 3]
     assert [migration.name for migration in MIGRATIONS] == [
         "initial_registry",
         "remote_snapshot_cache",
+        "name_provenance_runtime_index",
     ]
     assert migrate(connection, now=100) == CURRENT_SCHEMA_VERSION
     assert migrate(connection, now=200) == CURRENT_SCHEMA_VERSION
@@ -57,11 +58,12 @@ def test_migrations_are_explicit_contiguous_and_idempotent(tmp_path) -> None:
     assert [tuple(row) for row in applied] == [
         (1, "initial_registry", 100),
         (2, "remote_snapshot_cache", 100),
+        (3, "name_provenance_runtime_index", 100),
     ]
-    assert connection.execute("PRAGMA user_version").fetchone()[0] == 2
+    assert connection.execute("PRAGMA user_version").fetchone()[0] == 3
     assert dict(
         connection.execute("SELECT key, value FROM registry_metadata").fetchall()
-    ) == {"protocol_version": "1", "schema_version": "2"}
+    ) == {"protocol_version": "1", "schema_version": "3"}
     assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
     connection.close()
 
@@ -108,7 +110,7 @@ def test_upgrade_from_v1_preserves_registry_rows(tmp_path) -> None:
     connection.close()
 
     upgraded = connect_database(database)
-    assert upgraded.execute("PRAGMA user_version").fetchone()[0] == 2
+    assert upgraded.execute("PRAGMA user_version").fetchone()[0] == 3
     assert (
         upgraded.execute(
             """
@@ -133,6 +135,137 @@ def test_upgrade_from_v1_preserves_registry_rows(tmp_path) -> None:
     )
     assert upgraded.execute("PRAGMA foreign_key_check").fetchall() == []
     upgraded.close()
+
+
+def test_upgrade_from_v2_backfills_name_provenance_and_adds_runtime_index(
+    tmp_path,
+) -> None:
+    database = tmp_path / "switchboard.db"
+    connection = configured_connection(str(database))
+    assert migrate(connection, target_version=2, now=10) == 2
+    host_id = "11111111-1111-4111-8111-111111111111"
+    connection.execute(
+        """
+        INSERT INTO hosts(host_id, display_name, is_local, created_at, updated_at)
+        VALUES (?, 'host', 1, 10, 10)
+        """,
+        (host_id,),
+    )
+    historical_provider_name = "p" * 300
+    rows = (
+        (
+            f"{host_id}:codex:22222222-2222-4222-8222-222222222222",
+            "22222222-2222-4222-8222-222222222222",
+            historical_provider_name,
+            "provider",
+        ),
+        (
+            f"{host_id}:codex:33333333-3333-4333-8333-333333333333",
+            "33333333-3333-4333-8333-333333333333",
+            "curated title",
+            "launch",
+        ),
+        (
+            f"{host_id}:codex:44444444-4444-4444-8444-444444444444",
+            "44444444-4444-4444-8444-444444444444",
+            None,
+            "provider",
+        ),
+    )
+    connection.executemany(
+        """
+        INSERT INTO sessions(
+            session_key, provider, provider_session_id, name, host_id,
+            first_observed_at, last_observed_at, metadata_source
+        ) VALUES (?, 'codex', ?, ?, ?, 10, 10, ?)
+        """,
+        tuple((*row[:3], host_id, row[3]) for row in rows),
+    )
+
+    assert migrate(connection, now=20) == 3
+    names = connection.execute(
+        """
+        SELECT name, provider_name, name_source, metadata_source
+        FROM sessions ORDER BY provider_session_id
+        """
+    ).fetchall()
+    assert [tuple(row) for row in names] == [
+        (
+            historical_provider_name,
+            historical_provider_name,
+            "curated",
+            "provider",
+        ),
+        ("curated title", None, "curated", "launch"),
+        (None, None, "unknown", "provider"),
+    ]
+    assert (
+        connection.execute(
+            """
+            SELECT name FROM sqlite_master
+            WHERE type = 'index' AND name = 'runtime_observations_host_recent'
+            """
+        ).fetchone()[0]
+        == "runtime_observations_host_recent"
+    )
+    with pytest.raises(sqlite3.IntegrityError):
+        connection.execute(
+            "UPDATE sessions SET provider_name = ? WHERE provider_session_id = ?",
+            ("x" * 513, "22222222-2222-4222-8222-222222222222"),
+        )
+    with pytest.raises(sqlite3.IntegrityError):
+        connection.execute(
+            "UPDATE sessions SET name_source = 'guessed' WHERE provider_session_id = ?",
+            ("22222222-2222-4222-8222-222222222222",),
+        )
+    assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
+    connection.close()
+
+
+def test_failed_v2_to_v3_migration_rolls_back_provenance_and_index(
+    tmp_path, monkeypatch
+) -> None:
+    import agent_switchboard.migrations as migration_module
+
+    database = tmp_path / "switchboard.db"
+    connection = configured_connection(str(database))
+    migrate(connection, target_version=2, now=10)
+    migration = migration_module.MIGRATIONS[2]
+    broken = migration_module.Migration(
+        3,
+        "broken_name_provenance_runtime_index",
+        (
+            *migration.statements[:-1],
+            "CREATE TABLE hosts(value TEXT)",
+            migration.statements[-1],
+        ),
+    )
+    monkeypatch.setattr(
+        migration_module,
+        "MIGRATIONS",
+        (*migration_module.MIGRATIONS[:2], broken),
+    )
+
+    with pytest.raises(sqlite3.OperationalError):
+        migration_module.migrate(connection, target_version=3, now=20)
+
+    columns = {
+        row[1] for row in connection.execute("PRAGMA table_info(sessions)").fetchall()
+    }
+    assert "provider_name" not in columns
+    assert "name_source" not in columns
+    assert (
+        connection.execute(
+            "SELECT name FROM sqlite_master "
+            "WHERE type = 'index' AND name = 'runtime_observations_host_recent'"
+        ).fetchone()
+        is None
+    )
+    assert connection.execute("PRAGMA user_version").fetchone()[0] == 2
+    assert (
+        connection.execute("SELECT COUNT(*) FROM schema_migrations").fetchone()[0] == 2
+    )
+    connection.close()
 
 
 def test_migration_rejects_inconsistent_or_newer_metadata(tmp_path) -> None:
