@@ -10,8 +10,8 @@ status metadata, then hands the user back to the unmodified provider UI.
 
 ## Implementation status
 
-The current checkout contains the Phase 1 core plus the local Codex portion of
-Phase 2:
+The current checkout contains the Phase 1 core, the local Codex portion of
+Phase 2, and Phase 3A existing-session presentation:
 
 - Python package and finalized `swbctl` executable name
 - stable host identity and strict TOML configuration
@@ -28,14 +28,22 @@ Phase 2:
   attachment, and parked state
 - explicit, ownership-safe Codex hook installation and effective hook/trust
   diagnostics through the supported app-server contract
+- validated tmux surface discovery, creation, metadata, selection, attachment,
+  and rollback without shell interpolation
+- atomic existing-Codex preparation with live-pane adoption, resumable-session
+  leases, waiting bootstrap, idempotent retries, and a final duplicate-runtime
+  check before `codex resume`
+- versioned focus, switch, attach, and blocked presentation plans consumed by
+  the separate DMS integration
 - unit, migration, concurrency, provider, protocol, and packaging tests
 
 Phase 2 remains partial because Claude discovery, hooks, and liveness are not
-implemented. Launch/tmux actions, DMS selection, remote SSH transport, and the
-TUI also remain later phases. See
+implemented. Phase 3 also remains partial: new-session/project preparation,
+Claude workspaces, remote SSH transport, and the TUI remain later work. See
 [the design](docs/design.md), the
 [Phase 1 validation record](docs/phase-1-validation.md), and the
-[Phase 2 validation record](docs/phase-2-validation.md) for the exact boundary
+[Phase 2 validation record](docs/phase-2-validation.md), and the
+[Phase 3A validation record](docs/phase-3a-validation.md) for the exact boundary
 and evidence.
 
 ## Local commands
@@ -51,6 +59,10 @@ swbctl list --refresh --json
 swbctl hooks install --provider codex --dry-run
 swbctl hooks uninstall --provider codex --dry-run
 swbctl doctor
+swbctl prepare-open <session-key> --request-id <uuid> \
+  --can-focus-desktop --can-launch-terminal --json
+swbctl select-surface <surface-id> --client <tmux-client-id>
+swbctl attach-surface <surface-id>
 ```
 
 `snapshot --reconcile none` is the default and is equivalent to the retained
@@ -88,6 +100,16 @@ Switchboard never edits Codex trust state. `doctor` checks the effective
 `hooks/list` result, executable paths, trust and enablement, source warnings or
 errors, and isolated cold/warm event latency. Its latency probe uses temporary
 HOME, `CODEX_HOME`, and XDG roots and never writes the user's registry.
+
+`prepare-open` performs a bounded full reconciliation before making an atomic
+existing-session decision. A trustworthy live tmux pane can be adopted as a
+managed surface. A parked resumable session receives a leased waiting tmux
+surface, and Codex starts only after a client attaches; bootstrap revalidates
+runtime truth immediately before `exec codex resume <uuid>`. A live runtime
+without a trustworthy pane locator returns `unmanaged_surface` and is never
+duplicated. Frontends receive only versioned presentation fields and stable
+surface IDs. `select-surface` and `attach-surface` revalidate registry and tmux
+identity instead of accepting raw frontend tmux targets.
 
 Snapshot assembly reads a bounded deterministic session candidate set and
 applies an actual UTF-8 byte budget. If sessions are omitted, the registry is

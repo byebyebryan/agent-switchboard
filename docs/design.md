@@ -1123,8 +1123,10 @@ DMS consumes the same presentation plan but delegates niri focus and Ghostty
 launch behavior to its integration code. If no client successfully views the
 target surface, the waiting launch expires without starting the provider. A
 desktop-focus failure after a successful tmux client switch does not undo that
-switch or kill the provider; the frontend reports the focus failure and the
-session remains routable.
+switch or kill the provider. DMS retries preparation with the same request ID
+while setting `can_focus_desktop=false`; the core reshapes the already reserved
+surface as an attach plan. This may open another view of the same tmux surface,
+but idempotency and the final bootstrap check prevent another provider runtime.
 
 For a `switch` plan, the caller invokes `select-surface` on the owning host.
 That command revalidates that the opaque tmux client still belongs to the
@@ -1816,17 +1818,23 @@ transitions remain unimplemented parts of Phase 2.
 
 ### Phase 3: Atomic launch, tmux, and DMS parity
 
-- Implement launch leases, waiting bootstrap, stable surfaces, and tmux
-  metadata.
-- Implement `prepare-open`, `prepare-new`, `prepare-workspace`,
-  `select-surface`, `attach-surface`, project-aware new-session flows, and final
-  pre-exec duplicate checks.
+Phase 3A is implemented for existing local Codex sessions. It includes launch
+leases, waiting bootstrap, stable tmux surfaces and metadata, `prepare-open`,
+`select-surface`, `attach-surface`, live-pane adoption, and the final pre-exec
+duplicate check. The separate DMS plugin consumes the validated presentation
+plan and owns niri/Ghostty execution. Exact evidence and the remaining live
+trust gate are recorded in
+[`docs/phase-3a-validation.md`](phase-3a-validation.md).
+
+Remaining Phase 3 work:
+
+- Implement `prepare-new`, `prepare-workspace`, and project-aware new-session
+  flows.
 - Implement the one-workspace Claude tmux policy and manager/session windows.
-- Change DMS local rows to consume core JSON and presentation plans while
-  preserving niri focus, Unicode behavior, and current failure reporting. Its
+- Extend DMS action parity to those new and Claude workspace operations. Its
   existing remote helper remains the fallback until Phase 5.
-- Pass local parity tests before removing equivalent local discovery or tmux
-  paths from the existing helper.
+- Complete live parked-session acceptance after Codex hook trust is explicitly
+  approved through `/hooks`.
 
 ### Phase 4: Curation, context, and TUI
 
