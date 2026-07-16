@@ -88,9 +88,15 @@ jobs:
           from tempfile import TemporaryDirectory
 
           import agent_switchboard
+          import agent_switchboard.cli
           import agent_switchboard.config
           import agent_switchboard.domain
+          import agent_switchboard.local
+          import agent_switchboard.paths
           import agent_switchboard.protocol
+          import agent_switchboard.providers.codex
+          import agent_switchboard.reconcile
+          import agent_switchboard.snapshot
           import agent_switchboard.state
           from agent_switchboard.migrations import CURRENT_SCHEMA_VERSION
           from agent_switchboard.storage import Registry
@@ -101,6 +107,7 @@ jobs:
               "migrations/__init__.py",
               "migrations/v0001_initial.py",
               "migrations/v0002_remote_cache.py",
+              "migrations/v0003_name_provenance_runtime_index.py",
           ):
               assert package.joinpath(migration).is_file()
           with TemporaryDirectory() as directory:
@@ -111,13 +118,38 @@ jobs:
       - name: Smoke installed swbctl entry points
         working-directory: /tmp
         run: |
-          for swbctl in \
-            /tmp/switchboard-wheel-smoke/bin/swbctl \
-            /tmp/switchboard-sdist-smoke/bin/swbctl
+          for environment in \
+            /tmp/switchboard-wheel-smoke \
+            /tmp/switchboard-sdist-smoke
           do
+            python="$environment/bin/python"
+            swbctl="$environment/bin/swbctl"
             test "$("$swbctl" --version)" = "swbctl 0.1.0"
             "$swbctl" --help | \
               grep -F "Inspect and route provider-native coding-agent sessions."
+            "$swbctl" snapshot --help | grep -F -- "--reconcile {none,full}"
+            "$swbctl" list --help | grep -F -- "--refresh"
+
+            smoke_root="/tmp/$(basename "$environment")-xdg"
+            rm -rf "$smoke_root"
+            mkdir -p "$smoke_root/config" "$smoke_root/state" "$smoke_root/home"
+            export XDG_CONFIG_HOME="$smoke_root/config"
+            export XDG_STATE_HOME="$smoke_root/state"
+            export HOME="$smoke_root/home"
+            "$swbctl" snapshot --json > "$smoke_root/snapshot.json"
+            "$swbctl" list --json > "$smoke_root/list.json"
+            "$python" -I - \
+              "$smoke_root/snapshot.json" "$smoke_root/list.json" <<'PY'
+          import sys
+          from pathlib import Path
+
+          from agent_switchboard.protocol import SnapshotEnvelope
+
+          snapshot = SnapshotEnvelope.from_json(Path(sys.argv[1]).read_bytes())
+          listed = SnapshotEnvelope.from_json(Path(sys.argv[2]).read_bytes())
+          assert snapshot.host.host_id == listed.host.host_id
+          assert snapshot.sessions == listed.sessions == ()
+          PY
           done
       - uses: actions/upload-artifact@v4
         with:

@@ -64,8 +64,13 @@ def test_snapshot_contract_fields_and_capability_report() -> None:
     assert capability.provider_version == "0.144.4"
     assert capability.tested_contract_min == "0.144.4"
     assert capability.tested_contract_max == "0.144.4"
-    assert capability.features == ("app_server", "hooks", "resume")
-    assert len(capability.schema_fingerprint or "") == 64
+    assert capability.features == (
+        "app_server_thread_list",
+        "schema_fingerprint",
+    )
+    assert capability.schema_fingerprint == (
+        "5d8251e1e2f713a3c567c927386f84f2f94692d4721b90d8ff36d0ff92877621"
+    )
 
 
 def test_structured_degraded_capability_reason() -> None:

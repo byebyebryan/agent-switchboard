@@ -91,8 +91,8 @@
         "minimum": "0.144.4",
         "maximum": "0.144.4"
       },
-      "features": ["app_server", "hooks", "resume"],
-      "schemaFingerprint": "93b300b8102e48bd1640fe12aec7ed29c215cd882237c70bedd32bf364dacc05",
+      "features": ["app_server_thread_list", "schema_fingerprint"],
+      "schemaFingerprint": "5d8251e1e2f713a3c567c927386f84f2f94692d4721b90d8ff36d0ff92877621",
       "degradedReasons": [],
       "futureCapabilityField": true
     }

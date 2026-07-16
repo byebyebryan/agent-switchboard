@@ -10,20 +10,58 @@ status metadata, then hands the user back to the unmodified provider UI.
 
 ## Implementation status
 
-The current checkout is the Phase 1 core implementation:
+The current checkout contains the Phase 1 core plus a bounded, read-only Codex
+slice of Phase 2:
 
 - Python package and finalized `swbctl` executable name
 - stable host identity and strict TOML configuration
 - provider-neutral domain and state models
 - versioned machine protocols and privacy validation
 - SQLite schema, migrations, and registry operations
-- unit, migration, concurrency, protocol, and packaging tests
+- production Codex `0.144.4` app-server discovery, normalization, atomic
+  reconciliation, and canonical local snapshots
+- retained no-refresh reads, structured provider degradation, and explicit
+  snapshot-session truncation
+- unit, migration, concurrency, provider, protocol, and packaging tests
 
-Provider adapters, hook installation, reconciliation commands, tmux launch
-execution, DMS migration, remote SSH transport, and the TUI are later phases
-and are not implemented yet. See [the design](docs/design.md) and the
-[Phase 1 validation record](docs/phase-1-validation.md) for the implementation
-boundary and current evidence.
+The Phase 2 implementation is deliberately partial. Claude discovery,
+provider hooks and live-state reconciliation, launch/tmux actions, DMS
+migration, remote SSH transport, and the TUI are not implemented. See
+[the design](docs/design.md), the
+[Phase 1 validation record](docs/phase-1-validation.md), and the
+[Phase 2 validation record](docs/phase-2-validation.md) for the exact boundary
+and evidence.
+
+## Local read-only commands
+
+The implemented command surface emits one versioned snapshot envelope:
+
+```sh
+swbctl snapshot --json
+swbctl snapshot --reconcile full --json
+swbctl list --json
+swbctl list --refresh --json
+```
+
+`snapshot --reconcile none` is the default and is equivalent to the retained
+read used by `list --json`. On the first invocation, Switchboard lazily creates
+its private host identity and registry. If the implicit configuration file at
+`${XDG_CONFIG_HOME:-~/.config}/agent-switchboard/config.toml` is absent, it
+uses documented defaults without creating that file. Once the registry is
+bootstrapped, no-refresh commands read retained state without parsing config or
+invoking Codex.
+
+`snapshot --reconcile full` and `list --refresh` load configuration,
+materialize configured projects, and run the bounded Codex adapter when Codex
+is enabled. Provider absence, timeouts, incompatible results, and incomplete
+pagination return a valid snapshot with structured capability degradation;
+they do not erase retained sessions. Core configuration, storage, migration,
+or protocol failures exit nonzero with no partial JSON.
+
+Snapshot assembly reads a bounded deterministic session candidate set and
+applies an actual UTF-8 byte budget. If sessions are omitted, the registry is
+unchanged and the envelope includes `snapshot_sessions_truncated` with only
+retained and emitted counts.
 
 ## Requirements and development setup
 
@@ -54,9 +92,9 @@ The PEP 517 backend is Hatchling. Artifact selection is explicit:
 
 - wheels contain `agent_switchboard`, including migration modules, plus wheel
   metadata and the MIT license;
-- source distributions contain the package source, the design and Phase 1
-  validation documents referenced here, the MIT license, and the minimum
-  project files needed to build it;
+- source distributions contain the package source, the design and validation
+  documents referenced here, the MIT license, and the minimum project files
+  needed to build it;
 - tests, fixtures, caches, databases, prompts, and credentials are excluded
   from both distribution formats.
 

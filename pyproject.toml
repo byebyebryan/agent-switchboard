@@ -27,6 +27,7 @@ only-include = [
   "src/agent_switchboard",
   "docs/design.md",
   "docs/phase-1-validation.md",
+  "docs/phase-2-validation.md",
 ]
 
 [tool.pytest.ini_options]

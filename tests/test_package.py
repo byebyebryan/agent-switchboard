@@ -34,24 +34,47 @@ def test_static_pep_621_metadata_and_stdlib_runtime() -> None:
         "src/agent_switchboard",
         "docs/design.md",
         "docs/phase-1-validation.md",
+        "docs/phase-2-validation.md",
     ]
     assert metadata["tool"]["pytest"]["ini_options"]["pythonpath"] == ["src"]
 
 
 def test_readme_states_phase_and_license() -> None:
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
-    assert "Phase 1 core implementation" in readme
-    assert "not implemented yet" in readme
+    assert "Phase 1 core plus a bounded, read-only Codex" in readme
+    assert "slice of Phase 2" in readme
+    assert "docs/phase-2-validation.md" in readme
     assert "MIT License" in readme
     assert "SOURCE_DATE_EPOCH=1784073600" in readme
 
 
 def test_ci_smokes_wheel_and_source_distribution_installations() -> None:
     workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+    verifier = (ROOT / "scripts/verify_distributions.py").read_text(encoding="utf-8")
     assert "/tmp/switchboard-wheel-smoke/bin/python" in workflow
     assert "/tmp/switchboard-sdist-smoke/bin/python" in workflow
     assert "--no-deps /tmp/switchboard-build-a/*.tar.gz" in workflow
-    assert "/tmp/switchboard-sdist-smoke/bin/swbctl" in workflow
+    assert "/tmp/switchboard-sdist-smoke" in workflow
+    for module in (
+        "agent_switchboard.cli",
+        "agent_switchboard.local",
+        "agent_switchboard.paths",
+        "agent_switchboard.providers.codex",
+        "agent_switchboard.reconcile",
+        "agent_switchboard.snapshot",
+    ):
+        assert f"import {module}" in workflow
+    assert "migrations/v0003_name_provenance_runtime_index.py" in workflow
+    assert 'snapshot --help | grep -F -- "--reconcile {none,full}"' in workflow
+    assert 'list --help | grep -F -- "--refresh"' in workflow
+    assert 'snapshot --json > "$smoke_root/snapshot.json"' in workflow
+    assert 'list --json > "$smoke_root/list.json"' in workflow
+    assert "Path(sys.argv[1]).read_bytes()" in workflow
+    assert "SnapshotEnvelope.from_json" in workflow
+    assert '"docs/phase-2-validation.md"' in verifier
+    assert '"agent_switchboard/migrations/v0003_name_provenance_runtime_index.py"' in (
+        verifier
+    )
 
 
 def test_cli_help_and_version(capsys: pytest.CaptureFixture[str]) -> None:

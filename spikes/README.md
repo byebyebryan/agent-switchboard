@@ -21,6 +21,38 @@ Generate the installed Codex schema before refreshing the fixture:
 codex app-server generate-json-schema --out DIR
 ```
 
+The retained Phase 0 schema at
+`spikes/fixtures/codex/0.144.4/codex_app_server_protocol.v2.schemas.json` was
+generated with the historical experimental mode. Its raw SHA-256 is
+`93b300b8102e48bd1640fe12aec7ed29c215cd882237c70bedd32bf364dacc05` and its
+parsed canonical JSON fingerprint is
+`f5e8d20f3a8f9bb5e5b23ab0c5aa6bde7b12e7e0713606c5d0132651a4959d37`.
+
+Production discovery does not pass the experimental flag. The retained
+nonexperimental schema under `0.144.4/nonexperimental/` has raw SHA-256
+`8f2f39b5b22a5bf563f63846f52895fd740d2be3dbc0fd93ca54e94ef29421a3`
+and canonical fingerprint
+`5d8251e1e2f713a3c567c927386f84f2f94692d4721b90d8ff36d0ff92877621`.
+Raw file hashes and canonical semantic fingerprints are different evidence and
+must not be substituted for one another.
+
+## Production Codex smoke
+
+`live_codex_smoke.py` exercises the production adapter, reconciliation, and
+snapshot path against an isolated temporary Switchboard registry. It never
+uses the user's Switchboard host ID or database and never prints the live
+snapshot, session names, or paths:
+
+```sh
+.venv/bin/python scripts/live_codex_smoke.py
+.venv/bin/python scripts/live_codex_smoke.py --codex /usr/bin/codex
+```
+
+The default gate expects Codex `0.144.4` and the production canonical schema
+fingerprint above. Successful output is one sanitized JSON summary containing
+only version, fingerprint, feature names, emitted session count, and elapsed
+milliseconds. Failure output is intentionally generic.
+
 ## Claude checks
 
 `claude_agents_probe.py` runs on a host with a working Claude login:
