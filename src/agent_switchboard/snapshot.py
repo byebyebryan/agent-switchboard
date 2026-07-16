@@ -11,11 +11,14 @@ from .protocol import (
     MAX_JSON_BYTES,
     Capability,
     ErrorRecord,
+    ErrorScope,
     HostRecord,
     ProtocolError,
     SnapshotEnvelope,
 )
 from .storage import HostSnapshotRows, Registry, now_ms
+
+_SNAPSHOT_SESSION_BYTE_BUDGET = MAX_JSON_BYTES // 2
 
 
 class _InvalidStoredProjectJson(ValueError):
@@ -206,6 +209,69 @@ def _surface(row: Mapping[str, Any]) -> dict[str, Any]:
     return result
 
 
+def _bounded_session_rows(
+    rows: HostSnapshotRows,
+) -> tuple[tuple[dict[str, Any], ...], bool]:
+    """Select deterministic session rows within a canonical UTF-8 budget."""
+
+    selected: list[dict[str, Any]] = []
+    encoded_bytes = 2  # JSON array delimiters.
+    for row in rows.sessions:
+        try:
+            encoded = json.dumps(
+                _session(row),
+                ensure_ascii=False,
+                allow_nan=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode("utf-8")
+        except (TypeError, ValueError, UnicodeEncodeError) as error:
+            raise ProtocolError(
+                "stored session contains invalid JSON metadata"
+            ) from error
+        separator_bytes = 1 if selected else 0
+        if (
+            encoded_bytes + separator_bytes + len(encoded)
+            > _SNAPSHOT_SESSION_BYTE_BUDGET
+        ):
+            continue
+        selected.append(dict(row))
+        encoded_bytes += separator_bytes + len(encoded)
+
+    truncated = rows.retained_session_count > len(selected)
+    return tuple(selected), truncated
+
+
+def _bounded_snapshot_rows(
+    rows: HostSnapshotRows,
+) -> tuple[HostSnapshotRows, bool]:
+    sessions, truncated = _bounded_session_rows(rows)
+    selected_keys = {str(row["session_key"]) for row in sessions}
+    runtimes = tuple(
+        row
+        for row in rows.runtimes
+        if row["session_key"] is None or str(row["session_key"]) in selected_keys
+    )
+    surfaces = tuple(
+        row
+        for row in rows.surfaces
+        if row["current_session_key"] is None
+        or str(row["current_session_key"]) in selected_keys
+    )
+    return (
+        HostSnapshotRows(
+            host=rows.host,
+            projects=rows.projects,
+            locations=rows.locations,
+            sessions=sessions,
+            retained_session_count=rows.retained_session_count,
+            runtimes=runtimes,
+            surfaces=surfaces,
+        ),
+        truncated,
+    )
+
+
 def _assemble(
     rows: HostSnapshotRows,
     *,
@@ -257,13 +323,35 @@ def build_host_snapshot(
 ) -> SnapshotEnvelope:
     """Build a protocol-valid snapshot without querying or mutating providers."""
 
-    rows = registry.read_host_snapshot(host_id)
+    rows, sessions_truncated = _bounded_snapshot_rows(
+        registry.read_host_snapshot(host_id)
+    )
     timestamp = now_ms() if generated_at is None else generated_at
+    snapshot_errors = tuple(errors)
+    if sessions_truncated:
+        snapshot_errors = (
+            *snapshot_errors,
+            ErrorRecord(
+                code="snapshot_sessions_truncated",
+                message=(
+                    "The snapshot omitted retained sessions to remain within "
+                    "protocol limits."
+                ),
+                scope=ErrorScope.HOST,
+                retryable=False,
+                observed_at=timestamp,
+                host_id=HostId(rows.host["host_id"]),
+                details={
+                    "retainedCount": rows.retained_session_count,
+                    "emittedCount": len(rows.sessions),
+                },
+            ),
+        )
     return _assemble(
         rows,
         generated_at=timestamp,
         capabilities=capabilities,
-        errors=errors,
+        errors=snapshot_errors,
     )
 
 

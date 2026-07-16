@@ -99,6 +99,13 @@ def test_minimal_configuration_has_documented_defaults() -> None:
     assert config.tmux.naming_prefix == "as"
 
 
+def test_oversized_toml_integer_is_a_config_error() -> None:
+    document = "[defaults]\nrefresh_interval_seconds = " + "1" * 5_000
+
+    with pytest.raises(ConfigError):
+        parse_config(document, host_id=HOST_A)
+
+
 def test_missing_implicit_configuration_uses_defaults(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

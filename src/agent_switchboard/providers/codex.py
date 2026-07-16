@@ -127,7 +127,9 @@ def _load_json(raw: bytes) -> object:
         value = json.loads(raw, parse_constant=_reject_json_constant)
         _validate_json_value(value)
         return value
-    except (RecursionError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+    except _InvalidJsonValue:
+        raise
+    except (RecursionError, UnicodeDecodeError, ValueError) as exc:
         raise _InvalidJsonValue("invalid JSON encoding") from exc
 
 

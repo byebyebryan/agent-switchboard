@@ -54,8 +54,15 @@ def test_ci_smokes_wheel_and_source_distribution_installations() -> None:
     assert "/tmp/switchboard-sdist-smoke/bin/swbctl" in workflow
 
 
-def test_provisional_cli_help_and_version(capsys: pytest.CaptureFixture[str]) -> None:
-    assert main([]) == 0
+def test_cli_help_and_version(capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(SystemExit) as exit_info:
+        main(["--help"])
+    assert exit_info.value.code == 0
+    assert (
+        "Inspect and route provider-native coding-agent sessions."
+        in capsys.readouterr().out
+    )
+
     with pytest.raises(SystemExit) as exit_info:
         main(["--version"])
     assert exit_info.value.code == 0

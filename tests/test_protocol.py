@@ -271,12 +271,21 @@ def test_retained_details_use_an_explicit_typed_safe_field_contract() -> None:
 
     data["error"]["details"] = {
         "capability": "provider.claude.agent_view",
+        "emittedCount": 8,
         "latency": 12.5,
         "payloadHash": "a" * 64,
+        "retainedCount": 10,
     }
     error = ErrorEnvelope.from_dict(data)
     assert error.error.details == data["error"]["details"]
     assert error.to_dict()["error"]["details"] == data["error"]["details"]
+
+    data["error"]["details"]["emittedCount"] = 10.5
+    with pytest.raises(ProtocolError, match="non-negative integer"):
+        ErrorEnvelope.from_dict(data)
+    data["error"]["details"]["emittedCount"] = 11
+    with pytest.raises(ProtocolError, match="must not exceed"):
+        ErrorEnvelope.from_dict(data)
 
     capability = json.loads((FIXTURES / "capability.json").read_text())
     capability["capability"]["degradedReasons"][0]["details"] = {

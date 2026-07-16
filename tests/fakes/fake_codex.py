@@ -159,7 +159,7 @@ def main() -> int:
                 target.write_text(schema["raw"], encoding="utf-8")
             elif "value" not in schema:
                 fixture = (
-                    Path(__file__).parents[2]
+                    Path(__file__).resolve().parents[2]
                     / "spikes"
                     / "fixtures"
                     / "codex"

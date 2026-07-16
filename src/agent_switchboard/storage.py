@@ -26,11 +26,13 @@ from .domain import (
     LaunchId,
     LocationId,
     ProjectId,
+    ProjectLocation,
     ProviderId,
     SessionKey,
     SurfaceId,
     UUIDId,
     ValidationError,
+    match_project_location,
     normalize_handoff_text,
 )
 from .domain import (
@@ -51,6 +53,7 @@ DEFAULT_BUSY_TIMEOUT_MS: Final = 5_000
 MAX_BUSY_TIMEOUT_MS: Final = 30_000
 DEFAULT_EVENT_LIMIT: Final = 1_000
 MAX_EVENT_LIMIT: Final = 100_000
+DEFAULT_SNAPSHOT_SESSION_LIMIT: Final = 1_000
 DEFAULT_SNAPSHOT_RUNTIME_LIMIT: Final = 10_000
 _SQLITE_MAX_INTEGER: Final = 2**63 - 1
 
@@ -257,6 +260,7 @@ class HostSnapshotRows:
     projects: tuple[dict[str, Any], ...]
     locations: tuple[dict[str, Any], ...]
     sessions: tuple[dict[str, Any], ...]
+    retained_session_count: int
     runtimes: tuple[dict[str, Any], ...]
     surfaces: tuple[dict[str, Any], ...]
 
@@ -923,14 +927,61 @@ class Registry:
                     observed_at=timestamp,
                 )
 
+            declared_locations = tuple(
+                ProjectLocation(
+                    location_id=LocationId(row["location_id"]),
+                    project_id=ProjectId(row["project_id"]),
+                    host_id=HostId(row["host_id"]),
+                    path=Path(row["path"]),
+                )
+                for row in connection.execute(
+                    """
+                    SELECT location.location_id, location.project_id,
+                           location.host_id, location.path
+                    FROM project_locations AS location
+                    JOIN projects AS project
+                      ON project.project_id = location.project_id
+                    WHERE location.host_id = ?
+                      AND location.declared = 1
+                      AND project.declared = 1
+                    ORDER BY location.location_id
+                    """,
+                    (host_id,),
+                ).fetchall()
+            )
+            assignments: dict[str, ProjectLocation] = {}
+            for session in normalized:
+                session_key = str(session["session_key"])
+                existing = existing_by_key.get(session_key)
+                if existing is not None and (
+                    existing["project_id"] is not None
+                    or existing["location_id"] is not None
+                ):
+                    continue
+                location = match_project_location(
+                    session["cwd"],
+                    HostId(host_id),
+                    declared_locations,
+                )
+                if location is not None:
+                    assignments[session_key] = location
+
             inserted_count = 0
             updated_count = 0
             for session in normalized:
-                existing = existing_by_key.get(str(session["session_key"]))
+                session_key = str(session["session_key"])
+                existing = existing_by_key.get(session_key)
                 update = self._provider_metadata_update(
                     session,
                     existing,
                 )
+                assignment = assignments.get(session_key)
+                if assignment is not None:
+                    update.update(
+                        project_id=str(assignment.project_id),
+                        location_id=str(assignment.location_id),
+                        metadata_source="location_match",
+                    )
                 if existing is None:
                     # Initial provider history is resumability evidence, but
                     # it says nothing about activity freshness or confidence.
@@ -1379,16 +1430,25 @@ class Registry:
         self,
         host_id: str,
         *,
+        session_limit: int = DEFAULT_SNAPSHOT_SESSION_LIMIT,
         runtime_limit: int = DEFAULT_SNAPSHOT_RUNTIME_LIMIT,
     ) -> HostSnapshotRows:
         """Read host-local snapshot inputs from one coherent DB view.
 
-        Runtime observations are append-only, so snapshots retain only the
-        deterministic newest ``runtime_limit`` rows and present that tail in
-        stable chronological order.
+        Session candidates and append-only runtime observations are bounded at
+        read time. The coherent retained-session count lets snapshot assembly
+        report an explicit truncation without loading the entire registry.
         """
 
         host_id = _canonical_host_id(host_id)
+        if (
+            isinstance(session_limit, bool)
+            or not isinstance(session_limit, int)
+            or not 1 <= session_limit <= DEFAULT_SNAPSHOT_SESSION_LIMIT
+        ):
+            raise StorageError(
+                f"session_limit must be between 1 and {DEFAULT_SNAPSHOT_SESSION_LIMIT}"
+            )
         if (
             isinstance(runtime_limit, bool)
             or not isinstance(runtime_limit, int)
@@ -1415,6 +1475,12 @@ class Registry:
                     (host_id,),
                 ).fetchall()
             )
+            retained_session_count = int(
+                connection.execute(
+                    "SELECT COUNT(*) FROM sessions WHERE host_id = ?",
+                    (host_id,),
+                ).fetchone()[0]
+            )
             sessions = tuple(
                 dict(row)
                 for row in connection.execute(
@@ -1422,8 +1488,9 @@ class Registry:
                     SELECT * FROM sessions
                     WHERE host_id = ?
                     ORDER BY session_key
+                    LIMIT ?
                     """,
-                    (host_id,),
+                    (host_id, session_limit),
                 ).fetchall()
             )
             projects = tuple(
@@ -1467,6 +1534,7 @@ class Registry:
             projects=projects,
             locations=locations,
             sessions=sessions,
+            retained_session_count=retained_session_count,
             runtimes=runtimes,
             surfaces=surfaces,
         )
@@ -2922,6 +2990,7 @@ __all__ = [
     "DEFAULT_BUSY_TIMEOUT_MS",
     "DEFAULT_EVENT_LIMIT",
     "DEFAULT_SNAPSHOT_RUNTIME_LIMIT",
+    "DEFAULT_SNAPSHOT_SESSION_LIMIT",
     "HostSnapshotRows",
     "IdentityConflict",
     "LaunchBindingResult",

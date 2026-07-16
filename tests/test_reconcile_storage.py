@@ -4,6 +4,7 @@ from copy import deepcopy
 
 import pytest
 
+from agent_switchboard.domain import AmbiguousLocationError
 from agent_switchboard.storage import IdentityConflict, Registry, StorageError
 
 HOST_ID = "11111111-1111-4111-8111-111111111111"
@@ -13,6 +14,8 @@ THIRD_ID = "44444444-4444-4444-8444-444444444444"
 PROJECT_ID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
 LOCATION_ID = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
 SURFACE_ID = "cccccccc-cccc-4ccc-8ccc-cccccccccccc"
+SECOND_PROJECT_ID = "dddddddd-dddd-4ddd-8ddd-dddddddddddd"
+SECOND_LOCATION_ID = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee"
 FIRST_KEY = f"{HOST_ID}:codex:{FIRST_ID}"
 SECOND_KEY = f"{HOST_ID}:codex:{SECOND_ID}"
 THIRD_KEY = f"{HOST_ID}:codex:{THIRD_ID}"
@@ -225,6 +228,236 @@ def test_reconcile_preserves_project_handoff_and_surface_links(
     assert missing["activity"] == "working"
     assert missing["state_confidence"] == "inferred"
     assert missing["state_observed_at"] == 50
+
+
+def test_reconcile_assigns_deepest_declared_location_and_leaves_unmatched(
+    registry: Registry,
+) -> None:
+    registry.materialize_projects(
+        HOST_ID,
+        (
+            {
+                "project_id": PROJECT_ID,
+                "name": "root project",
+                "locations": (
+                    {
+                        "location_id": LOCATION_ID,
+                        "path": "/work",
+                    },
+                ),
+            },
+            {
+                "project_id": SECOND_PROJECT_ID,
+                "name": "nested project",
+                "locations": (
+                    {
+                        "location_id": SECOND_LOCATION_ID,
+                        "path": "/work/nested",
+                    },
+                ),
+            },
+        ),
+        observed_at=10,
+    )
+
+    registry.reconcile_provider_sessions(
+        HOST_ID,
+        "codex",
+        (
+            provider_record(FIRST_ID, 100, cwd="/work/nested/src"),
+            provider_record(SECOND_ID, 100, cwd="/elsewhere"),
+        ),
+        observed_at=100,
+    )
+
+    matched = registry.get_session(FIRST_KEY)
+    assert matched is not None
+    assert matched["project_id"] == SECOND_PROJECT_ID
+    assert matched["location_id"] == SECOND_LOCATION_ID
+    assert matched["metadata_source"] == "location_match"
+    unmatched = registry.get_session(SECOND_KEY)
+    assert unmatched is not None
+    assert unmatched["project_id"] is None
+    assert unmatched["location_id"] is None
+    assert unmatched["metadata_source"] == "provider"
+
+
+def test_reconcile_assigns_previously_unassigned_session_after_catalog_appears(
+    registry: Registry,
+) -> None:
+    registry.reconcile_provider_sessions(
+        HOST_ID,
+        "codex",
+        (provider_record(FIRST_ID, 100, cwd="/later/project/src"),),
+        observed_at=100,
+    )
+    initial = registry.get_session(FIRST_KEY)
+    assert initial is not None
+    assert initial["project_id"] is None
+    assert initial["location_id"] is None
+
+    registry.materialize_projects(
+        HOST_ID,
+        (
+            {
+                "project_id": PROJECT_ID,
+                "name": "later project",
+                "locations": (
+                    {
+                        "location_id": LOCATION_ID,
+                        "path": "/later/project",
+                    },
+                ),
+            },
+        ),
+        observed_at=150,
+    )
+    registry.reconcile_provider_sessions(
+        HOST_ID,
+        "codex",
+        (provider_record(FIRST_ID, 200, cwd="/later/project/src"),),
+        observed_at=200,
+    )
+
+    assigned = registry.get_session(FIRST_KEY)
+    assert assigned is not None
+    assert assigned["project_id"] == PROJECT_ID
+    assert assigned["location_id"] == LOCATION_ID
+    assert assigned["metadata_source"] == "location_match"
+
+
+def test_reconcile_preserves_existing_full_and_project_only_assignments(
+    registry: Registry,
+) -> None:
+    registry.materialize_projects(
+        HOST_ID,
+        (
+            {
+                "project_id": PROJECT_ID,
+                "name": "matching project",
+                "locations": (
+                    {
+                        "location_id": LOCATION_ID,
+                        "path": "/provider/path",
+                    },
+                ),
+            },
+            {
+                "project_id": SECOND_PROJECT_ID,
+                "name": "curated project",
+                "locations": (
+                    {
+                        "location_id": SECOND_LOCATION_ID,
+                        "path": "/curated/path",
+                    },
+                ),
+            },
+        ),
+        observed_at=10,
+    )
+    registry.upsert_session(
+        {
+            "session_key": FIRST_KEY,
+            "host_id": HOST_ID,
+            "provider": "codex",
+            "provider_session_id": FIRST_ID,
+            "project_id": SECOND_PROJECT_ID,
+            "location_id": SECOND_LOCATION_ID,
+            "cwd": "/old/full",
+            "metadata_source": "curated",
+            "first_observed_at": 50,
+            "last_observed_at": 50,
+        }
+    )
+    registry.upsert_session(
+        {
+            "session_key": SECOND_KEY,
+            "host_id": HOST_ID,
+            "provider": "codex",
+            "provider_session_id": SECOND_ID,
+            "project_id": SECOND_PROJECT_ID,
+            "cwd": "/old/project-only",
+            "metadata_source": "curated",
+            "first_observed_at": 50,
+            "last_observed_at": 50,
+        }
+    )
+
+    registry.reconcile_provider_sessions(
+        HOST_ID,
+        "codex",
+        (
+            provider_record(FIRST_ID, 100, cwd="/provider/path/full"),
+            provider_record(SECOND_ID, 100, cwd="/provider/path/project-only"),
+        ),
+        observed_at=100,
+    )
+
+    full = registry.get_session(FIRST_KEY)
+    assert full is not None
+    assert full["project_id"] == SECOND_PROJECT_ID
+    assert full["location_id"] == SECOND_LOCATION_ID
+    assert full["metadata_source"] == "curated"
+    project_only = registry.get_session(SECOND_KEY)
+    assert project_only is not None
+    assert project_only["project_id"] == SECOND_PROJECT_ID
+    assert project_only["location_id"] is None
+    assert project_only["metadata_source"] == "curated"
+
+
+def test_ambiguous_location_match_fails_before_reconciliation_writes(
+    registry: Registry,
+    tmp_path,
+) -> None:
+    registry.reconcile_provider_sessions(
+        HOST_ID,
+        "codex",
+        (provider_record(FIRST_ID, 50, cwd="/unmatched"),),
+        observed_at=50,
+    )
+    before = deepcopy(registry.list_sessions(host_id=HOST_ID))
+
+    canonical = tmp_path / "canonical"
+    canonical.mkdir()
+    alias = tmp_path / "alias"
+    alias.symlink_to(canonical, target_is_directory=True)
+    registry.materialize_projects(
+        HOST_ID,
+        (
+            {
+                "project_id": PROJECT_ID,
+                "name": "canonical project",
+                "locations": (
+                    {
+                        "location_id": LOCATION_ID,
+                        "path": str(canonical),
+                    },
+                ),
+            },
+            {
+                "project_id": SECOND_PROJECT_ID,
+                "name": "alias project",
+                "locations": (
+                    {
+                        "location_id": SECOND_LOCATION_ID,
+                        "path": str(alias),
+                    },
+                ),
+            },
+        ),
+        observed_at=60,
+    )
+
+    with pytest.raises(AmbiguousLocationError):
+        registry.reconcile_provider_sessions(
+            HOST_ID,
+            "codex",
+            (provider_record(SECOND_ID, 100, cwd=str(canonical / "src")),),
+            observed_at=100,
+        )
+
+    assert registry.list_sessions(host_id=HOST_ID) == before
+    assert registry.get_session(SECOND_KEY) is None
 
 
 def test_provider_scan_preserves_state_clock_and_allows_delayed_hook(

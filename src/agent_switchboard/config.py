@@ -491,6 +491,8 @@ def parse_config(data: bytes | str, *, host_id: HostId) -> SwitchboardConfig:
         document = tomllib.loads(data.decode("utf-8"))
     except (UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
         raise ConfigError(f"invalid TOML: {exc}") from exc
+    except ValueError as exc:
+        raise ConfigError(f"invalid TOML value: {exc}") from exc
     _known(
         document,
         {"host", "providers", "remotes", "projects", "defaults", "tmux"},

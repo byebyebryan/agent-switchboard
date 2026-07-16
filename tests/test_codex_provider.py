@@ -430,6 +430,18 @@ def test_mid_pagination_timeout_returns_no_partial_sessions(
     ("actions", "expected"),
     [
         ([{"raw": "{broken json}\n"}], "app_server_malformed_json"),
+        (
+            [
+                {
+                    "raw": (
+                        '{"id":1,"result":{"data":[],"oversized":'
+                        + "1" * 5_000
+                        + "}}\n"
+                    )
+                }
+            ],
+            "app_server_malformed_json",
+        ),
         ([{"json": ["not", "an", "object"]}], "app_server_invalid_message"),
         (
             [{"error": {"code": -32000, "message": "SECRET provider payload"}}],

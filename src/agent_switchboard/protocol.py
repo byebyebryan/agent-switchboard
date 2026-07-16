@@ -99,10 +99,14 @@ _SENSITIVE_KEYS = {
 }
 _KEY_NORMALIZER = re.compile(r"[^a-z0-9]")
 _SAFE_DETAIL_STRING_FIELDS = frozenset({"capability", "fallback"})
+_SAFE_DETAIL_INTEGER_FIELDS = frozenset({"emittedCount", "retainedCount"})
 _SAFE_DETAIL_NUMBER_FIELDS = frozenset({"latency"})
 _SAFE_DETAIL_HASH_FIELDS = frozenset({"payloadHash"})
 _SAFE_DETAIL_FIELDS = (
-    _SAFE_DETAIL_STRING_FIELDS | _SAFE_DETAIL_NUMBER_FIELDS | _SAFE_DETAIL_HASH_FIELDS
+    _SAFE_DETAIL_STRING_FIELDS
+    | _SAFE_DETAIL_INTEGER_FIELDS
+    | _SAFE_DETAIL_NUMBER_FIELDS
+    | _SAFE_DETAIL_HASH_FIELDS
 )
 
 JsonScalar = None | bool | int | float | str
@@ -385,6 +389,8 @@ def _details_record(value: object, path: str) -> dict[str, JsonValue]:
         field_path = f"{path}.{key}"
         if key in _SAFE_DETAIL_STRING_FIELDS:
             result[key] = _string(value, field_path, maximum=512)
+        elif key in _SAFE_DETAIL_INTEGER_FIELDS:
+            result[key] = _integer(value, field_path)
         elif key in _SAFE_DETAIL_NUMBER_FIELDS:
             if (
                 isinstance(value, bool)
@@ -395,6 +401,12 @@ def _details_record(value: object, path: str) -> dict[str, JsonValue]:
             result[key] = value
         else:
             result[key] = _hash(value, field_path)
+    if (
+        "emittedCount" in result
+        and "retainedCount" in result
+        and result["emittedCount"] > result["retainedCount"]
+    ):
+        raise ProtocolError(f"{path}.emittedCount must not exceed retainedCount")
     return result
 
 

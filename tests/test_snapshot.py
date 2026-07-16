@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import json
+from uuid import UUID
 
 import pytest
 
 import agent_switchboard.storage as storage_module
 from agent_switchboard.domain import HostId, ProviderId
 from agent_switchboard.protocol import (
+    MAX_JSON_BYTES,
     Capability,
     ErrorRecord,
     ErrorScope,
@@ -29,6 +31,23 @@ SECOND_KEY = f"{HOST_ID}:codex:{SECOND_ID}"
 REMOTE_KEY = f"{REMOTE_HOST_ID}:claude:{REMOTE_ID}"
 SURFACE_ID = "dddddddd-dddd-4ddd-8ddd-dddddddddddd"
 REMOTE_SURFACE_ID = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee"
+
+
+def _provider_record(index: int, *, cwd: str) -> dict[str, object]:
+    provider_session_id = str(UUID(int=index + 1))
+    return {
+        "session_key": f"{HOST_ID}:codex:{provider_session_id}",
+        "host_id": HOST_ID,
+        "provider": "codex",
+        "provider_session_id": provider_session_id,
+        "name": None,
+        "cwd": cwd,
+        "created_at": 1,
+        "provider_updated_at": 2,
+        "last_activity_at": 2,
+        "last_observed_at": 3,
+        "metadata_source": "provider",
+    }
 
 
 @pytest.fixture
@@ -352,6 +371,86 @@ def test_snapshot_runtime_history_is_a_bounded_latest_tail(
         "runtime-observation-2",
         "runtime-observation-3",
     ]
+
+
+def test_large_legal_reconciliation_yields_bounded_truncated_snapshot(
+    tmp_path,
+) -> None:
+    database = tmp_path / "large-registry.db"
+    value = Registry(database)
+    value.upsert_host(HOST_ID, "local", is_local=True, observed_at=1)
+    cwd_prefix = "/missing-snapshot-root/" + "/".join(["x" * 90] * 10)
+    records = tuple(
+        _provider_record(index, cwd=f"{cwd_prefix}/{index}") for index in range(10_000)
+    )
+    value.reconcile_provider_sessions(HOST_ID, "codex", records, observed_at=3)
+
+    rows = value.read_host_snapshot(HOST_ID)
+    assert rows.retained_session_count == 10_000
+    assert len(rows.sessions) == storage_module.DEFAULT_SNAPSHOT_SESSION_LIMIT
+
+    raw = build_host_snapshot_json(value, HOST_ID, generated_at=4)
+    parsed = SnapshotEnvelope.from_json(raw)
+    error = next(
+        item for item in parsed.errors if item.code == "snapshot_sessions_truncated"
+    )
+
+    assert len(raw.encode("utf-8")) <= MAX_JSON_BYTES
+    assert len(parsed.sessions) == storage_module.DEFAULT_SNAPSHOT_SESSION_LIMIT
+    assert error.scope is ErrorScope.HOST
+    assert error.details == {"emittedCount": 1_000, "retainedCount": 10_000}
+    assert (
+        value.connection.execute(
+            "SELECT COUNT(*) FROM sessions WHERE host_id = ?", (HOST_ID,)
+        ).fetchone()[0]
+        == 10_000
+    )
+    value.close()
+
+
+def test_snapshot_session_budget_uses_actual_utf8_size_and_filters_references(
+    registry: Registry,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "agent_switchboard.snapshot._SNAPSHOT_SESSION_BYTE_BUDGET",
+        2,
+    )
+
+    snapshot = build_host_snapshot(registry, HOST_ID, generated_at=100)
+    error = next(
+        item for item in snapshot.errors if item.code == "snapshot_sessions_truncated"
+    )
+
+    assert snapshot.sessions == ()
+    assert snapshot.runtimes == ()
+    assert snapshot.surfaces == ()
+    assert error.details == {"emittedCount": 0, "retainedCount": 2}
+
+
+def test_worst_case_utf8_sessions_are_selected_by_encoded_byte_budget(tmp_path) -> None:
+    value = Registry(tmp_path / "wide-registry.db")
+    value.upsert_host(HOST_ID, "local", is_local=True, observed_at=1)
+    wide_cwd = "/missing-wide-root/" + "/".join(["💡" * 150] * 20)
+    records = tuple(_provider_record(index, cwd=wide_cwd) for index in range(600))
+    value.reconcile_provider_sessions(HOST_ID, "codex", records, observed_at=3)
+
+    raw = build_host_snapshot_json(value, HOST_ID, generated_at=4)
+    snapshot = SnapshotEnvelope.from_json(raw)
+    error = next(
+        item for item in snapshot.errors if item.code == "snapshot_sessions_truncated"
+    )
+
+    assert len(raw.encode("utf-8")) <= MAX_JSON_BYTES
+    assert 0 < len(snapshot.sessions) < 600
+    assert error.details == {
+        "emittedCount": len(snapshot.sessions),
+        "retainedCount": 600,
+    }
+    assert (
+        value.connection.execute("SELECT COUNT(*) FROM sessions").fetchone()[0] == 600
+    )
+    value.close()
 
 
 def test_snapshot_catches_corrupt_stored_project_json(registry: Registry) -> None:
