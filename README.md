@@ -62,12 +62,13 @@ bootstrapped, no-refresh commands read retained state without parsing config or
 invoking Codex.
 
 `snapshot --reconcile live` repairs retained process and tmux evidence without
-querying Codex history. `snapshot --reconcile full` and `list --refresh` load configuration,
-materialize configured projects, and run the bounded Codex adapter when Codex
-is enabled. Provider absence, timeouts, incompatible results, and incomplete
-pagination return a valid snapshot with structured capability degradation;
-they do not erase retained sessions. Core configuration, storage, migration,
-or protocol failures exit nonzero with no partial JSON.
+querying Codex history. `snapshot --reconcile full` and `list --refresh` load
+configuration, materialize configured projects, and run the bounded Codex
+adapter when Codex is enabled. Provider absence, timeouts, incompatible
+results, and incomplete pagination return a valid snapshot with structured
+capability degradation; they do not erase retained sessions. Core
+configuration, storage, migration, or protocol failures exit nonzero with no
+partial JSON.
 
 Codex invokes `swbctl event --provider codex` from lifecycle hooks. That
 internal fast path accepts one bounded JSON object on stdin, discards prompts,

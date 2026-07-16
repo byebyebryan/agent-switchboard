@@ -167,12 +167,12 @@ would make the source archive digest self-referential and stale on every edit.
 | Live production path | `/usr/bin/codex`, expected `0.144.4` contract | Clean capability with `app_server_thread_list` and `schema_fingerprint`; canonical fingerprint `5d8251e1e2f713a3c567c927386f84f2f94692d4721b90d8ff36d0ff92877621`; 4 sessions; 767 ms |
 | Reproducible wheel/source builds | Fixed `SOURCE_DATE_EPOCH=1784073600` | Byte-identical rebuilds passed the verifier; 23 package files, 28 wheel members, and 31 source-distribution members matched the exact allowlists |
 | Installed artifacts | Separate fresh environments | Wheel and source distribution passed `pip check`, hook/doctor imports and command help, migration v4/current-registry creation, and isolated-XDG snapshot/list smoke tests |
+| Existing DMS read-only consumer | Isolated retained read against the freshly installed current wheel; no live shell or service lifecycle | 92 Python and 16 JavaScript behavior groups passed, QML formatting matched, Ruff and Pyright passed, and the bridge accepted the current empty Snapshot v1 envelope. This does not claim Phase 3 DMS action or presentation parity. |
 
 ## Remaining implementation scope
 
-- Claude supervisor discovery and capability-gated fallback behavior.
-- Claude discovery, hooks, process/supervisor liveness, and normalized runtime
-  transitions.
+- Claude supervisor discovery with capability-gated fallback, hook ingestion,
+  process/supervisor liveness, and normalized runtime transitions.
 - Launch preparation, leases, tmux surface actions, and project-aware new or
   resume flows.
 - DMS local migration and niri/Ghostty presentation parity.

@@ -2,7 +2,7 @@
 
 Status: Implementation baseline
 
-Last updated: 2026-07-15
+Last updated: 2026-07-16
 
 Related research: [Open-source product landscape](product-landscape.md)
 
@@ -1168,6 +1168,8 @@ swbctl select-surface <surface-id> --client <tmux-client-id>
 swbctl attach-surface <surface-id>
 swbctl event --provider <provider>
 swbctl snapshot [--reconcile none|live|full] --json
+swbctl hooks install --provider codex [--dry-run]
+swbctl hooks uninstall --provider codex [--dry-run]
 swbctl doctor
 ```
 
@@ -1783,7 +1785,7 @@ The implemented Phase 1 boundary, verification commands, privacy contract, and
 artifact evidence are recorded in
 [`docs/phase-1-validation.md`](phase-1-validation.md).
 
-### Phase 2: Read-only providers, hooks, and reconciliation (partial)
+### Phase 2: Provider discovery, hooks, and reconciliation (partial)
 
 - Port Codex app-server discovery and metadata normalization.
 - Add capability-gated Claude supervisor discovery.
