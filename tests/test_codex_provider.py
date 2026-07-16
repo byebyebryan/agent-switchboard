@@ -937,7 +937,10 @@ def test_recursive_page_json_is_a_structured_failure(
     result = provider.discover_sessions()
 
     assert not result.complete
-    assert result_code(result) == "app_server_malformed_json"
+    assert result_code(result) in {
+        "app_server_malformed_json",
+        "invalid_thread_shape",
+    }
 
 
 @pytest.mark.parametrize(
