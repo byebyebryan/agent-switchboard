@@ -256,6 +256,14 @@ class LaunchBindingResult:
 
 
 @dataclass(frozen=True, slots=True)
+class LaunchSurfaceResult:
+    """Outcome of atomically publishing one launch-owned waiting surface."""
+
+    launch: dict[str, Any]
+    surface: dict[str, Any]
+
+
+@dataclass(frozen=True, slots=True)
 class HookIngestionResult:
     """Outcome of one atomic, privacy-safe lifecycle event write."""
 
@@ -2538,6 +2546,210 @@ class Registry:
         result = _row_dict(row)
         assert result is not None
         return result
+
+    def activate_launch_surface(
+        self,
+        launch_id: str,
+        surface: Mapping[str, Any],
+        *,
+        lease_owner: str,
+        observed_at: int | None = None,
+    ) -> LaunchSurfaceResult:
+        """Atomically insert a launch surface and make its bootstrap waitable."""
+
+        launch_id = _canonical_uuid_id(launch_id, LaunchId, "launch_id")
+        required = {
+            "surface_id",
+            "host_id",
+            "provider",
+            "transport",
+            "transport_locator",
+            "role",
+        } - set(surface)
+        if required:
+            raise StorageError(f"missing surface fields: {sorted(required)}")
+        surface_id = _canonical_uuid_id(surface["surface_id"], SurfaceId, "surface_id")
+        _canonical_host_id(surface["host_id"])
+        _canonical_provider(surface["provider"])
+        if surface["transport"] != "tmux":
+            raise StorageError("launch surface transport must be tmux")
+        if surface["role"] not in {"session", "provider_manager"}:
+            raise StorageError("unsupported launch surface role")
+        if surface.get("launch_id", launch_id) != launch_id:
+            raise IdentityConflict("surface launch_id does not match launch")
+        if (
+            any(
+                surface.get(field) is not None
+                for field in ("current_session_key", "retired_at")
+            )
+            or surface.get("binding_confidence", "unknown") != "unknown"
+        ):
+            raise StorageError("waiting launch surface cannot be bound or retired")
+        _reject_mapping_controls(surface, ("transport_locator", "workspace_id"))
+        timestamp = now_ms() if observed_at is None else observed_at
+        created_at = int(surface.get("created_at", timestamp))
+        if created_at > timestamp:
+            raise StorageError("surface creation time is after its observation")
+
+        with self.transaction(immediate=True) as connection:
+            launch = connection.execute(
+                "SELECT * FROM launch_intents WHERE launch_id = ?", (launch_id,)
+            ).fetchone()
+            if launch is None:
+                raise StorageError(f"unknown launch: {launch_id}")
+            if launch["state"] != "reserved":
+                raise StorageError("launch is not awaiting surface creation")
+            if timestamp < int(launch["updated_at"]):
+                raise StorageError("stale launch surface observation")
+            self._assert_launch_lease(launch, lease_owner, timestamp)
+            expected_role = (
+                "provider_manager" if launch["action"] == "manage" else "session"
+            )
+            if (
+                surface["host_id"] != launch["host_id"]
+                or surface["provider"] != launch["provider"]
+                or surface["transport"] != launch["transport"]
+                or surface["role"] != expected_role
+            ):
+                raise IdentityConflict(
+                    "surface does not match launch host, provider, transport, and role"
+                )
+            connection.execute(
+                """
+                INSERT INTO surfaces(
+                    surface_id, host_id, provider, transport, transport_locator,
+                    workspace_id, role, current_session_key, binding_confidence,
+                    launch_id, created_at, last_observed_at, client_attached,
+                    retired_at
+                ) VALUES (?, ?, ?, 'tmux', ?, ?, ?, NULL, 'unknown', ?, ?, ?, ?, NULL)
+                """,
+                (
+                    surface_id,
+                    surface["host_id"],
+                    surface["provider"],
+                    surface["transport_locator"],
+                    surface.get("workspace_id"),
+                    surface["role"],
+                    launch_id,
+                    created_at,
+                    timestamp,
+                    int(bool(surface.get("client_attached", False))),
+                ),
+            )
+            connection.execute(
+                """
+                UPDATE launch_intents
+                SET state = 'surface_ready', surface_id = ?, updated_at = ?
+                WHERE launch_id = ?
+                """,
+                (surface_id, timestamp, launch_id),
+            )
+            connection.execute(
+                """
+                UPDATE launch_intents
+                SET state = 'waiting_for_client', updated_at = ?
+                WHERE launch_id = ?
+                """,
+                (timestamp, launch_id),
+            )
+            stored_launch = connection.execute(
+                "SELECT * FROM launch_intents WHERE launch_id = ?", (launch_id,)
+            ).fetchone()
+            stored_surface = connection.execute(
+                "SELECT * FROM surfaces WHERE surface_id = ?", (surface_id,)
+            ).fetchone()
+        assert stored_launch is not None and stored_surface is not None
+        return LaunchSurfaceResult(dict(stored_launch), dict(stored_surface))
+
+    def adopt_bound_surface(
+        self,
+        surface: Mapping[str, Any],
+        session_key: str,
+        *,
+        observed_at: int | None = None,
+    ) -> dict[str, Any]:
+        """Atomically register and bind one externally created live surface."""
+
+        parsed_session_key = _canonical_session_key(session_key)
+        required = {
+            "surface_id",
+            "host_id",
+            "provider",
+            "transport",
+            "transport_locator",
+            "role",
+        } - set(surface)
+        if required:
+            raise StorageError(f"missing surface fields: {sorted(required)}")
+        surface_id = _canonical_uuid_id(surface["surface_id"], SurfaceId, "surface_id")
+        _canonical_host_id(surface["host_id"])
+        _canonical_provider(surface["provider"])
+        if surface["transport"] != "tmux" or surface["role"] != "session":
+            raise StorageError("adopted surface must be a tmux session surface")
+        if (
+            any(
+                surface.get(field) is not None
+                for field in (
+                    "launch_id",
+                    "current_session_key",
+                    "retired_at",
+                )
+            )
+            or surface.get("binding_confidence", "unknown") != "unknown"
+        ):
+            raise StorageError("adopted surface must be unbound and launch-free")
+        _reject_mapping_controls(surface, ("transport_locator", "workspace_id"))
+        timestamp = now_ms() if observed_at is None else observed_at
+        created_at = int(surface.get("created_at", timestamp))
+        if created_at > timestamp:
+            raise StorageError("surface creation time is after its observation")
+
+        with self.transaction(immediate=True) as connection:
+            session = connection.execute(
+                "SELECT * FROM sessions WHERE session_key = ?",
+                (str(parsed_session_key),),
+            ).fetchone()
+            if session is None:
+                raise StorageError(f"unknown session: {parsed_session_key}")
+            if session["surface_id"] is not None:
+                raise StorageError("session already has a managed surface")
+            if (
+                session["host_id"] != surface["host_id"]
+                or session["provider"] != surface["provider"]
+            ):
+                raise IdentityConflict("surface and session host/provider do not match")
+            connection.execute(
+                """
+                INSERT INTO surfaces(
+                    surface_id, host_id, provider, transport, transport_locator,
+                    workspace_id, role, current_session_key, binding_confidence,
+                    launch_id, created_at, last_observed_at, client_attached,
+                    retired_at
+                ) VALUES (?, ?, ?, 'tmux', ?, ?, 'session', NULL, 'unknown',
+                          NULL, ?, ?, ?, NULL)
+                """,
+                (
+                    surface_id,
+                    surface["host_id"],
+                    surface["provider"],
+                    surface["transport_locator"],
+                    surface.get("workspace_id"),
+                    created_at,
+                    timestamp,
+                    int(bool(surface.get("client_attached", False))),
+                ),
+            )
+            stored = connection.execute(
+                "SELECT * FROM surfaces WHERE surface_id = ?", (surface_id,)
+            ).fetchone()
+            assert stored is not None
+            return self._bind_surface_row(
+                connection,
+                stored,
+                session,
+                confidence="confirmed",
+                observed_at=timestamp,
+            )
 
     def get_surface(self, surface_id: str) -> dict[str, Any] | None:
         surface_id = _canonical_uuid_id(surface_id, SurfaceId, "surface_id")

@@ -202,6 +202,7 @@ def test_select_surface_revalidates_client_and_locator() -> None:
         "-t",
         "=as-codex-test",
     ]
+    assert controller.client_exists(LOCATOR, "/dev/pts/8")
 
 
 def test_missing_target_and_missing_systemd_run_are_sanitized(

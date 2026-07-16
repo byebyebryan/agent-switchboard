@@ -1358,6 +1358,117 @@ def test_launch_and_surface_lookup_helpers(registry: Registry) -> None:
     assert registry.list_launches(host_id=REMOTE_HOST_ID) == []
 
 
+def test_launch_surface_activation_is_one_waiting_transaction(
+    registry: Registry,
+) -> None:
+    add_session(registry)
+    add_session(
+        registry,
+        session_key=SECOND_SESSION_KEY,
+        provider_session_id=SECOND_SESSION_ID,
+    )
+    launch = registry.reserve_launch(
+        resume_request(),
+        request_id=stable_uuid("atomic-surface-request"),
+        lease_owner="bootstrap-owner",
+        capability_hash=digest("atomic-surface-capability"),
+        expires_at=1_000,
+        created_at=100,
+    ).launch
+    surface_id = stable_uuid("atomic-launch-surface")
+
+    activated = registry.activate_launch_surface(
+        str(launch["launch_id"]),
+        {
+            "surface_id": surface_id,
+            "host_id": HOST_ID,
+            "provider": "codex",
+            "transport": "tmux",
+            "transport_locator": "opaque-json-locator",
+            "role": "session",
+            "launch_id": launch["launch_id"],
+            "created_at": 110,
+            "client_attached": False,
+        },
+        lease_owner="bootstrap-owner",
+        observed_at=110,
+    )
+
+    assert activated.launch["state"] == "waiting_for_client"
+    assert activated.launch["surface_id"] == surface_id
+    assert activated.surface["launch_id"] == launch["launch_id"]
+    assert activated.surface["current_session_key"] is None
+
+    other_launch = registry.reserve_launch(
+        resume_request(SECOND_SESSION_KEY),
+        request_id=stable_uuid("atomic-surface-failure-request"),
+        lease_owner="bootstrap-owner",
+        capability_hash=digest("atomic-surface-failure-capability"),
+        expires_at=1_000,
+        created_at=120,
+    )
+    assert other_launch.kind == "created"
+    with pytest.raises(IdentityConflict):
+        registry.activate_launch_surface(
+            str(other_launch.launch["launch_id"]),
+            {
+                "surface_id": stable_uuid("wrong-identity-surface"),
+                "host_id": REMOTE_HOST_ID,
+                "provider": "codex",
+                "transport": "tmux",
+                "transport_locator": "wrong-host-locator",
+                "role": "session",
+            },
+            lease_owner="bootstrap-owner",
+            observed_at=130,
+        )
+    assert registry.get_launch(str(other_launch.launch["launch_id"]))["state"] == (
+        "reserved"
+    )
+
+
+def test_live_surface_adoption_registers_and_binds_atomically(
+    registry: Registry,
+) -> None:
+    add_session(registry)
+    surface_id = stable_uuid("adopted-live-surface")
+
+    adopted = registry.adopt_bound_surface(
+        {
+            "surface_id": surface_id,
+            "host_id": HOST_ID,
+            "provider": "codex",
+            "transport": "tmux",
+            "transport_locator": "adopted-json-locator",
+            "role": "session",
+            "created_at": 100,
+            "client_attached": True,
+        },
+        SESSION_KEY,
+        observed_at=100,
+    )
+
+    assert adopted["current_session_key"] == SESSION_KEY
+    assert adopted["binding_confidence"] == "confirmed"
+    assert adopted["client_attached"] == 1
+    assert registry.get_session(SESSION_KEY)["surface_id"] == surface_id
+
+    with pytest.raises(StorageError, match="already has"):
+        registry.adopt_bound_surface(
+            {
+                "surface_id": stable_uuid("second-adopted-surface"),
+                "host_id": HOST_ID,
+                "provider": "codex",
+                "transport": "tmux",
+                "transport_locator": "second-adopted-locator",
+                "role": "session",
+            },
+            SESSION_KEY,
+            observed_at=110,
+        )
+    assert len(registry.list_surfaces(session_key=SESSION_KEY)) == 1
+
+
 def test_session_upsert_cannot_establish_or_clear_surface_binding(
     registry: Registry,
 ) -> None:

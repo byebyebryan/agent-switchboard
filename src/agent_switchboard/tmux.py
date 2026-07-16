@@ -504,21 +504,22 @@ class TmuxController:
                 matched.append(client)
         return tuple(matched)
 
-    def select_surface(self, locator: TmuxLocator, *, client: str) -> None:
-        if (
-            not client
-            or len(client) > 1024
-            or any(unicodedata.category(character) == "Cc" for character in client)
-        ):
-            raise TmuxError("tmux client ID is invalid")
+    def client_exists(self, locator: TmuxLocator, client: str) -> bool:
+        _bounded_text(client, "tmux client ID", maximum=1024)
         result = self._run(
-            self._tmux(locator.socket, "list-clients", "-F", "#{client_tty}")
+            self._tmux(locator.socket, "list-clients", "-F", "#{client_tty}"),
+            missing_ok=True,
         )
+        if result.returncode != 0:
+            return False
         try:
             clients = result.stdout.decode("utf-8").splitlines()
         except UnicodeDecodeError as error:
             raise TmuxError("tmux returned non-UTF-8 client metadata") from error
-        if clients.count(client) != 1:
+        return clients.count(client) == 1
+
+    def select_surface(self, locator: TmuxLocator, *, client: str) -> None:
+        if not self.client_exists(locator, client):
             raise TmuxTargetMissing("tmux client is stale or ambiguous")
         self.inspect_locator(locator)
         self._run(
