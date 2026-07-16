@@ -4,10 +4,11 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 from .config import SwitchboardConfig, load_config
 from .domain import ProjectId, ProviderId
+from .live import reconcile_live
 from .paths import database_path, load_or_create_host_id
 from .providers.codex import CodexProvider
 from .reconcile import reconcile_codex_discovery
@@ -68,8 +69,13 @@ def _codex_executable(config: SwitchboardConfig) -> str | None:
     return None
 
 
-def build_local_snapshot_json(*, refresh: bool) -> str:
-    """Return one canonical host-local snapshot, optionally refreshing Codex."""
+def build_local_snapshot_json(
+    *, reconcile: Literal["none", "live", "full"] = "none"
+) -> str:
+    """Return one canonical host-local snapshot at the requested repair level."""
+
+    if reconcile not in {"none", "live", "full"}:
+        raise ValueError("reconcile must be none, live, or full")
 
     host_id = load_or_create_host_id()
     registry_path = database_path()
@@ -81,21 +87,27 @@ def build_local_snapshot_json(*, refresh: bool) -> str:
 
         # A fresh registry has no host row to snapshot. Bootstrap it once even on
         # a no-refresh request; after that, no-refresh is a read-only fast path.
-        if not refresh and not needs_bootstrap:
+        if reconcile == "none" and not needs_bootstrap:
             return build_host_snapshot_json(registry, str(host_id))
 
-        if config is None:
+        if config is None and (needs_bootstrap or reconcile == "full"):
             config = load_config(host_id=host_id)
-        registry.upsert_host(
-            str(host_id),
-            config.host.display_name,
-            is_local=True,
-        )
-        registry.materialize_projects(str(host_id), _project_catalog(config))
+        if needs_bootstrap or reconcile == "full":
+            assert config is not None
+            registry.upsert_host(
+                str(host_id),
+                config.host.display_name,
+                is_local=True,
+            )
+            registry.materialize_projects(str(host_id), _project_catalog(config))
 
         capabilities = ()
-        errors = ()
-        executable = _codex_executable(config) if refresh else None
+        errors: tuple = ()
+        executable = (
+            _codex_executable(config)
+            if reconcile == "full" and config is not None
+            else None
+        )
         if executable is not None:
             result = reconcile_codex_discovery(
                 registry,
@@ -104,6 +116,9 @@ def build_local_snapshot_json(*, refresh: bool) -> str:
             )
             capabilities = (result.capability,)
             errors = result.errors
+        if reconcile in {"live", "full"}:
+            live = reconcile_live(registry, str(host_id))
+            errors = (*errors, *live.errors)
 
         return build_host_snapshot_json(
             registry,

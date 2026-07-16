@@ -45,9 +45,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     snapshot.add_argument(
         "--reconcile",
-        choices=("none", "full"),
+        choices=("none", "live", "full"),
         default="none",
-        help="refresh Codex before reading (default: none)",
+        help="repair retained state before reading (default: none)",
     )
     snapshot.add_argument("--json", action="store_true", required=True)
 
@@ -96,13 +96,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 1
         return 0
 
-    refresh = (
-        arguments.reconcile == "full"
+    reconcile = (
+        arguments.reconcile
         if arguments.command == "snapshot"
-        else arguments.refresh
+        else ("full" if arguments.refresh else "none")
     )
     try:
-        payload = build_local_snapshot_json(refresh=refresh)
+        payload = build_local_snapshot_json(reconcile=reconcile)
     except (
         ValidationError,
         StorageError,

@@ -427,6 +427,165 @@ class RuntimeLocator:
 
 
 @dataclass(frozen=True, slots=True)
+class NormalizedRuntimeObservation:
+    """Provider-neutral, privacy-safe evidence from a bounded live probe.
+
+    Optional state axes mean "not observed" rather than ``unknown``.  The
+    ``tmux_observed`` bit makes that distinction explicit for locator fields:
+    a successful probe may authoritatively clear a stale pane, while a failed
+    probe must leave the retained pane association untouched.
+    """
+
+    observation_key: str
+    host_id: HostId
+    provider: ProviderId
+    session_key: SessionKey
+    source: str
+    source_priority: int
+    entry_ns: int
+    observed_at: int
+    runtime_presence: RuntimePresence | None = None
+    resumability: Resumability | None = None
+    activity: Activity | None = None
+    activity_reason: ActivityReason | None = None
+    attachment: Attachment | None = None
+    pid: int | None = None
+    process_birth_id: str | None = None
+    provider_runtime_id: str | None = None
+    tmux_observed: bool = False
+    tmux_socket: str | None = None
+    tmux_session: str | None = None
+    tmux_window: str | None = None
+    tmux_pane: str | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.host_id, HostId):
+            object.__setattr__(self, "host_id", HostId(self.host_id))
+        object.__setattr__(
+            self, "provider", _enum_value(ProviderId, self.provider, "provider")
+        )
+        if not isinstance(self.session_key, SessionKey):
+            object.__setattr__(self, "session_key", SessionKey.parse(self.session_key))
+        if (
+            self.session_key.host_id != self.host_id
+            or self.session_key.provider is not self.provider
+        ):
+            raise ValidationError("runtime observation routing fields disagree")
+        object.__setattr__(
+            self,
+            "observation_key",
+            _text(self.observation_key, "observation_key", maximum=256),
+        )
+        object.__setattr__(
+            self,
+            "source",
+            _text(self.source, "source", maximum=64),
+        )
+        for field_name in ("source_priority", "entry_ns", "observed_at"):
+            value = getattr(self, field_name)
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, int)
+                or value < 0
+                or value > 2**63 - 1
+            ):
+                raise ValidationError(f"{field_name} must be a non-negative integer")
+        if self.source_priority > 1_000_000:
+            raise ValidationError("source_priority exceeds the supported range")
+        for field_name, enum_type in (
+            ("runtime_presence", RuntimePresence),
+            ("resumability", Resumability),
+            ("activity", Activity),
+            ("activity_reason", ActivityReason),
+            ("attachment", Attachment),
+        ):
+            value = getattr(self, field_name)
+            if value is not None:
+                object.__setattr__(
+                    self, field_name, _enum_value(enum_type, value, field_name)
+                )
+        if self.pid is not None and (
+            isinstance(self.pid, bool) or not isinstance(self.pid, int) or self.pid <= 0
+        ):
+            raise ValidationError("pid must be a positive integer")
+        if self.process_birth_id is not None and (
+            len(self.process_birth_id) != 64
+            or any(
+                character not in "0123456789abcdef"
+                for character in self.process_birth_id
+            )
+        ):
+            raise ValidationError(
+                "process_birth_id must be an opaque lowercase SHA-256 digest"
+            )
+        for field_name in (
+            "provider_runtime_id",
+            "tmux_session",
+            "tmux_window",
+            "tmux_pane",
+        ):
+            value = getattr(self, field_name)
+            if value is not None:
+                object.__setattr__(
+                    self, field_name, _text(value, field_name, maximum=256)
+                )
+        if self.tmux_socket is not None:
+            socket = _text(self.tmux_socket, "tmux_socket", maximum=4096)
+            if not Path(socket).is_absolute():
+                raise ValidationError("tmux_socket must be an absolute path")
+            object.__setattr__(self, "tmux_socket", socket)
+        if not isinstance(self.tmux_observed, bool):
+            raise ValidationError("tmux_observed must be boolean")
+        if not self.tmux_observed and any(
+            value is not None
+            for value in (
+                self.attachment,
+                self.tmux_socket,
+                self.tmux_session,
+                self.tmux_window,
+                self.tmux_pane,
+            )
+        ):
+            raise ValidationError("tmux evidence requires tmux_observed")
+        if self.activity is None and self.activity_reason is not None:
+            raise ValidationError("activity_reason requires activity evidence")
+
+    def storage_mapping(self) -> dict[str, Any]:
+        """Return the private normalized mapping accepted by the registry."""
+
+        return {
+            "observation_key": self.observation_key,
+            "host_id": str(self.host_id),
+            "provider": self.provider.value,
+            "session_key": str(self.session_key),
+            "source": self.source,
+            "source_priority": self.source_priority,
+            "entry_ns": self.entry_ns,
+            "observed_at": self.observed_at,
+            "received_at": self.observed_at,
+            "runtime_presence": (
+                None if self.runtime_presence is None else self.runtime_presence.value
+            ),
+            "resumability": (
+                None if self.resumability is None else self.resumability.value
+            ),
+            "activity": None if self.activity is None else self.activity.value,
+            "activity_reason": (
+                None if self.activity_reason is None else self.activity_reason.value
+            ),
+            "attachment": (None if self.attachment is None else self.attachment.value),
+            "pid": self.pid,
+            "process_birth_id": self.process_birth_id,
+            "provider_runtime_id": self.provider_runtime_id,
+            "tmux_observed": self.tmux_observed,
+            "tmux_socket": self.tmux_socket,
+            "tmux_session": self.tmux_session,
+            "tmux_window": self.tmux_window,
+            "tmux_pane": self.tmux_pane,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class AgentSession:
     key: SessionKey
     cwd: Path

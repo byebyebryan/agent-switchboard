@@ -94,6 +94,7 @@ jobs:
           import agent_switchboard.hooks
           import agent_switchboard.local
           import agent_switchboard.local_events
+          import agent_switchboard.live
           import agent_switchboard.paths
           import agent_switchboard.protocol
           import agent_switchboard.providers.codex
@@ -130,7 +131,7 @@ jobs:
             test "$("$swbctl" --version)" = "swbctl 0.1.0"
             "$swbctl" --help | \
               grep -F "Inspect and route provider-native coding-agent sessions."
-            "$swbctl" snapshot --help | grep -F -- "--reconcile {none,full}"
+            "$swbctl" snapshot --help | grep -F -- "--reconcile {none,live,full}"
             "$swbctl" list --help | grep -F -- "--refresh"
 
             smoke_root="/tmp/$(basename "$environment")-xdg"

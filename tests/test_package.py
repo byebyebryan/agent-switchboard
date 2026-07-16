@@ -60,6 +60,7 @@ def test_ci_smokes_wheel_and_source_distribution_installations() -> None:
         "agent_switchboard.hooks",
         "agent_switchboard.local",
         "agent_switchboard.local_events",
+        "agent_switchboard.live",
         "agent_switchboard.paths",
         "agent_switchboard.providers.codex",
         "agent_switchboard.reconcile",
@@ -68,7 +69,7 @@ def test_ci_smokes_wheel_and_source_distribution_installations() -> None:
         assert f"import {module}" in workflow
     assert "migrations/v0003_name_provenance_runtime_index.py" in workflow
     assert "migrations/v0004_runtime_truth_ordering.py" in workflow
-    assert 'snapshot --help | grep -F -- "--reconcile {none,full}"' in workflow
+    assert 'snapshot --help | grep -F -- "--reconcile {none,live,full}"' in workflow
     assert 'list --help | grep -F -- "--refresh"' in workflow
     assert 'snapshot --json > "$smoke_root/snapshot.json"' in workflow
     assert 'list --json > "$smoke_root/list.json"' in workflow

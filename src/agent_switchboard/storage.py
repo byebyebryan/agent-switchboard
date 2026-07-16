@@ -21,13 +21,16 @@ from pathlib import Path
 from typing import Any, Final
 
 from .domain import (
+    Attachment,
     HandoffId,
     HostId,
     LaunchId,
     LocationId,
+    NormalizedRuntimeObservation,
     ProjectId,
     ProjectLocation,
     ProviderId,
+    RuntimePresence,
     SessionKey,
     SurfaceId,
     UUIDId,
@@ -56,6 +59,7 @@ DEFAULT_EVENT_LIMIT: Final = 1_000
 MAX_EVENT_LIMIT: Final = 100_000
 DEFAULT_SNAPSHOT_SESSION_LIMIT: Final = 1_000
 DEFAULT_SNAPSHOT_RUNTIME_LIMIT: Final = 10_000
+DEFAULT_LIVENESS_OBSERVATION_LIMIT: Final = 16
 _SQLITE_MAX_INTEGER: Final = 2**63 - 1
 _MAX_EVIDENCE_PRIORITY: Final = 1_000_000
 
@@ -264,6 +268,16 @@ class HookIngestionResult:
 
 
 @dataclass(frozen=True, slots=True)
+class RuntimeObservationApplyResult:
+    """Outcome of one atomic batch of normalized live observations."""
+
+    applied_count: int
+    stale_count: int
+    observations: tuple[dict[str, Any], ...]
+    sessions: tuple[dict[str, Any], ...]
+
+
+@dataclass(frozen=True, slots=True)
 class _PreparedHookEvent:
     host_id: str
     host_display_name: str
@@ -464,6 +478,18 @@ def _canonical_session_key(value: Any) -> SessionKey:
     if value != str(key):
         raise StorageError("session_key must use canonical lowercase UUID spelling")
     return key
+
+
+def _source_allows(
+    session: Mapping[str, Any], axis: str, priority: int, order_ns: int
+) -> bool:
+    """Merge evidence by causal order, using source priority only on a tie."""
+
+    stored_priority = int(session[f"{axis}_source_priority"])
+    stored_order = int(session[f"{axis}_order_ns"])
+    return order_ns > stored_order or (
+        order_ns == stored_order and priority >= stored_priority
+    )
 
 
 def _prepare_hook_event(
@@ -2934,27 +2960,30 @@ class Registry:
             "SELECT * FROM sessions WHERE session_key = ?", (event.session_key,)
         ).fetchone()
         assert session is not None
-        runtime_allowed = event.source_priority > int(
-            session["runtime_source_priority"]
-        ) or (
-            event.source_priority == int(session["runtime_source_priority"])
-            and event.entry_ns >= int(session["runtime_order_ns"])
+        runtime_allowed = _source_allows(
+            session,
+            "runtime",
+            event.source_priority,
+            event.entry_ns,
         )
         same_turn = (
             event.provider_turn_id is not None
             and session["last_hook_turn_id"] == event.provider_turn_id
         )
-        if event.source_priority > int(session["activity_source_priority"]):
-            activity_allowed = True
-        elif event.source_priority < int(session["activity_source_priority"]):
-            activity_allowed = False
-        elif same_turn:
+        if same_turn and event.source_priority == int(
+            session["activity_source_priority"]
+        ):
             stored_kind = session["last_hook_kind_priority"]
             activity_allowed = stored_kind is None or (
                 event.transition.kind_priority >= int(stored_kind)
             )
         else:
-            activity_allowed = event.entry_ns >= int(session["activity_order_ns"])
+            activity_allowed = _source_allows(
+                session,
+                "activity",
+                event.source_priority,
+                event.entry_ns,
+            )
 
         updates: dict[str, Any] = {}
         if runtime_allowed or activity_allowed:
@@ -3242,6 +3271,329 @@ class Registry:
             dict(stored_runtime),
             _row_dict(launch),
             _row_dict(surface),
+        )
+
+    @staticmethod
+    def _retain_runtime_observation(
+        connection: sqlite3.Connection,
+        values: Mapping[str, Any],
+    ) -> tuple[sqlite3.Row, bool]:
+        """Insert new semantic evidence or reuse its stable retained row."""
+
+        semantic_values = {
+            key: value
+            for key, value in values.items()
+            if key not in {"entry_ns", "observed_at", "received_at"}
+        }
+        payload_hash = _sha256_text(_canonical_json(semantic_values))
+        existing = connection.execute(
+            """
+            SELECT * FROM runtime_observations
+            WHERE host_id = ? AND provider = ? AND observation_key = ?
+            """,
+            (values["host_id"], values["provider"], values["observation_key"]),
+        ).fetchone()
+        if existing is not None:
+            if existing["payload_hash"] != payload_hash:
+                raise IdentityConflict(
+                    "runtime observation key was reused for different content"
+                )
+            return existing, False
+
+        observation_id = str(uuid.uuid4())
+        connection.execute(
+            """
+            INSERT INTO runtime_observations(
+                observation_id, observation_key, host_id, provider,
+                session_key, launch_id, source, source_priority,
+                runtime_presence, resumability, activity, activity_reason,
+                attachment, pid, provider_runtime_id, tmux_session,
+                tmux_window, tmux_pane, observed_at, received_at,
+                payload_hash, entry_ns, process_birth_id, tmux_socket
+            ) VALUES (
+                ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                ?, ?, ?, ?, ?, ?
+            )
+            """,
+            (
+                observation_id,
+                values["observation_key"],
+                values["host_id"],
+                values["provider"],
+                values["session_key"],
+                values["source"],
+                values["source_priority"],
+                values["runtime_presence"],
+                values["resumability"],
+                values["activity"],
+                values["activity_reason"],
+                values["attachment"],
+                values["pid"],
+                values["provider_runtime_id"],
+                values["tmux_session"],
+                values["tmux_window"],
+                values["tmux_pane"],
+                values["observed_at"],
+                values["received_at"],
+                payload_hash,
+                values["entry_ns"],
+                values["process_birth_id"],
+                values["tmux_socket"],
+            ),
+        )
+        stored = connection.execute(
+            "SELECT * FROM runtime_observations WHERE observation_id = ?",
+            (observation_id,),
+        ).fetchone()
+        assert stored is not None
+        return stored, True
+
+    @staticmethod
+    def _runtime_axis_updates(
+        session: Mapping[str, Any],
+        values: Mapping[str, Any],
+    ) -> tuple[dict[str, Any], bool, bool]:
+        """Compute independent axis and locator changes from one observation."""
+
+        priority = int(values["source_priority"])
+        order_ns = int(values["entry_ns"])
+        runtime_allowed = values["runtime_presence"] is not None and _source_allows(
+            session, "runtime", priority, order_ns
+        )
+        resumability_allowed = values["resumability"] is not None and _source_allows(
+            session, "resumability", priority, order_ns
+        )
+        activity_allowed = values["activity"] is not None and _source_allows(
+            session, "activity", priority, order_ns
+        )
+        attachment_allowed = values["attachment"] is not None and _source_allows(
+            session, "attachment", priority, order_ns
+        )
+        updates: dict[str, Any] = {}
+        if runtime_allowed:
+            stopped = values["runtime_presence"] == RuntimePresence.STOPPED.value
+            updates.update(
+                runtime_presence=values["runtime_presence"],
+                runtime_observed_at=values["observed_at"],
+                runtime_source_priority=priority,
+                runtime_order_ns=order_ns,
+                runtime_pid=None if stopped else values["pid"],
+                provider_runtime_id=(
+                    None if stopped else values["provider_runtime_id"]
+                ),
+                runtime_process_birth_id=(
+                    None if stopped else values["process_birth_id"]
+                ),
+            )
+            if stopped or values["tmux_observed"]:
+                updates.update(
+                    tmux_socket=None if stopped else values["tmux_socket"],
+                    tmux_session=None if stopped else values["tmux_session"],
+                    tmux_window=None if stopped else values["tmux_window"],
+                    tmux_pane=None if stopped else values["tmux_pane"],
+                )
+        if resumability_allowed:
+            updates.update(
+                resumability=values["resumability"],
+                resumability_source_priority=priority,
+                resumability_order_ns=order_ns,
+            )
+        if activity_allowed:
+            updates.update(
+                activity=values["activity"],
+                activity_reason=values["activity_reason"] or "unknown",
+                activity_source_priority=priority,
+                activity_order_ns=order_ns,
+                state_observed_at=values["observed_at"],
+                state_confidence="confirmed",
+            )
+        if attachment_allowed:
+            updates.update(
+                attachment=values["attachment"],
+                attachment_source_priority=priority,
+                attachment_order_ns=order_ns,
+            )
+        if updates:
+            updates["last_observed_at"] = max(
+                int(session["last_observed_at"]), int(values["observed_at"])
+            )
+        return updates, runtime_allowed, attachment_allowed
+
+    @staticmethod
+    def _apply_runtime_surface(
+        connection: sqlite3.Connection,
+        session: Mapping[str, Any],
+        values: Mapping[str, Any],
+        *,
+        runtime_allowed: bool,
+        attachment_allowed: bool,
+    ) -> None:
+        """Apply authoritative tmux absence without touching other transports."""
+
+        surface_id = session["surface_id"]
+        if surface_id is None or not runtime_allowed:
+            return
+        surface = connection.execute(
+            "SELECT * FROM surfaces WHERE surface_id = ?", (surface_id,)
+        ).fetchone()
+        if (
+            surface is None
+            or surface["transport"] != "tmux"
+            or int(values["observed_at"]) < int(surface["last_observed_at"])
+        ):
+            return
+        stopped = values["runtime_presence"] == RuntimePresence.STOPPED.value
+        tmux_absent = values["tmux_observed"] and values["tmux_pane"] is None
+        if stopped or tmux_absent:
+            connection.execute(
+                """
+                UPDATE surfaces
+                SET current_session_key = NULL,
+                    binding_confidence = 'unknown',
+                    client_attached = 0,
+                    last_observed_at = MAX(last_observed_at, ?)
+                WHERE surface_id = ? AND current_session_key = ?
+                """,
+                (values["observed_at"], surface_id, session["session_key"]),
+            )
+            connection.execute(
+                "UPDATE sessions SET surface_id = NULL "
+                "WHERE session_key = ? AND surface_id = ?",
+                (session["session_key"], surface_id),
+            )
+        elif values["tmux_observed"] and attachment_allowed:
+            connection.execute(
+                """
+                UPDATE surfaces
+                SET client_attached = ?,
+                    last_observed_at = MAX(last_observed_at, ?)
+                WHERE surface_id = ? AND current_session_key = ?
+                """,
+                (
+                    int(values["attachment"] == Attachment.ATTACHED.value),
+                    values["observed_at"],
+                    surface_id,
+                    session["session_key"],
+                ),
+            )
+
+    @staticmethod
+    def _prune_liveness_observations(
+        connection: sqlite3.Connection,
+        session_key: str,
+        limit: int = DEFAULT_LIVENESS_OBSERVATION_LIMIT,
+    ) -> None:
+        connection.execute(
+            """
+            DELETE FROM runtime_observations
+            WHERE observation_id IN (
+                SELECT observation_id FROM runtime_observations
+                WHERE session_key = ? AND source = 'liveness'
+                ORDER BY observed_at DESC, observation_id DESC
+                LIMIT -1 OFFSET ?
+            )
+            """,
+            (session_key, limit),
+        )
+
+    def apply_runtime_observations(
+        self,
+        observations: Sequence[NormalizedRuntimeObservation],
+    ) -> RuntimeObservationApplyResult:
+        """Atomically retain and materialize one bounded live-probe batch.
+
+        A missing optional axis means that the probe did not establish it.
+        This is intentionally different from the public ``unknown`` enum: a
+        failed tmux probe, for example, must not erase a retained attachment.
+        """
+
+        normalized = tuple(observations)
+        if any(
+            not isinstance(observation, NormalizedRuntimeObservation)
+            for observation in normalized
+        ):
+            raise StorageError(
+                "runtime reconciliation requires normalized observations"
+            )
+        keys = [observation.observation_key for observation in normalized]
+        if len(keys) != len(set(keys)):
+            raise IdentityConflict("duplicate runtime observation key in batch")
+
+        applied_count = 0
+        stale_count = 0
+        retained: list[dict[str, Any]] = []
+        session_keys: set[str] = set()
+        with self.transaction(immediate=True) as connection:
+            for observation in normalized:
+                values = observation.storage_mapping()
+                session_key = str(observation.session_key)
+                session = connection.execute(
+                    "SELECT * FROM sessions WHERE session_key = ?",
+                    (session_key,),
+                ).fetchone()
+                if session is None:
+                    raise StorageError(f"unknown session: {session_key}")
+                if (
+                    session["host_id"] != values["host_id"]
+                    or session["provider"] != values["provider"]
+                ):
+                    raise IdentityConflict(
+                        "runtime observation session does not match host/provider"
+                    )
+
+                durable_values = {
+                    **values,
+                    "runtime_presence": values["runtime_presence"] or "unknown",
+                    "resumability": values["resumability"] or "unknown",
+                    "activity": values["activity"] or "unknown",
+                    "activity_reason": values["activity_reason"] or "unknown",
+                    "attachment": values["attachment"] or "unknown",
+                }
+                stored, _inserted = self._retain_runtime_observation(
+                    connection, durable_values
+                )
+                updates, runtime_allowed, attachment_allowed = (
+                    self._runtime_axis_updates(session, values)
+                )
+                if updates:
+                    assignments = ", ".join(f"{field} = ?" for field in updates)
+                    connection.execute(
+                        f"UPDATE sessions SET {assignments} WHERE session_key = ?",
+                        (*updates.values(), session_key),
+                    )
+                    applied_count += 1
+                else:
+                    stale_count += 1
+                self._apply_runtime_surface(
+                    connection,
+                    session,
+                    values,
+                    runtime_allowed=runtime_allowed,
+                    attachment_allowed=attachment_allowed,
+                )
+                self._prune_liveness_observations(connection, session_key)
+                retained.append(dict(stored))
+                session_keys.add(session_key)
+
+            sessions = (
+                tuple(
+                    dict(row)
+                    for row in connection.execute(
+                        "SELECT * FROM sessions WHERE session_key IN "
+                        f"({', '.join('?' for _ in session_keys)}) "
+                        "ORDER BY session_key",
+                        tuple(sorted(session_keys)),
+                    ).fetchall()
+                )
+                if session_keys
+                else ()
+            )
+
+        return RuntimeObservationApplyResult(
+            applied_count,
+            stale_count,
+            tuple(retained),
+            sessions,
         )
 
     def record_runtime_observation(
@@ -3822,6 +4174,7 @@ __all__ = [
     "CURRENT_SCHEMA_VERSION",
     "DEFAULT_BUSY_TIMEOUT_MS",
     "DEFAULT_EVENT_LIMIT",
+    "DEFAULT_LIVENESS_OBSERVATION_LIMIT",
     "DEFAULT_SNAPSHOT_RUNTIME_LIMIT",
     "DEFAULT_SNAPSHOT_SESSION_LIMIT",
     "HookIngestionResult",
@@ -3833,6 +4186,7 @@ __all__ = [
     "RegistryClosed",
     "RequestConflict",
     "ReservationResult",
+    "RuntimeObservationApplyResult",
     "StorageError",
     "connect_database",
     "handoff_content_hash",

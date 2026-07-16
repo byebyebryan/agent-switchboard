@@ -12,6 +12,7 @@ from typing import Any
 import pytest
 
 import agent_switchboard.cli as cli_module
+import agent_switchboard.local as local_module
 import agent_switchboard.snapshot as snapshot_module
 import agent_switchboard.storage as storage_module
 from agent_switchboard import __version__
@@ -64,6 +65,13 @@ def cli_environment(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> CliEnvir
     )
     monkeypatch.setenv("FAKE_CODEX_PLAN", str(plan))
     monkeypatch.setenv("FAKE_CODEX_LOG", str(log))
+    # CLI contract tests must never inspect the developer's real /proc or tmux
+    # state. Live-reconciliation behavior is covered with isolated fakes.
+    monkeypatch.setattr(
+        local_module,
+        "reconcile_live",
+        lambda _registry, _host_id: type("LiveResult", (), {"errors": ()})(),
+    )
     return CliEnvironment(
         config=config_home / APP_DIR / "config.toml",
         database=state_home / APP_DIR / "switchboard.db",
@@ -129,6 +137,29 @@ def test_parser_requires_json_and_retains_global_version(
         main(["--version"])
     assert exit_info.value.code == 0
     assert capsys.readouterr().out == f"swbctl {__version__}\n"
+
+
+def test_cli_composes_exact_reconciliation_modes(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    observed: list[str] = []
+
+    def build(*, reconcile: str) -> str:
+        observed.append(reconcile)
+        return "{}"
+
+    monkeypatch.setattr(cli_module, "build_local_snapshot_json", build)
+    commands = (
+        (["snapshot", "--reconcile", "none", "--json"], "none"),
+        (["snapshot", "--reconcile", "live", "--json"], "live"),
+        (["snapshot", "--reconcile", "full", "--json"], "full"),
+        (["list", "--json"], "none"),
+        (["list", "--refresh", "--json"], "full"),
+    )
+    for argv, expected in commands:
+        assert main(argv) == 0
+        assert observed[-1] == expected
+        assert capsys.readouterr().out == "{}\n"
 
 
 def test_event_ingests_stdin_without_stdout_or_provider_io(
@@ -231,8 +262,8 @@ def test_cli_has_no_config_override_flag(capsys: pytest.CaptureFixture[str]) -> 
 def test_core_error_diagnostic_is_bounded_and_single_line(
     capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    def fail(*, refresh: bool) -> str:
-        assert refresh is False
+    def fail(*, reconcile: str) -> str:
+        assert reconcile == "none"
         raise OSError(f"first line\n\x1bsecond line {'x' * 2_000}")
 
     monkeypatch.setattr(cli_module, "build_local_snapshot_json", fail)
@@ -370,6 +401,32 @@ def test_repeated_full_reconcile_is_idempotent(
     ]
     with Registry(cli_environment.database) as registry:
         assert len(registry.list_sessions(host_id=first["host"]["hostId"])) == 2
+
+
+def test_live_reconcile_skips_app_server_and_full_runs_live_after_degradation(
+    cli_environment: CliEnvironment,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cli_environment.write_plan(complete_plan(thread(1)))
+    run_json(capsys, ["snapshot", "--reconcile", "full", "--json"])
+    provider_log = cli_environment.log.read_text(encoding="utf-8")
+    calls: list[str] = []
+
+    def live(_registry: Registry, host_id: str):
+        calls.append(host_id)
+        return type("LiveResult", (), {"errors": ()})()
+
+    monkeypatch.setattr(local_module, "reconcile_live", live)
+    run_json(capsys, ["snapshot", "--reconcile", "live", "--json"])
+    assert len(calls) == 1
+    assert cli_environment.log.read_text(encoding="utf-8") == provider_log
+
+    missing = cli_environment.executable.parent / "missing-codex"
+    cli_environment.write_config(f'[providers.codex]\nexecutable = "{missing}"\n')
+    degraded, _ = run_json(capsys, ["snapshot", "--reconcile", "full", "--json"])
+    assert len(calls) == 2
+    assert degraded["errors"][-1]["code"] == "provider_not_found"
 
 
 @pytest.mark.parametrize("failure", ["mid-pagination", "provider-not-found"])

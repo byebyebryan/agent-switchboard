@@ -176,7 +176,7 @@ def test_tmux_normalization_matches_storage_locator_bounds() -> None:
     assert pane_too_long.tmux_pane is None
 
 
-def test_older_higher_kind_same_turn_preserves_fresher_order_watermarks(
+def test_same_turn_kind_overrides_order_without_reducing_watermarks(
     tmp_path,
 ) -> None:
     with Registry(tmp_path / "same-turn-order.db") as registry:
