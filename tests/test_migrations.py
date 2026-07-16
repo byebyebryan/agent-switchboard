@@ -43,11 +43,12 @@ def test_migrations_are_explicit_contiguous_and_idempotent(tmp_path) -> None:
     database = tmp_path / "switchboard.db"
     connection = configured_connection(str(database))
 
-    assert [migration.version for migration in MIGRATIONS] == [1, 2, 3]
+    assert [migration.version for migration in MIGRATIONS] == [1, 2, 3, 4]
     assert [migration.name for migration in MIGRATIONS] == [
         "initial_registry",
         "remote_snapshot_cache",
         "name_provenance_runtime_index",
+        "runtime_truth_ordering",
     ]
     assert migrate(connection, now=100) == CURRENT_SCHEMA_VERSION
     assert migrate(connection, now=200) == CURRENT_SCHEMA_VERSION
@@ -59,11 +60,12 @@ def test_migrations_are_explicit_contiguous_and_idempotent(tmp_path) -> None:
         (1, "initial_registry", 100),
         (2, "remote_snapshot_cache", 100),
         (3, "name_provenance_runtime_index", 100),
+        (4, "runtime_truth_ordering", 100),
     ]
-    assert connection.execute("PRAGMA user_version").fetchone()[0] == 3
+    assert connection.execute("PRAGMA user_version").fetchone()[0] == 4
     assert dict(
         connection.execute("SELECT key, value FROM registry_metadata").fetchall()
-    ) == {"protocol_version": "1", "schema_version": "3"}
+    ) == {"protocol_version": "1", "schema_version": "4"}
     assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
     connection.close()
 
@@ -110,7 +112,7 @@ def test_upgrade_from_v1_preserves_registry_rows(tmp_path) -> None:
     connection.close()
 
     upgraded = connect_database(database)
-    assert upgraded.execute("PRAGMA user_version").fetchone()[0] == 3
+    assert upgraded.execute("PRAGMA user_version").fetchone()[0] == 4
     assert (
         upgraded.execute(
             """
@@ -182,7 +184,7 @@ def test_upgrade_from_v2_backfills_name_provenance_and_adds_runtime_index(
         tuple((*row[:3], host_id, row[3]) for row in rows),
     )
 
-    assert migrate(connection, now=20) == 3
+    assert migrate(connection, now=20) == CURRENT_SCHEMA_VERSION
     names = connection.execute(
         """
         SELECT name, provider_name, name_source, metadata_source

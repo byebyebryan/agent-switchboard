@@ -57,7 +57,9 @@ def test_ci_smokes_wheel_and_source_distribution_installations() -> None:
     assert "/tmp/switchboard-sdist-smoke" in workflow
     for module in (
         "agent_switchboard.cli",
+        "agent_switchboard.hooks",
         "agent_switchboard.local",
+        "agent_switchboard.local_events",
         "agent_switchboard.paths",
         "agent_switchboard.providers.codex",
         "agent_switchboard.reconcile",
@@ -65,6 +67,7 @@ def test_ci_smokes_wheel_and_source_distribution_installations() -> None:
     ):
         assert f"import {module}" in workflow
     assert "migrations/v0003_name_provenance_runtime_index.py" in workflow
+    assert "migrations/v0004_runtime_truth_ordering.py" in workflow
     assert 'snapshot --help | grep -F -- "--reconcile {none,full}"' in workflow
     assert 'list --help | grep -F -- "--refresh"' in workflow
     assert 'snapshot --json > "$smoke_root/snapshot.json"' in workflow
@@ -75,6 +78,7 @@ def test_ci_smokes_wheel_and_source_distribution_installations() -> None:
     assert '"agent_switchboard/migrations/v0003_name_provenance_runtime_index.py"' in (
         verifier
     )
+    assert '"agent_switchboard/migrations/v0004_runtime_truth_ordering.py"' in verifier
 
 
 def test_cli_help_and_version(capsys: pytest.CaptureFixture[str]) -> None:

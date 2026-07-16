@@ -11,6 +11,7 @@ from . import (
     v0001_initial,
     v0002_remote_cache,
     v0003_name_provenance_runtime_index,
+    v0004_runtime_truth_ordering,
 )
 
 PROTOCOL_VERSION = 1
@@ -40,6 +41,11 @@ MIGRATIONS = (
         v0003_name_provenance_runtime_index.VERSION,
         v0003_name_provenance_runtime_index.NAME,
         v0003_name_provenance_runtime_index.STATEMENTS,
+    ),
+    Migration(
+        v0004_runtime_truth_ordering.VERSION,
+        v0004_runtime_truth_ordering.NAME,
+        v0004_runtime_truth_ordering.STATEMENTS,
     ),
 )
 CURRENT_SCHEMA_VERSION = MIGRATIONS[-1].version

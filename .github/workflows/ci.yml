@@ -91,7 +91,9 @@ jobs:
           import agent_switchboard.cli
           import agent_switchboard.config
           import agent_switchboard.domain
+          import agent_switchboard.hooks
           import agent_switchboard.local
+          import agent_switchboard.local_events
           import agent_switchboard.paths
           import agent_switchboard.protocol
           import agent_switchboard.providers.codex
@@ -108,6 +110,7 @@ jobs:
               "migrations/v0001_initial.py",
               "migrations/v0002_remote_cache.py",
               "migrations/v0003_name_provenance_runtime_index.py",
+              "migrations/v0004_runtime_truth_ordering.py",
           ):
               assert package.joinpath(migration).is_file()
           with TemporaryDirectory() as directory:

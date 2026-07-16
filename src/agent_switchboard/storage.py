@@ -48,6 +48,7 @@ from .protocol import (
 from .protocol import (
     SnapshotEnvelope,
 )
+from .state import HOOK_SOURCE_PRIORITY, HookEvent, HookTransition, hook_transition
 
 DEFAULT_BUSY_TIMEOUT_MS: Final = 5_000
 MAX_BUSY_TIMEOUT_MS: Final = 30_000
@@ -56,6 +57,7 @@ MAX_EVENT_LIMIT: Final = 100_000
 DEFAULT_SNAPSHOT_SESSION_LIMIT: Final = 1_000
 DEFAULT_SNAPSHOT_RUNTIME_LIMIT: Final = 10_000
 _SQLITE_MAX_INTEGER: Final = 2**63 - 1
+_MAX_EVIDENCE_PRIORITY: Final = 1_000_000
 
 _ACTIVE_LAUNCH_STATES: Final = (
     "reserved",
@@ -115,6 +117,21 @@ _SESSION_FIELDS: Final = {
     "continued_from_handoff_id",
     "pinned",
 }
+_PRIVATE_SESSION_FIELDS: Final = {
+    "runtime_source_priority",
+    "runtime_order_ns",
+    "resumability_source_priority",
+    "resumability_order_ns",
+    "activity_source_priority",
+    "activity_order_ns",
+    "attachment_source_priority",
+    "attachment_order_ns",
+    "last_hook_turn_id",
+    "last_hook_entry_ns",
+    "last_hook_kind_priority",
+    "runtime_process_birth_id",
+    "tmux_socket",
+}
 _SESSION_RUNTIME_FIELDS: Final = {
     "runtime_presence",
     "attachment",
@@ -170,7 +187,11 @@ _RUNTIME_OBSERVATION_HASH_FIELDS: Final = (
     "tmux_window",
     "tmux_pane",
     "observed_at",
-    "received_at",
+)
+_PRIVATE_RUNTIME_OBSERVATION_FIELDS: Final = (
+    "entry_ns",
+    "process_birth_id",
+    "tmux_socket",
 )
 _EVENT_HASH_FIELDS: Final = (
     "idempotency_key",
@@ -183,10 +204,16 @@ _EVENT_HASH_FIELDS: Final = (
     "provider_turn_id",
     "source_priority",
     "kind_priority",
-    "observed_at",
-    "received_at",
     "diagnostic_code",
     "diagnostic_detail",
+)
+_HOOK_EVENT_HASH_FIELDS: Final = (
+    *_EVENT_HASH_FIELDS,
+    "provider_session_id",
+    "cwd",
+    "process_birth_id",
+    "tmux_socket",
+    "tmux_pane",
 )
 
 
@@ -222,6 +249,49 @@ class LaunchBindingResult:
     launch: dict[str, Any]
     session: dict[str, Any]
     surface: dict[str, Any] | None
+
+
+@dataclass(frozen=True, slots=True)
+class HookIngestionResult:
+    """Outcome of one atomic, privacy-safe lifecycle event write."""
+
+    kind: str
+    event: dict[str, Any]
+    session: dict[str, Any]
+    runtime: dict[str, Any] | None
+    launch: dict[str, Any] | None
+    surface: dict[str, Any] | None
+
+
+@dataclass(frozen=True, slots=True)
+class _PreparedHookEvent:
+    host_id: str
+    host_display_name: str
+    provider: str
+    provider_session_id: str
+    session_key: str
+    cwd: str
+    event_kind: HookEvent
+    transition: HookTransition
+    provider_turn_id: str | None
+    idempotency_key: str
+    source_priority: int
+    entry_ns: int
+    observed_at: int
+    received_at: int
+    launch_id: str | None
+    surface_id: str | None
+    process_birth_id: str | None
+    tmux_socket: str | None
+    tmux_pane: str | None
+    payload_hash: str
+
+
+@dataclass(frozen=True, slots=True)
+class _HookLaunchContext:
+    launch: sqlite3.Row | None
+    surface: sqlite3.Row | None
+    mismatch: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -279,6 +349,13 @@ def _nonnegative_integer(value: Any, field: str) -> int:
     ):
         raise StorageError(f"{field} must be a non-negative SQLite integer")
     return value
+
+
+def _evidence_priority(value: Any, field: str) -> int:
+    priority = _nonnegative_integer(value, field)
+    if priority > _MAX_EVIDENCE_PRIORITY:
+        raise StorageError(f"{field} must be no greater than {_MAX_EVIDENCE_PRIORITY}")
+    return priority
 
 
 def _reject_invalid_unicode(value: str, field: str) -> None:
@@ -387,6 +464,156 @@ def _canonical_session_key(value: Any) -> SessionKey:
     if value != str(key):
         raise StorageError("session_key must use canonical lowercase UUID spelling")
     return key
+
+
+def _prepare_hook_event(
+    event: Mapping[str, Any], host_display_name: str
+) -> _PreparedHookEvent:
+    required = {
+        "idempotency_key",
+        "host_id",
+        "provider",
+        "provider_session_id",
+        "session_key",
+        "cwd",
+        "event_kind",
+        "source_priority",
+        "kind_priority",
+        "entry_ns",
+        "observed_at",
+        "received_at",
+    } - set(event)
+    if required:
+        raise StorageError(f"missing normalized hook fields: {sorted(required)}")
+
+    host_id = _canonical_host_id(event["host_id"])
+    provider = _canonical_provider(event["provider"])
+    if provider != "codex":
+        raise StorageError("hook ingestion is not implemented for this provider")
+    provider_session_id = _canonical_plain_uuid(
+        event["provider_session_id"], "provider_session_id"
+    )
+    session_key = str(_canonical_session_key(event["session_key"]))
+    if session_key != f"{host_id}:{provider}:{provider_session_id}":
+        raise IdentityConflict("hook session identity is inconsistent")
+
+    try:
+        event_kind = HookEvent(event["event_kind"])
+    except (TypeError, ValueError) as error:
+        raise StorageError("unsupported normalized hook event") from error
+    if event_kind is HookEvent.SESSION_END:
+        raise StorageError("unsupported normalized hook event")
+    transition = hook_transition(event_kind)
+    kind_priority = _evidence_priority(event["kind_priority"], "kind_priority")
+    if kind_priority != transition.kind_priority:
+        raise StorageError("hook kind priority does not match the lifecycle contract")
+    source_priority = _evidence_priority(event["source_priority"], "source_priority")
+    if source_priority != HOOK_SOURCE_PRIORITY:
+        raise StorageError("hook source priority does not match the lifecycle contract")
+
+    cwd = event["cwd"]
+    if not isinstance(cwd, str) or not cwd or len(cwd) > 4096:
+        raise StorageError("hook cwd must be a bounded string")
+    if not Path(cwd).is_absolute():
+        raise StorageError("hook cwd must be absolute")
+    _reject_controls(cwd, "cwd")
+    _reject_invalid_unicode(cwd, "cwd")
+    if not isinstance(host_display_name, str) or not 1 <= len(host_display_name) <= 256:
+        raise StorageError("host display name must be a bounded string")
+    _reject_controls(host_display_name, "host display name")
+    _reject_invalid_unicode(host_display_name, "host display name")
+
+    idempotency_key = event["idempotency_key"]
+    provider_turn_id = event.get("provider_turn_id")
+    process_birth_id = event.get("process_birth_id")
+    tmux_socket = event.get("tmux_socket")
+    tmux_pane = event.get("tmux_pane")
+    for field, value in (
+        ("idempotency_key", idempotency_key),
+        ("provider_turn_id", provider_turn_id),
+        ("process_birth_id", process_birth_id),
+        ("tmux_socket", tmux_socket),
+        ("tmux_pane", tmux_pane),
+    ):
+        _reject_controls(value, field)
+        if isinstance(value, str):
+            _reject_invalid_unicode(value, field)
+    if (
+        not isinstance(idempotency_key, str)
+        or len(idempotency_key) != 69
+        or not idempotency_key.startswith("hook:")
+        or any(character not in "0123456789abcdef" for character in idempotency_key[5:])
+    ):
+        raise StorageError("hook idempotency key must contain a lowercase digest")
+    if event_kind is HookEvent.SESSION_START:
+        if provider_turn_id is not None:
+            raise StorageError("SessionStart must not carry a provider turn ID")
+    elif not isinstance(provider_turn_id, str) or not 1 <= len(provider_turn_id) <= 256:
+        raise StorageError("turn hook events require a bounded provider turn ID")
+    if process_birth_id is not None and (
+        not isinstance(process_birth_id, str)
+        or len(process_birth_id) != 64
+        or any(character not in "0123456789abcdef" for character in process_birth_id)
+    ):
+        raise StorageError("process birth ID must be an opaque lowercase digest")
+    if (tmux_socket is None) != (tmux_pane is None):
+        raise StorageError("tmux socket and pane must be supplied together")
+    if tmux_socket is not None and (
+        not isinstance(tmux_socket, str)
+        or not 1 <= len(tmux_socket) <= 4096
+        or not Path(tmux_socket).is_absolute()
+    ):
+        raise StorageError("tmux socket must be a bounded absolute path")
+    if tmux_pane is not None and (
+        not isinstance(tmux_pane, str)
+        or len(tmux_pane) > 256
+        or not tmux_pane.startswith("%")
+        or not tmux_pane[1:].isdigit()
+    ):
+        raise StorageError("tmux pane must use canonical tmux pane syntax")
+
+    launch_id = event.get("launch_id")
+    surface_id = event.get("surface_id")
+    if (launch_id is None) != (surface_id is None):
+        raise StorageError("hook launch and surface IDs must be supplied together")
+    if launch_id is not None:
+        launch_id = _canonical_uuid_id(launch_id, LaunchId, "launch_id")
+        surface_id = _canonical_uuid_id(surface_id, SurfaceId, "surface_id")
+
+    entry_ns = _nonnegative_integer(event["entry_ns"], "entry_ns")
+    observed_at = _nonnegative_integer(event["observed_at"], "observed_at")
+    received_at = _nonnegative_integer(event["received_at"], "received_at")
+    payload_hash = _sha256_text(
+        _canonical_json({field: event.get(field) for field in _HOOK_EVENT_HASH_FIELDS})
+    )
+    supplied_hash = event.get("payload_hash")
+    if supplied_hash is not None and (
+        _require_hash(str(supplied_hash), "payload_hash") != payload_hash
+    ):
+        raise StorageError("payload_hash does not match the normalized hook event")
+
+    return _PreparedHookEvent(
+        host_id=host_id,
+        host_display_name=host_display_name,
+        provider=provider,
+        provider_session_id=provider_session_id,
+        session_key=session_key,
+        cwd=cwd,
+        event_kind=event_kind,
+        transition=transition,
+        provider_turn_id=provider_turn_id,
+        idempotency_key=idempotency_key,
+        source_priority=source_priority,
+        entry_ns=entry_ns,
+        observed_at=observed_at,
+        received_at=received_at,
+        launch_id=launch_id,
+        surface_id=surface_id,
+        process_birth_id=process_birth_id,
+        tmux_socket=tmux_socket,
+        tmux_pane=tmux_pane,
+        payload_hash=payload_hash,
+    )
 
 
 def _secure_database_file(path: Path) -> None:
@@ -1248,6 +1475,12 @@ class Registry:
             session_key = str(session["session_key"])
         except KeyError as error:
             raise StorageError("missing session field: session_key") from error
+        private_fields = _PRIVATE_SESSION_FIELDS.intersection(session)
+        if private_fields:
+            raise StorageError(
+                "private session evidence fields require an atomic reconciler: "
+                f"{sorted(private_fields)}"
+            )
         if "surface_id" in session:
             raise StorageError(
                 "session surface bindings must be changed with bind_surface"
@@ -2434,6 +2667,583 @@ class Registry:
         assert result is not None
         return result
 
+    @staticmethod
+    def _hook_duplicate_result(
+        connection: sqlite3.Connection,
+        event: _PreparedHookEvent,
+    ) -> HookIngestionResult | None:
+        duplicate = connection.execute(
+            """
+            SELECT * FROM events
+            WHERE host_id = ? AND provider = ? AND idempotency_key = ?
+            """,
+            (event.host_id, event.provider, event.idempotency_key),
+        ).fetchone()
+        if duplicate is None:
+            return None
+        if duplicate["payload_hash"] != event.payload_hash:
+            raise IdentityConflict(
+                "hook idempotency key was reused for different content"
+            )
+        session = connection.execute(
+            "SELECT * FROM sessions WHERE session_key = ?", (event.session_key,)
+        ).fetchone()
+        if session is None:
+            raise IdentityConflict("hook replay references a missing session")
+        runtime = connection.execute(
+            """
+            SELECT * FROM runtime_observations
+            WHERE host_id = ? AND provider = ? AND observation_key = ?
+            """,
+            (
+                event.host_id,
+                event.provider,
+                f"event:{event.idempotency_key}",
+            ),
+        ).fetchone()
+        launch = (
+            connection.execute(
+                "SELECT * FROM launch_intents WHERE launch_id = ?",
+                (event.launch_id,),
+            ).fetchone()
+            if event.launch_id is not None
+            else None
+        )
+        surface = (
+            connection.execute(
+                "SELECT * FROM surfaces WHERE surface_id = ?", (event.surface_id,)
+            ).fetchone()
+            if event.surface_id is not None
+            else None
+        )
+        return HookIngestionResult(
+            "duplicate",
+            dict(duplicate),
+            dict(session),
+            _row_dict(runtime),
+            _row_dict(launch),
+            _row_dict(surface),
+        )
+
+    @staticmethod
+    def _ensure_hook_host(
+        connection: sqlite3.Connection, event: _PreparedHookEvent
+    ) -> None:
+        host = connection.execute(
+            "SELECT * FROM hosts WHERE host_id = ?", (event.host_id,)
+        ).fetchone()
+        if host is None:
+            connection.execute(
+                """
+                INSERT INTO hosts(
+                    host_id, display_name, is_local, created_at, updated_at
+                ) VALUES (?, ?, 1, ?, ?)
+                """,
+                (
+                    event.host_id,
+                    event.host_display_name,
+                    event.observed_at,
+                    event.observed_at,
+                ),
+            )
+        elif not bool(host["is_local"]):
+            connection.execute(
+                """
+                UPDATE hosts
+                SET display_name = ?, is_local = 1, updated_at = ?
+                WHERE host_id = ?
+                """,
+                (
+                    event.host_display_name,
+                    max(event.observed_at, int(host["updated_at"])),
+                    event.host_id,
+                ),
+            )
+
+    @staticmethod
+    def _resolve_hook_launch(
+        connection: sqlite3.Connection, event: _PreparedHookEvent
+    ) -> _HookLaunchContext:
+        if event.launch_id is None:
+            return _HookLaunchContext(None, None, False)
+        launch = connection.execute(
+            "SELECT * FROM launch_intents WHERE launch_id = ?", (event.launch_id,)
+        ).fetchone()
+        if launch is None:
+            raise StorageError("unknown hook launch")
+        surface = connection.execute(
+            "SELECT * FROM surfaces WHERE surface_id = ?", (event.surface_id,)
+        ).fetchone()
+        if surface is None:
+            raise StorageError("unknown hook surface")
+        if (
+            launch["host_id"] != event.host_id
+            or launch["provider"] != event.provider
+            or launch["surface_id"] != event.surface_id
+            or surface["host_id"] != event.host_id
+            or surface["provider"] != event.provider
+            or surface["role"] != "session"
+            or surface["launch_id"] != event.launch_id
+            or surface["retired_at"] is not None
+        ):
+            raise IdentityConflict("hook launch and surface identity do not match")
+        if event.observed_at < int(launch["updated_at"]):
+            raise StorageError("stale hook launch observation")
+        mismatch = False
+        if launch["state"] == "provider_started":
+            if launch["lease_owner"] is None or event.observed_at >= int(
+                launch["expires_at"]
+            ):
+                raise StorageError("hook launch lease has expired")
+            mismatch = (
+                launch["action"] in {"resume", "attach"}
+                and launch["target_session_key"] != event.session_key
+            )
+        elif launch["state"] == "bound":
+            if (
+                launch["target_session_key"] != event.session_key
+                or surface["current_session_key"] != event.session_key
+                or surface["binding_confidence"] != "confirmed"
+            ):
+                raise IdentityConflict("bound hook launch changed session identity")
+        elif (
+            launch["state"] == "failed"
+            and launch["failure_code"] == "provider_identity_mismatch"
+        ):
+            mismatch = launch["target_session_key"] != event.session_key
+            if not mismatch:
+                raise IdentityConflict("failed hook launch changed session identity")
+        else:
+            raise StorageError("hook launch is not ready for provider binding")
+        return _HookLaunchContext(launch, surface, mismatch)
+
+    @classmethod
+    def _ensure_hook_session(
+        cls,
+        connection: sqlite3.Connection,
+        event: _PreparedHookEvent,
+        launch: sqlite3.Row | None,
+    ) -> None:
+        existing = connection.execute(
+            "SELECT * FROM sessions WHERE session_key = ?", (event.session_key,)
+        ).fetchone()
+        if existing is not None:
+            if (
+                existing["host_id"] != event.host_id
+                or existing["provider"] != event.provider
+                or existing["provider_session_id"] != event.provider_session_id
+            ):
+                raise IdentityConflict("hook session changed immutable identity")
+            return
+        initial_cwd = (
+            str(launch["cwd"])
+            if launch is not None
+            and launch["action"] == "new"
+            and launch["cwd"] is not None
+            else event.cwd
+        )
+        initial: dict[str, Any] = {
+            "session_key": event.session_key,
+            "host_id": event.host_id,
+            "provider": event.provider,
+            "provider_session_id": event.provider_session_id,
+            "cwd": initial_cwd,
+            "first_observed_at": event.observed_at,
+            "last_observed_at": event.observed_at,
+            "metadata_source": "hook",
+        }
+        if launch is not None and launch["action"] == "new":
+            initial.update(
+                project_id=launch["project_id"],
+                location_id=launch["location_id"],
+                metadata_source="launch",
+                continued_from_handoff_id=launch["source_handoff_id"],
+            )
+        cls._upsert_session_row(connection, initial)
+
+    @classmethod
+    def _apply_hook_launch_binding(
+        cls,
+        connection: sqlite3.Connection,
+        event: _PreparedHookEvent,
+        context: _HookLaunchContext,
+    ) -> None:
+        launch = context.launch
+        surface = context.surface
+        if launch is None or launch["state"] != "provider_started":
+            return
+        if context.mismatch:
+            connection.execute(
+                "UPDATE sessions SET surface_id = NULL WHERE surface_id = ?",
+                (event.surface_id,),
+            )
+            connection.execute(
+                """
+                UPDATE surfaces
+                SET current_session_key = NULL,
+                    binding_confidence = 'unknown',
+                    last_observed_at = ?
+                WHERE surface_id = ?
+                """,
+                (event.observed_at, event.surface_id),
+            )
+            connection.execute(
+                """
+                UPDATE launch_intents
+                SET state = 'failed', lease_owner = NULL, updated_at = ?,
+                    failure_code = 'provider_identity_mismatch',
+                    failure_detail = ?
+                WHERE launch_id = ?
+                """,
+                (
+                    event.observed_at,
+                    "provider session did not match the requested target",
+                    event.launch_id,
+                ),
+            )
+            return
+        session = connection.execute(
+            "SELECT * FROM sessions WHERE session_key = ?", (event.session_key,)
+        ).fetchone()
+        assert surface is not None and session is not None
+        cls._bind_surface_row(
+            connection,
+            surface,
+            session,
+            confidence="confirmed",
+            observed_at=event.observed_at,
+        )
+        connection.execute(
+            """
+            UPDATE launch_intents
+            SET state = 'bound', target_session_key = ?,
+                lease_owner = NULL, updated_at = ?,
+                failure_code = NULL, failure_detail = NULL
+            WHERE launch_id = ?
+            """,
+            (event.session_key, event.observed_at, event.launch_id),
+        )
+
+    @staticmethod
+    def _materialize_hook_state(
+        connection: sqlite3.Connection,
+        event: _PreparedHookEvent,
+        launch: sqlite3.Row | None,
+    ) -> tuple[sqlite3.Row, bool, bool]:
+        session = connection.execute(
+            "SELECT * FROM sessions WHERE session_key = ?", (event.session_key,)
+        ).fetchone()
+        assert session is not None
+        runtime_allowed = event.source_priority > int(
+            session["runtime_source_priority"]
+        ) or (
+            event.source_priority == int(session["runtime_source_priority"])
+            and event.entry_ns >= int(session["runtime_order_ns"])
+        )
+        same_turn = (
+            event.provider_turn_id is not None
+            and session["last_hook_turn_id"] == event.provider_turn_id
+        )
+        if event.source_priority > int(session["activity_source_priority"]):
+            activity_allowed = True
+        elif event.source_priority < int(session["activity_source_priority"]):
+            activity_allowed = False
+        elif same_turn:
+            stored_kind = session["last_hook_kind_priority"]
+            activity_allowed = stored_kind is None or (
+                event.transition.kind_priority >= int(stored_kind)
+            )
+        else:
+            activity_allowed = event.entry_ns >= int(session["activity_order_ns"])
+
+        updates: dict[str, Any] = {}
+        if runtime_allowed or activity_allowed:
+            updates.update(
+                last_observed_at=max(
+                    event.observed_at, int(session["last_observed_at"])
+                ),
+                last_activity_at=max(
+                    event.observed_at, int(session["last_activity_at"] or 0)
+                ),
+            )
+        if runtime_allowed:
+            # A hook proves this runtime is live, but only the evidence carried
+            # by this newer hook remains trustworthy. Missing locator fields
+            # therefore clear an older PID/tmux association.
+            updates.update(
+                cwd=(
+                    launch["cwd"]
+                    if launch is not None
+                    and launch["action"] == "new"
+                    and launch["cwd"] is not None
+                    else event.cwd
+                ),
+                runtime_presence=event.transition.runtime_presence.value,
+                runtime_observed_at=event.observed_at,
+                runtime_source_priority=event.source_priority,
+                runtime_order_ns=max(event.entry_ns, int(session["runtime_order_ns"])),
+                runtime_pid=None,
+                provider_runtime_id=None,
+                runtime_process_birth_id=event.process_birth_id,
+                tmux_session=None,
+                tmux_window=None,
+                tmux_pane=event.tmux_pane,
+                tmux_socket=event.tmux_socket,
+            )
+        if activity_allowed:
+            assert event.transition.activity is not None
+            assert event.transition.activity_reason is not None
+            updates.update(
+                activity=event.transition.activity.value,
+                activity_reason=event.transition.activity_reason.value,
+                state_confidence="confirmed",
+                state_observed_at=max(
+                    event.observed_at, int(session["state_observed_at"] or 0)
+                ),
+                activity_source_priority=event.source_priority,
+                activity_order_ns=max(
+                    event.entry_ns, int(session["activity_order_ns"])
+                ),
+                last_hook_turn_id=event.provider_turn_id,
+                last_hook_entry_ns=max(
+                    event.entry_ns, int(session["last_hook_entry_ns"] or 0)
+                ),
+                last_hook_kind_priority=event.transition.kind_priority,
+            )
+        if updates:
+            assignments = ", ".join(f"{field} = ?" for field in updates)
+            connection.execute(
+                f"UPDATE sessions SET {assignments} WHERE session_key = ?",
+                (*updates.values(), event.session_key),
+            )
+            session = connection.execute(
+                "SELECT * FROM sessions WHERE session_key = ?", (event.session_key,)
+            ).fetchone()
+            assert session is not None
+        return session, runtime_allowed, activity_allowed
+
+    @staticmethod
+    def _record_hook_evidence(
+        connection: sqlite3.Connection,
+        event: _PreparedHookEvent,
+        context: _HookLaunchContext,
+    ) -> tuple[sqlite3.Row, sqlite3.Row]:
+        retained_launch_id = None if context.mismatch else event.launch_id
+        retained_surface_id = None if context.mismatch else event.surface_id
+        event_id = str(uuid.uuid4())
+        connection.execute(
+            """
+            INSERT INTO events(
+                event_id, idempotency_key, host_id, provider, session_key,
+                launch_id, surface_id, event_kind, provider_turn_id,
+                source_priority, kind_priority, observed_at, received_at,
+                payload_hash, diagnostic_code, diagnostic_detail, entry_ns
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?)
+            """,
+            (
+                event_id,
+                event.idempotency_key,
+                event.host_id,
+                event.provider,
+                event.session_key,
+                retained_launch_id,
+                retained_surface_id,
+                event.event_kind.value,
+                event.provider_turn_id,
+                event.source_priority,
+                event.transition.kind_priority,
+                event.observed_at,
+                event.received_at,
+                event.payload_hash,
+                event.entry_ns,
+            ),
+        )
+
+        assert event.transition.activity is not None
+        assert event.transition.activity_reason is not None
+        observation_key = f"event:{event.idempotency_key}"
+        runtime_values = {
+            "observation_key": observation_key,
+            "host_id": event.host_id,
+            "provider": event.provider,
+            "session_key": event.session_key,
+            "launch_id": retained_launch_id,
+            "source": "hook",
+            "source_priority": event.source_priority,
+            "runtime_presence": event.transition.runtime_presence.value,
+            "resumability": "unknown",
+            "activity": event.transition.activity.value,
+            "activity_reason": event.transition.activity_reason.value,
+            "attachment": "unknown",
+            "pid": None,
+            "provider_runtime_id": None,
+            "tmux_session": None,
+            "tmux_window": None,
+            "tmux_pane": event.tmux_pane,
+            "observed_at": event.observed_at,
+        }
+        runtime_hash = _sha256_text(
+            _canonical_json(
+                {
+                    field: runtime_values.get(field)
+                    for field in _RUNTIME_OBSERVATION_HASH_FIELDS
+                }
+            )
+        )
+        observation_id = str(uuid.uuid4())
+        connection.execute(
+            """
+            INSERT INTO runtime_observations(
+                observation_id, observation_key, host_id, provider,
+                session_key, launch_id, source, source_priority,
+                runtime_presence, resumability, activity, activity_reason,
+                attachment, pid, provider_runtime_id, tmux_session,
+                tmux_window, tmux_pane, observed_at, received_at, payload_hash,
+                entry_ns, process_birth_id, tmux_socket
+            ) VALUES (
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL,
+                NULL, ?, ?, ?, ?, ?, ?, ?
+            )
+            """,
+            (
+                observation_id,
+                observation_key,
+                event.host_id,
+                event.provider,
+                event.session_key,
+                retained_launch_id,
+                "hook",
+                event.source_priority,
+                event.transition.runtime_presence.value,
+                "unknown",
+                event.transition.activity.value,
+                event.transition.activity_reason.value,
+                "unknown",
+                event.tmux_pane,
+                event.observed_at,
+                event.received_at,
+                runtime_hash,
+                event.entry_ns,
+                event.process_birth_id,
+                event.tmux_socket,
+            ),
+        )
+        stored_event = connection.execute(
+            "SELECT * FROM events WHERE event_id = ?", (event_id,)
+        ).fetchone()
+        stored_runtime = connection.execute(
+            "SELECT * FROM runtime_observations WHERE observation_id = ?",
+            (observation_id,),
+        ).fetchone()
+        assert stored_event is not None and stored_runtime is not None
+        return stored_event, stored_runtime
+
+    @staticmethod
+    def _prune_hook_evidence(connection: sqlite3.Connection, limit: int) -> None:
+        # Hook events and their runtime observations are one replay witness. If
+        # retention drops one, it must drop the other so a later exact replay
+        # can be ingested without colliding with an orphan observation key.
+        connection.execute(
+            """
+            DELETE FROM runtime_observations
+            WHERE source = 'hook'
+              AND (host_id, provider, observation_key) IN (
+                  SELECT host_id, provider, 'event:' || idempotency_key
+                  FROM events
+                  ORDER BY received_at DESC, event_id DESC
+                  LIMIT -1 OFFSET ?
+              )
+            """,
+            (limit,),
+        )
+        connection.execute(
+            """
+            DELETE FROM events
+            WHERE event_id IN (
+                SELECT event_id FROM events
+                ORDER BY received_at DESC, event_id DESC
+                LIMIT -1 OFFSET ?
+            )
+            """,
+            (limit,),
+        )
+
+    def ingest_hook_event(
+        self,
+        event: Mapping[str, Any],
+        *,
+        host_display_name: str,
+        limit: int = DEFAULT_EVENT_LIMIT,
+    ) -> HookIngestionResult:
+        """Atomically retain and materialize one normalized lifecycle event.
+
+        The hook path intentionally consumes a correlated launch's stored lease
+        without accepting the private lease owner from the provider environment.
+        The launch and its surface must already be in ``provider_started`` and
+        must match the normalized inherited IDs exactly.
+        """
+
+        if not 1 <= limit <= MAX_EVENT_LIMIT:
+            raise ValueError(f"event limit must be between 1 and {MAX_EVENT_LIMIT}")
+        prepared = _prepare_hook_event(event, host_display_name)
+
+        with self.transaction(immediate=True) as connection:
+            duplicate = self._hook_duplicate_result(connection, prepared)
+            if duplicate is not None:
+                return duplicate
+            self._ensure_hook_host(connection, prepared)
+            launch_context = self._resolve_hook_launch(connection, prepared)
+            self._ensure_hook_session(connection, prepared, launch_context.launch)
+            self._apply_hook_launch_binding(connection, prepared, launch_context)
+            stored_session, runtime_allowed, activity_allowed = (
+                self._materialize_hook_state(
+                    connection,
+                    prepared,
+                    launch_context.launch,
+                )
+            )
+            stored_event, stored_runtime = self._record_hook_evidence(
+                connection, prepared, launch_context
+            )
+            self._prune_hook_evidence(connection, limit)
+            stored_session = connection.execute(
+                "SELECT * FROM sessions WHERE session_key = ?",
+                (prepared.session_key,),
+            ).fetchone()
+            launch = (
+                connection.execute(
+                    "SELECT * FROM launch_intents WHERE launch_id = ?",
+                    (prepared.launch_id,),
+                ).fetchone()
+                if prepared.launch_id is not None
+                else None
+            )
+            surface = (
+                connection.execute(
+                    "SELECT * FROM surfaces WHERE surface_id = ?",
+                    (prepared.surface_id,),
+                ).fetchone()
+                if prepared.surface_id is not None
+                else None
+            )
+            assert stored_event is not None
+            assert stored_runtime is not None
+            assert stored_session is not None
+
+        kind = (
+            "provider_identity_mismatch"
+            if launch_context.mismatch
+            else ("applied" if runtime_allowed or activity_allowed else "stale")
+        )
+        return HookIngestionResult(
+            kind,
+            dict(stored_event),
+            dict(stored_session),
+            dict(stored_runtime),
+            _row_dict(launch),
+            _row_dict(surface),
+        )
+
     def record_runtime_observation(
         self, observation: Mapping[str, Any]
     ) -> dict[str, Any]:
@@ -2455,8 +3265,19 @@ class Registry:
             raise StorageError(
                 f"missing runtime observation fields: {sorted(required)}"
             )
+        private_fields = set(_PRIVATE_RUNTIME_OBSERVATION_FIELDS).intersection(
+            observation
+        )
+        if private_fields:
+            raise StorageError(
+                "private runtime evidence fields require an atomic reconciler: "
+                f"{sorted(private_fields)}"
+            )
         _canonical_host_id(observation["host_id"])
         _canonical_provider(observation["provider"])
+        _evidence_priority(observation["source_priority"], "source_priority")
+        _nonnegative_integer(observation["observed_at"], "observed_at")
+        _nonnegative_integer(observation["received_at"], "received_at")
         session_key = observation.get("session_key")
         if session_key is not None:
             _canonical_session_key(session_key)
@@ -2541,7 +3362,10 @@ class Registry:
                 ),
             ).fetchone()
             if existing is not None:
-                if existing["payload_hash"] != payload_hash:
+                if existing["payload_hash"] != payload_hash and any(
+                    existing[field] != observation.get(field)
+                    for field in _RUNTIME_OBSERVATION_HASH_FIELDS
+                ):
                     raise IdentityConflict(
                         "runtime observation key was reused for different content"
                     )
@@ -2553,8 +3377,12 @@ class Registry:
                     session_key, launch_id, source, source_priority,
                     runtime_presence, resumability, activity, activity_reason,
                     attachment, pid, provider_runtime_id, tmux_session,
-                    tmux_window, tmux_pane, observed_at, received_at, payload_hash
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    tmux_window, tmux_pane, observed_at, received_at, payload_hash,
+                    entry_ns, process_birth_id, tmux_socket
+                ) VALUES (
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                    ?, ?, ?
+                )
                 """,
                 (
                     observation_id,
@@ -2578,6 +3406,9 @@ class Registry:
                     observation["observed_at"],
                     observation["received_at"],
                     payload_hash,
+                    observation.get("entry_ns"),
+                    observation.get("process_birth_id"),
+                    observation.get("tmux_socket"),
                 ),
             )
             row = connection.execute(
@@ -2610,8 +3441,17 @@ class Registry:
         } - set(event)
         if required:
             raise StorageError(f"missing event fields: {sorted(required)}")
+        if "entry_ns" in event:
+            raise StorageError(
+                "private event evidence fields require an atomic reconciler: "
+                "['entry_ns']"
+            )
         _canonical_host_id(event["host_id"])
         _canonical_provider(event["provider"])
+        _evidence_priority(event["source_priority"], "source_priority")
+        _evidence_priority(event["kind_priority"], "kind_priority")
+        _nonnegative_integer(event["observed_at"], "observed_at")
+        _nonnegative_integer(event["received_at"], "received_at")
         session_key = event.get("session_key")
         if session_key is not None:
             _canonical_session_key(session_key)
@@ -2722,7 +3562,9 @@ class Registry:
                 (event["host_id"], event["provider"], event["idempotency_key"]),
             ).fetchone()
             if existing is not None:
-                if existing["payload_hash"] != payload_hash:
+                if existing["payload_hash"] != payload_hash and any(
+                    existing[field] != event.get(field) for field in _EVENT_HASH_FIELDS
+                ):
                     raise IdentityConflict(
                         "event idempotency key has different content"
                     )
@@ -2733,8 +3575,8 @@ class Registry:
                     event_id, idempotency_key, host_id, provider, session_key,
                     launch_id, surface_id, event_kind, provider_turn_id,
                     source_priority, kind_priority, observed_at, received_at,
-                    payload_hash, diagnostic_code, diagnostic_detail
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    payload_hash, diagnostic_code, diagnostic_detail, entry_ns
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     event_id,
@@ -2753,6 +3595,7 @@ class Registry:
                     payload_hash,
                     event.get("diagnostic_code"),
                     event.get("diagnostic_detail"),
+                    event.get("entry_ns"),
                 ),
             )
             row = connection.execute(
@@ -2760,17 +3603,7 @@ class Registry:
             ).fetchone()
             assert row is not None
             result = dict(row)
-            connection.execute(
-                """
-                DELETE FROM events
-                WHERE event_id IN (
-                    SELECT event_id FROM events
-                    ORDER BY received_at DESC, event_id DESC
-                    LIMIT -1 OFFSET ?
-                )
-                """,
-                (limit,),
-            )
+            self._prune_hook_evidence(connection, limit)
         return result
 
     def upsert_remote(
@@ -2991,6 +3824,7 @@ __all__ = [
     "DEFAULT_EVENT_LIMIT",
     "DEFAULT_SNAPSHOT_RUNTIME_LIMIT",
     "DEFAULT_SNAPSHOT_SESSION_LIMIT",
+    "HookIngestionResult",
     "HostSnapshotRows",
     "IdentityConflict",
     "LaunchBindingResult",

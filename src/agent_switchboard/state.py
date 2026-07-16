@@ -42,14 +42,63 @@ class HookEvent(StrEnum):
     SESSION_END = "SessionEnd"
 
 
-_HOOK_KIND_PRIORITY = {
-    HookEvent.SESSION_START: 10,
-    HookEvent.USER_PROMPT_SUBMIT: 20,
-    HookEvent.POST_TOOL_USE: 30,
-    HookEvent.PERMISSION_REQUEST: 40,
-    HookEvent.STOP: 50,
-    HookEvent.SESSION_END: 60,
+HOOK_SOURCE_PRIORITY = 100
+
+
+@dataclass(frozen=True, slots=True)
+class HookTransition:
+    """Canonical priority and axes established by one hook event."""
+
+    kind_priority: int
+    runtime_presence: RuntimePresence
+    activity: Activity | None
+    activity_reason: ActivityReason | None
+
+
+_HOOK_TRANSITIONS = {
+    HookEvent.SESSION_START: HookTransition(
+        10,
+        RuntimePresence.LIVE,
+        Activity.READY,
+        ActivityReason.UNKNOWN,
+    ),
+    HookEvent.USER_PROMPT_SUBMIT: HookTransition(
+        20,
+        RuntimePresence.LIVE,
+        Activity.WORKING,
+        ActivityReason.UNKNOWN,
+    ),
+    HookEvent.POST_TOOL_USE: HookTransition(
+        30,
+        RuntimePresence.LIVE,
+        Activity.WORKING,
+        ActivityReason.UNKNOWN,
+    ),
+    HookEvent.PERMISSION_REQUEST: HookTransition(
+        40,
+        RuntimePresence.LIVE,
+        Activity.NEEDS_INPUT,
+        ActivityReason.PERMISSION,
+    ),
+    HookEvent.STOP: HookTransition(
+        50,
+        RuntimePresence.LIVE,
+        Activity.READY,
+        ActivityReason.TURN_COMPLETE,
+    ),
+    HookEvent.SESSION_END: HookTransition(
+        60,
+        RuntimePresence.STOPPED,
+        None,
+        None,
+    ),
 }
+
+
+def hook_transition(event: HookEvent | str) -> HookTransition:
+    """Return the one authoritative lifecycle mapping used by all layers."""
+
+    return _HOOK_TRANSITIONS[_coerce(HookEvent, event, "hook event")]
 
 
 def _coerce[T: StrEnum](enum_type: type[T], value: T | str, field: str) -> T:
@@ -141,7 +190,8 @@ def apply_hook_transition(
     observed_at = observed_at.astimezone(UTC)
     if state.observed_at is not None and observed_at < state.observed_at:
         raise ValidationError("stale hook observation")
-    kind_priority = _HOOK_KIND_PRIORITY[event]
+    transition = hook_transition(event)
+    kind_priority = transition.kind_priority
     if (
         state.observed_at is not None
         and observed_at == state.observed_at
@@ -149,27 +199,26 @@ def apply_hook_transition(
     ):
         return state
     changes: dict[str, object] = {
-        "runtime_presence": RuntimePresence.LIVE,
+        "runtime_presence": transition.runtime_presence,
         "observed_at": observed_at,
         "kind_priority": kind_priority,
     }
-    if event is HookEvent.SESSION_START:
-        changes.update(activity=Activity.READY, activity_reason=ActivityReason.UNKNOWN)
-    elif event in {HookEvent.USER_PROMPT_SUBMIT, HookEvent.POST_TOOL_USE}:
+    if transition.activity is not None and transition.activity_reason is not None:
         changes.update(
-            activity=Activity.WORKING,
-            activity_reason=ActivityReason.UNKNOWN,
+            activity=transition.activity,
+            activity_reason=transition.activity_reason,
         )
-    elif event is HookEvent.PERMISSION_REQUEST:
-        changes.update(
-            activity=Activity.NEEDS_INPUT,
-            activity_reason=ActivityReason.PERMISSION,
-        )
-    elif event is HookEvent.STOP:
-        changes.update(
-            activity=Activity.READY,
-            activity_reason=ActivityReason.TURN_COMPLETE,
-        )
-    elif event is HookEvent.SESSION_END:
-        changes["runtime_presence"] = RuntimePresence.STOPPED
     return replace(state, **changes)
+
+
+__all__ = [
+    "HOOK_SOURCE_PRIORITY",
+    "DisplayStatus",
+    "HookEvent",
+    "HookTransition",
+    "HostReachability",
+    "SessionState",
+    "apply_hook_transition",
+    "derive_display_status",
+    "hook_transition",
+]

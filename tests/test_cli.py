@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import io
 import json
 import os
 import sqlite3
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -127,6 +129,93 @@ def test_parser_requires_json_and_retains_global_version(
         main(["--version"])
     assert exit_info.value.code == 0
     assert capsys.readouterr().out == f"swbctl {__version__}\n"
+
+
+def test_event_ingests_stdin_without_stdout_or_provider_io(
+    cli_environment: CliEnvironment,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = {
+        "session_id": "11111111-1111-4111-8111-111111111111",
+        "cwd": "/work/session",
+        "hook_event_name": "SessionStart",
+        "source": "startup",
+        "prompt": "SECRET prompt",
+        "transcript_path": "/private/SECRET-transcript.jsonl",
+    }
+    monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(payload)))
+
+    assert main(["event", "--provider", "codex"]) == 0
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == ""
+    assert not cli_environment.log.exists()
+    with Registry(cli_environment.database) as registry:
+        session = registry.list_sessions()[0]
+        assert session["runtime_presence"] == "live"
+        assert session["activity"] == "ready"
+        assert (
+            registry.connection.execute("SELECT COUNT(*) FROM events").fetchone()[0]
+            == 1
+        )
+    assert b"SECRET" not in cli_environment.database.read_bytes()
+
+
+def test_event_failure_has_no_stdout_and_bounded_stderr(
+    cli_environment: CliEnvironment,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("sys.stdin", io.StringIO('{"prompt":"SECRET"}'))
+
+    assert main(["event", "--provider", "codex"]) == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err.count("\n") == 1
+    assert "SECRET" not in captured.err
+    assert not cli_environment.log.exists()
+    assert not cli_environment.database.exists()
+
+
+def test_event_write_lock_fails_within_hook_latency_budget(
+    cli_environment: CliEnvironment,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session_id = "11111111-1111-4111-8111-111111111111"
+    start = {
+        "session_id": session_id,
+        "cwd": "/work/session",
+        "hook_event_name": "SessionStart",
+        "source": "startup",
+    }
+    monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(start)))
+    assert main(["event", "--provider", "codex"]) == 0
+    capsys.readouterr()
+
+    stop = {
+        "session_id": session_id,
+        "cwd": "/work/session",
+        "hook_event_name": "Stop",
+        "turn_id": "turn-under-lock",
+    }
+    with Registry(cli_environment.database) as writer:
+        writer.connection.execute("BEGIN IMMEDIATE")
+        try:
+            monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(stop)))
+            started = time.monotonic()
+            result = main(["event", "--provider", "codex"])
+            elapsed = time.monotonic() - started
+        finally:
+            writer.connection.execute("ROLLBACK")
+
+    captured = capsys.readouterr()
+    assert result == 1
+    assert captured.out == ""
+    assert captured.err.count("\n") == 1
+    assert "locked" in captured.err.lower()
+    assert elapsed < 0.9
 
 
 def test_cli_has_no_config_override_flag(capsys: pytest.CaptureFixture[str]) -> None:
