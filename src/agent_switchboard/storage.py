@@ -2051,6 +2051,28 @@ class Registry:
             ).fetchone()
         )
 
+    def list_launches(
+        self, *, host_id: str | None = None, target_session_key: str | None = None
+    ) -> list[dict[str, Any]]:
+        if host_id is not None:
+            _canonical_host_id(host_id)
+        if target_session_key is not None:
+            _canonical_session_key(target_session_key)
+        clauses: list[str] = []
+        values: list[str] = []
+        if host_id is not None:
+            clauses.append("host_id = ?")
+            values.append(host_id)
+        if target_session_key is not None:
+            clauses.append("target_session_key = ?")
+            values.append(target_session_key)
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        rows = self.connection.execute(
+            f"SELECT * FROM launch_intents {where} ORDER BY created_at, launch_id",
+            values,
+        ).fetchall()
+        return [dict(row) for row in rows]
+
     def transition_launch(
         self,
         launch_id: str,
@@ -2516,6 +2538,35 @@ class Registry:
         result = _row_dict(row)
         assert result is not None
         return result
+
+    def get_surface(self, surface_id: str) -> dict[str, Any] | None:
+        surface_id = _canonical_uuid_id(surface_id, SurfaceId, "surface_id")
+        return _row_dict(
+            self.connection.execute(
+                "SELECT * FROM surfaces WHERE surface_id = ?", (surface_id,)
+            ).fetchone()
+        )
+
+    def list_surfaces(
+        self, *, host_id: str | None = None, session_key: str | None = None
+    ) -> list[dict[str, Any]]:
+        if host_id is not None:
+            _canonical_host_id(host_id)
+        if session_key is not None:
+            _canonical_session_key(session_key)
+        clauses: list[str] = []
+        values: list[str] = []
+        if host_id is not None:
+            clauses.append("host_id = ?")
+            values.append(host_id)
+        if session_key is not None:
+            clauses.append("current_session_key = ?")
+            values.append(session_key)
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        rows = self.connection.execute(
+            f"SELECT * FROM surfaces {where} ORDER BY surface_id", values
+        ).fetchall()
+        return [dict(row) for row in rows]
 
     def bind_surface(
         self,

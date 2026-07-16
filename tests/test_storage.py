@@ -1326,6 +1326,38 @@ def test_surface_binding_and_manager_invariants(registry: Registry) -> None:
         )
 
 
+def test_launch_and_surface_lookup_helpers(registry: Registry) -> None:
+    add_session(registry)
+    launch = registry.reserve_launch(
+        resume_request(),
+        request_id=stable_uuid("lookup-request"),
+        lease_owner="frontend",
+        capability_hash=digest("lookup-capabilities"),
+        expires_at=1_000,
+        created_at=100,
+    ).launch
+    surface_id = stable_uuid("lookup-surface")
+    surface = registry.upsert_surface(
+        {
+            "surface_id": surface_id,
+            "host_id": HOST_ID,
+            "provider": "codex",
+            "transport": "tmux",
+            "transport_locator": "opaque-locator",
+            "role": "session",
+            "created_at": 100,
+            "last_observed_at": 100,
+        }
+    )
+
+    assert registry.get_surface(surface_id) == surface
+    assert registry.list_surfaces(host_id=HOST_ID) == [surface]
+    assert registry.list_surfaces(session_key=SESSION_KEY) == []
+    assert registry.list_launches(host_id=HOST_ID) == [launch]
+    assert registry.list_launches(target_session_key=SESSION_KEY) == [launch]
+    assert registry.list_launches(host_id=REMOTE_HOST_ID) == []
+
+
 def test_session_upsert_cannot_establish_or_clear_surface_binding(
     registry: Registry,
 ) -> None:
