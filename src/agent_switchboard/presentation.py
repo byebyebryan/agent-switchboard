@@ -656,6 +656,7 @@ class LaunchCoordinator:
         self,
         launch_id: str,
         *,
+        expected_surface_id: str | None = None,
         reconcile_runtime: ReconcileRuntime | None = None,
         exec_provider: ExecProvider = _exec_provider,
     ) -> int:
@@ -683,6 +684,9 @@ class LaunchCoordinator:
         target_session_key = launch.get("target_session_key")
         if not isinstance(surface_id, str) or not isinstance(target_session_key, str):
             self._fail_launch(launch_id, lease_owner, "invalid_launch_identity")
+            return 1
+        if expected_surface_id is not None and surface_id != expected_surface_id:
+            self._fail_launch(launch_id, lease_owner, "surface_identity_mismatch")
             return 1
         surface = self.registry.get_surface(surface_id)
         if surface is None:
@@ -770,10 +774,108 @@ class LaunchCoordinator:
         return 1
 
 
+def actionable_surface_locator(
+    registry: Registry,
+    *,
+    host_id: HostId | str,
+    surface_id: str,
+    tmux: TmuxController,
+    observed_at: int | None = None,
+) -> TmuxLocator:
+    """Revalidate one stored surface before an attach or client switch."""
+
+    parsed_host = host_id if isinstance(host_id, HostId) else HostId(host_id)
+    now = _now_ms() if observed_at is None else observed_at
+    surface = registry.get_surface(surface_id)
+    if surface is None:
+        raise PresentationError("unknown surface")
+    if (
+        surface["host_id"] != str(parsed_host)
+        or surface["provider"] != "codex"
+        or surface["transport"] != "tmux"
+        or surface["role"] != "session"
+        or surface["retired_at"] is not None
+    ):
+        raise PresentationError("surface is not an active local Codex surface")
+
+    launch_id = surface["launch_id"]
+    expected_session_key = surface["current_session_key"]
+    if launch_id is not None:
+        launch = registry.get_launch(str(launch_id))
+        if (
+            launch is None
+            or launch["surface_id"] != surface_id
+            or launch["host_id"] != str(parsed_host)
+            or launch["provider"] != "codex"
+            or launch["action"] != "resume"
+            or launch["state"]
+            not in {"waiting_for_client", "provider_started", "bound"}
+        ):
+            raise PresentationError("surface launch is no longer actionable")
+        if launch["state"] != "bound" and now >= int(launch["expires_at"]):
+            raise PresentationError("surface launch lease has expired")
+        if expected_session_key is None:
+            expected_session_key = launch["target_session_key"]
+    elif expected_session_key is None or surface["binding_confidence"] != "confirmed":
+        raise PresentationError("surface does not have a confirmed session binding")
+    if not isinstance(expected_session_key, str):
+        raise PresentationError("surface has no target session")
+
+    try:
+        locator = TmuxLocator.from_storage(surface["transport_locator"])
+        observed = tmux.inspect_locator(locator)
+    except TmuxError as error:
+        raise PresentationError("surface tmux target is unavailable") from error
+    if not LaunchCoordinator._metadata_matches(
+        observed,
+        surface_id=surface_id,
+        session_key=expected_session_key,
+        launch_id=launch_id,
+    ):
+        raise PresentationError("surface tmux identity did not revalidate")
+    return locator
+
+
+def select_surface(
+    registry: Registry,
+    *,
+    host_id: HostId | str,
+    surface_id: str,
+    client: str,
+    tmux: TmuxController,
+) -> None:
+    locator = actionable_surface_locator(
+        registry,
+        host_id=host_id,
+        surface_id=surface_id,
+        tmux=tmux,
+    )
+    tmux.select_surface(locator, client=client)
+
+
+def attach_surface_argv(
+    registry: Registry,
+    *,
+    host_id: HostId | str,
+    surface_id: str,
+    tmux: TmuxController,
+) -> list[str]:
+    locator = actionable_surface_locator(
+        registry,
+        host_id=host_id,
+        surface_id=surface_id,
+        tmux=tmux,
+    )
+    return tmux.attach_argv(locator)
+
+
 __all__ = [
     "BOOTSTRAP_START_WAIT_SECONDS",
     "PREPARE_CAPABILITY_HASH",
     "PREPARE_SURFACE_WAIT_SECONDS",
     "LaunchCoordinator",
     "PresentationError",
+    "actionable_surface_locator",
+    "attach_surface_argv",
+    "select_surface",
 ]

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import io
 import json
 import os
@@ -17,7 +18,15 @@ import agent_switchboard.snapshot as snapshot_module
 import agent_switchboard.storage as storage_module
 from agent_switchboard import __version__
 from agent_switchboard.cli import main
-from agent_switchboard.protocol import SnapshotEnvelope
+from agent_switchboard.domain import HostId, SessionKey
+from agent_switchboard.protocol import (
+    ErrorRecord,
+    ErrorScope,
+    PresentationPlan,
+    PresentationPlanEnvelope,
+    PresentationPlanKind,
+    SnapshotEnvelope,
+)
 from agent_switchboard.storage import Registry
 
 ROOT = Path(__file__).parents[1]
@@ -127,7 +136,7 @@ def run_json(
 def test_parser_requires_json_and_retains_global_version(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    for arguments in (["snapshot"], ["list"]):
+    for arguments in (["snapshot"], ["list"], ["prepare-open", "invalid"]):
         with pytest.raises(SystemExit) as exit_info:
             main(arguments)
         assert exit_info.value.code == 2
@@ -137,6 +146,89 @@ def test_parser_requires_json_and_retains_global_version(
         main(["--version"])
     assert exit_info.value.code == 0
     assert capsys.readouterr().out == f"swbctl {__version__}\n"
+
+
+def test_prepare_open_emits_one_presentation_envelope_and_context_flags(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    session_key = SessionKey.parse(
+        "11111111-1111-4111-8111-111111111111:codex:"
+        "22222222-2222-4222-8222-222222222222"
+    )
+    request_id = "33333333-3333-4333-8333-333333333333"
+    observed: list[argparse.Namespace] = []
+    plan = PresentationPlan(
+        PresentationPlanKind.BLOCKED,
+        HostId("11111111-1111-4111-8111-111111111111"),
+        error=ErrorRecord(
+            "unmanaged_surface",
+            "No managed surface.",
+            ErrorScope.SESSION,
+            False,
+            1,
+            session_key=session_key,
+        ),
+    )
+
+    def prepare(arguments):
+        observed.append(arguments)
+        return PresentationPlanEnvelope(plan).to_json()
+
+    monkeypatch.setattr(cli_module, "_prepare_open", prepare)
+
+    assert (
+        main(
+            [
+                "prepare-open",
+                str(session_key),
+                "--request-id",
+                request_id,
+                "--can-focus-desktop",
+                "--can-launch-terminal",
+                "--json",
+            ]
+        )
+        == 0
+    )
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    parsed = PresentationPlanEnvelope.from_json(captured.out).plan
+    assert parsed.kind is PresentationPlanKind.BLOCKED
+    assert observed[0].session_key == str(session_key)
+    assert observed[0].request_id == request_id
+    assert observed[0].can_focus_desktop
+    assert observed[0].can_launch_terminal
+
+
+def test_surface_action_commands_are_quiet_and_fail_safely(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    surface_id = "44444444-4444-4444-8444-444444444444"
+    observed: list[tuple[str, str | None]] = []
+
+    def act(arguments):
+        observed.append((arguments.command, getattr(arguments, "client", None)))
+        return 0
+
+    monkeypatch.setattr(cli_module, "_surface_action", act)
+    assert main(["select-surface", surface_id, "--client", "/dev/pts/8"]) == 0
+    assert main(["attach-surface", surface_id]) == 0
+    captured = capsys.readouterr()
+    assert captured.out == captured.err == ""
+    assert observed == [
+        ("select-surface", "/dev/pts/8"),
+        ("attach-surface", None),
+    ]
+
+    monkeypatch.setattr(
+        cli_module,
+        "_surface_action",
+        lambda _arguments: (_ for _ in ()).throw(OSError("first\n\x1bsecond")),
+    )
+    assert main(["attach-surface", surface_id]) == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == "swbctl: first second\n"
 
 
 def test_cli_composes_exact_reconciliation_modes(

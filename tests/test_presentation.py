@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from collections.abc import Sequence
 from pathlib import Path
 from uuid import NAMESPACE_URL, uuid5
@@ -7,7 +8,13 @@ from uuid import NAMESPACE_URL, uuid5
 import pytest
 
 from agent_switchboard.domain import HostId, PresentationContext
-from agent_switchboard.presentation import LaunchCoordinator
+from agent_switchboard.presentation import (
+    LaunchCoordinator,
+    PresentationError,
+    actionable_surface_locator,
+    attach_surface_argv,
+    select_surface,
+)
 from agent_switchboard.protocol import PresentationPlanKind
 from agent_switchboard.storage import Registry
 from agent_switchboard.tmux import (
@@ -40,6 +47,7 @@ class FakeTmux:
         self.create_calls: list[dict[str, object]] = []
         self.killed = False
         self.target_missing = False
+        self.selected: tuple[TmuxLocator, str] | None = None
 
     def observation(self) -> TmuxSurfaceObservation:
         if self.target_missing:
@@ -94,6 +102,13 @@ class FakeTmux:
         assert locator == self.locator
         assert deadline > 0
         return self.attached
+
+    def select_surface(self, locator: TmuxLocator, *, client: str) -> None:
+        self.selected = (locator, client)
+
+    @staticmethod
+    def attach_argv(locator: TmuxLocator) -> list[str]:
+        return ["tmux", "-S", locator.socket, "-u", "attach-session"]
 
 
 @pytest.fixture
@@ -378,3 +393,48 @@ def test_bootstrap_final_reconciliation_refuses_a_duplicate_runtime(
     failed = registry.get_launch(launch_id)
     assert failed["state"] == "failed"
     assert failed["failure_code"] == "duplicate_runtime_detected"
+
+
+def test_surface_actions_revalidate_stored_identity_and_pending_lease(
+    registry: Registry, tmp_path: Path
+) -> None:
+    tmux = FakeTmux()
+    add_session(registry, tmp_path)
+    now = time.time_ns() // 1_000_000
+    launch = coordinator(registry, tmux, clock=now)
+    plan = launch.prepare_open(
+        SESSION_KEY, request_id=REQUEST_ID, context=ATTACH_CONTEXT
+    )
+    assert plan.surface_id is not None
+
+    locator = actionable_surface_locator(
+        registry,
+        host_id=HOST_ID,
+        surface_id=str(plan.surface_id),
+        tmux=tmux,  # type: ignore[arg-type]
+        observed_at=now + 100,
+    )
+    assert locator == LOCATOR
+    assert attach_surface_argv(
+        registry,
+        host_id=HOST_ID,
+        surface_id=str(plan.surface_id),
+        tmux=tmux,  # type: ignore[arg-type]
+    ) == ["tmux", "-S", SOCKET, "-u", "attach-session"]
+    select_surface(
+        registry,
+        host_id=HOST_ID,
+        surface_id=str(plan.surface_id),
+        client="/dev/pts/8",
+        tmux=tmux,  # type: ignore[arg-type]
+    )
+    assert tmux.selected == (LOCATOR, "/dev/pts/8")
+
+    with pytest.raises(PresentationError, match="lease has expired"):
+        actionable_surface_locator(
+            registry,
+            host_id=HOST_ID,
+            surface_id=str(plan.surface_id),
+            tmux=tmux,  # type: ignore[arg-type]
+            observed_at=now + 2_000,
+        )
