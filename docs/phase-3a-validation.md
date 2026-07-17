@@ -16,6 +16,8 @@ The core now owns:
   a waiting bootstrap that starts only after attachment;
 - a final full reconciliation and duplicate-runtime check immediately before
   `exec codex resume <uuid>`;
+- atomic missed-hook recovery when one live process, its durable Codex session
+  ID, and the complete launch-owned tmux locator all agree;
 - versioned `focus`, `switch`, `attach`, and `blocked` presentation plans;
 - revalidated `select-surface` and `attach-surface` actions that never accept a
   raw frontend tmux target.
@@ -60,31 +62,33 @@ to either action command.
 | Gate | Environment | Recorded result |
 | --- | --- | --- |
 | Core tmux and presentation tests | Isolated registries and fake exact tmux/process boundaries | Live adoption, unmanaged-live blocking, waiting bootstrap, lease conflict/idempotency, rollback, stale locator/client rejection, final duplicate check, and exact attach/select argv passed |
-| Full core source suite and static checks | Current development environment | 429 tests passed; compileall, Ruff format, Ruff lint, and diff checks passed |
+| Full core source suite and static checks | Current development environment | 431 tests passed; compileall, Ruff format, Ruff lint, and diff checks passed |
 | DMS action implementation | Separate local `agent-switchboard-dms` checkout | 109 Python tests and 18 JavaScript behavior groups passed; QML formatting, Ruff, Pyright package checks, and diff checks passed |
 | Live current-session adoption | Codex 0.144.4, niri, Ghostty, and existing attached tmux pane | The live pane gained one confirmed surface binding, the existing Ghostty window was focused through the title/host fallback, niri stayed at seven windows, and the tmux server PID was unchanged |
 | DMS reload | Existing user DMS service and development-plugin symlink | Plugin reload and `sb:` query succeeded; DMS service PID and tmux server PID were unchanged; the separate legacy `agentSessions` plugin path was untouched |
 | Codex hook installation | User Codex home | Five definitions installed with the supported ownership-safe merger; config remained unchanged and tmux remained running |
+| Codex hook trust and doctor | Codex 0.144.4 with the five installed handlers trusted interactively | Doctor reported healthy; the isolated handler probe measured a 90.8 ms cold start and 80.3 ms warm p95 |
+| Parked-session resume | One retained resumable Codex session opened through DMS into a new managed Ghostty/tmux surface | Exactly one `codex resume <uuid>` process, one managed Ghostty window, and one attached tmux client were observed; the original tmux server PID was unchanged |
+| Missed-`SessionStart` recovery | The live parked-session resume did not emit a retained `SessionStart` event | Bounded reconciliation correlated the exact durable session ID, process birth, and full launch-owned tmux locator, then atomically marked the launch `bound` and established the symmetric confirmed surface binding |
+| Reopen idempotency | The same live session was opened through DMS a second time | DMS returned `focused` for the existing surface; the managed window and Codex process counts both remained one |
 
-## Remaining live gate
+## Live acceptance result
 
-Codex requires hook definitions to be reviewed and trusted interactively. The
-installation completed, but `swbctl doctor` currently reports exactly five
-`hook_untrusted` errors: `SessionStart`, `UserPromptSubmit`,
-`PermissionRequest`, `PostToolUse`, and `Stop`. The isolated probe measured an
-86.7 ms cold start and 77.1 ms warm p95. Switchboard intentionally cannot edit
-trust state.
+The five Agent Switchboard handlers were reviewed and trusted through Codex's
+interactive `/hooks` flow. `swbctl doctor` is healthy, and ordinary lifecycle
+events are reaching the registry.
 
-Run `/hooks` in Codex, review and trust those five Agent Switchboard handlers,
-then rerun:
+The parked-session acceptance also exercised the documented missed-hook path:
+this Codex resume did not produce a retained `SessionStart` event. Switchboard
+did not assume the launch succeeded. Live reconciliation required one exact
+durable provider session ID, a confirmed process birth, and a complete match to
+the launch-owned tmux socket/session/window/pane locator before consuming the
+pending intent. A mismatched locator is rejected atomically. The second open
+then focused the bound surface without creating a duplicate runtime.
 
-```sh
-swbctl doctor
-```
-
-A healthy doctor result is required before claiming live hook coverage and the
-parked-session end-to-end acceptance. The implementation and deterministic
-tests are complete; this user-owned trust decision remains open.
+This completes the Phase 3A trusted parked-session acceptance. It does not
+claim that every Codex resume will emit `SessionStart`; correctness no longer
+depends on that single event when exact live evidence is available.
 
 ## Remaining implementation scope
 

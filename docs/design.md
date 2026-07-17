@@ -1822,8 +1822,8 @@ Phase 3A is implemented for existing local Codex sessions. It includes launch
 leases, waiting bootstrap, stable tmux surfaces and metadata, `prepare-open`,
 `select-surface`, `attach-surface`, live-pane adoption, and the final pre-exec
 duplicate check. The separate DMS plugin consumes the validated presentation
-plan and owns niri/Ghostty execution. Exact evidence and the remaining live
-trust gate are recorded in
+plan and owns niri/Ghostty execution. Exact evidence and the live acceptance
+result are recorded in
 [`docs/phase-3a-validation.md`](phase-3a-validation.md).
 
 Remaining Phase 3 work:
@@ -1833,8 +1833,6 @@ Remaining Phase 3 work:
 - Implement the one-workspace Claude tmux policy and manager/session windows.
 - Extend DMS action parity to those new and Claude workspace operations. Its
   existing remote helper remains the fallback until Phase 5.
-- Complete live parked-session acceptance after Codex hook trust is explicitly
-  approved through `/hooks`.
 
 ### Phase 4: Curation, context, and TUI
 

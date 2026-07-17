@@ -33,6 +33,8 @@ Phase 2, and Phase 3A existing-session presentation:
 - atomic existing-Codex preparation with live-pane adoption, resumable-session
   leases, waiting bootstrap, idempotent retries, and a final duplicate-runtime
   check before `codex resume`
+- exact process/session/tmux correlation that can atomically finish a pending
+  resume when Codex omits the expected start hook
 - versioned focus, switch, attach, and blocked presentation plans consumed by
   the separate DMS integration
 - unit, migration, concurrency, provider, protocol, and packaging tests
