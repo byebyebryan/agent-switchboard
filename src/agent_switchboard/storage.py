@@ -3574,7 +3574,7 @@ class Registry:
                 tmux_window, tmux_pane, observed_at, received_at,
                 payload_hash, entry_ns, process_birth_id, tmux_socket
             ) VALUES (
-                ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                 ?, ?, ?, ?, ?, ?
             )
             """,
@@ -3584,6 +3584,7 @@ class Registry:
                 values["host_id"],
                 values["provider"],
                 values["session_key"],
+                values["launch_id"],
                 values["source"],
                 values["source_priority"],
                 values["runtime_presence"],
@@ -3681,6 +3682,104 @@ class Registry:
                 int(session["last_observed_at"]), int(values["observed_at"])
             )
         return updates, runtime_allowed, attachment_allowed
+
+    @classmethod
+    def _apply_runtime_launch_binding(
+        cls,
+        connection: sqlite3.Connection,
+        session: Mapping[str, Any],
+        values: Mapping[str, Any],
+    ) -> None:
+        """Consume exact live tmux evidence for a missed resume hook."""
+
+        launch_id = values["launch_id"]
+        if launch_id is None:
+            return
+        if (
+            values["runtime_presence"] != RuntimePresence.LIVE.value
+            or not values["tmux_observed"]
+            or values["pid"] is None
+            or values["process_birth_id"] is None
+            or any(
+                values[field] is None
+                for field in (
+                    "tmux_socket",
+                    "tmux_session",
+                    "tmux_window",
+                    "tmux_pane",
+                )
+            )
+        ):
+            raise StorageError(
+                "runtime launch binding requires complete live tmux evidence"
+            )
+        launch = connection.execute(
+            "SELECT * FROM launch_intents WHERE launch_id = ?", (launch_id,)
+        ).fetchone()
+        if launch is None:
+            raise StorageError(f"unknown launch: {launch_id}")
+        surface = connection.execute(
+            "SELECT * FROM surfaces WHERE surface_id = ?", (launch["surface_id"],)
+        ).fetchone()
+        if surface is None:
+            raise StorageError("runtime launch binding has no surface")
+        if (
+            launch["host_id"] != values["host_id"]
+            or launch["provider"] != values["provider"]
+            or launch["action"] not in {"resume", "attach"}
+            or launch["target_session_key"] != session["session_key"]
+            or surface["host_id"] != values["host_id"]
+            or surface["provider"] != values["provider"]
+            or surface["transport"] != "tmux"
+            or surface["role"] != "session"
+            or surface["launch_id"] != launch_id
+            or surface["retired_at"] is not None
+        ):
+            raise IdentityConflict(
+                "runtime evidence does not match launch and surface identity"
+            )
+        try:
+            locator = json.loads(surface["transport_locator"])
+        except (json.JSONDecodeError, RecursionError, TypeError) as error:
+            raise StorageError("runtime launch surface locator is invalid") from error
+        expected_locator = {
+            "socket": values["tmux_socket"],
+            "session": values["tmux_session"],
+            "window": values["tmux_window"],
+            "pane": values["tmux_pane"],
+        }
+        if locator != expected_locator:
+            raise IdentityConflict(
+                "runtime evidence does not match launch surface locator"
+            )
+        if launch["state"] == "bound":
+            if (
+                surface["current_session_key"] != session["session_key"]
+                or surface["binding_confidence"] != "confirmed"
+                or session["surface_id"] != surface["surface_id"]
+            ):
+                raise IdentityConflict("bound runtime launch changed identity")
+            return
+        if launch["state"] != "provider_started":
+            raise StorageError("runtime launch is not ready for provider binding")
+        if int(values["observed_at"]) < int(launch["updated_at"]):
+            raise StorageError("stale runtime launch observation")
+        cls._bind_surface_row(
+            connection,
+            surface,
+            session,
+            confidence="confirmed",
+            observed_at=int(values["observed_at"]),
+        )
+        connection.execute(
+            """
+            UPDATE launch_intents
+            SET state = 'bound', lease_owner = NULL, updated_at = ?,
+                failure_code = NULL, failure_detail = NULL
+            WHERE launch_id = ?
+            """,
+            (values["observed_at"], launch_id),
+        )
 
     @staticmethod
     def _apply_runtime_surface(
@@ -3827,6 +3926,15 @@ class Registry:
                     applied_count += 1
                 else:
                     stale_count += 1
+                session = connection.execute(
+                    "SELECT * FROM sessions WHERE session_key = ?", (session_key,)
+                ).fetchone()
+                assert session is not None
+                self._apply_runtime_launch_binding(connection, session, values)
+                session = connection.execute(
+                    "SELECT * FROM sessions WHERE session_key = ?", (session_key,)
+                ).fetchone()
+                assert session is not None
                 self._apply_runtime_surface(
                     connection,
                     session,

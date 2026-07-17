@@ -28,6 +28,7 @@ from .domain import (
 )
 from .protocol import ErrorRecord, ErrorScope
 from .storage import Registry, RuntimeObservationApplyResult, StorageError
+from .tmux import TmuxError, TmuxLocator
 
 LIVE_SOURCE_PRIORITY: Final = 200
 MAX_PROC_PIDS: Final = 32_768
@@ -470,7 +471,7 @@ def scan_tmux_panes(
         )
     fields = (
         "#{socket_path}\t#{pane_id}\t#{pane_pid}\t#{session_name}\t"
-        "#{window_index}\t#{pane_index}\t#{session_attached}"
+        "#{window_id}\t#{pane_index}\t#{session_attached}"
     )
     for socket in selected:
         if socket is not None:
@@ -566,6 +567,8 @@ def scan_tmux_panes(
                     or (socket is not None and socket_path != socket)
                     or not pane_id.startswith("%")
                     or not pane_id[1:].isdecimal()
+                    or not window.startswith("@")
+                    or not window[1:].isdecimal()
                     or not pane_pid.isdecimal()
                     or int(pane_pid) <= 0
                     or not attached.isdecimal()
@@ -611,6 +614,49 @@ def _pane_for_process(
     if not candidates:
         return None
     return min(candidates, key=lambda pane: (distances[pane.pane_pid], pane.socket))
+
+
+def _pending_launch_for_pane(
+    registry: Registry,
+    session_key: SessionKey,
+    pane: TmuxPaneEvidence | None,
+) -> str | None:
+    """Correlate a started resume with its launch-owned tmux surface."""
+
+    if pane is None:
+        return None
+    for launch in registry.list_launches(target_session_key=str(session_key)):
+        if launch["state"] != "provider_started" or launch["action"] not in {
+            "resume",
+            "attach",
+        }:
+            continue
+        surface_id = launch["surface_id"]
+        if not isinstance(surface_id, str):
+            continue
+        surface = registry.get_surface(surface_id)
+        if (
+            surface is None
+            or surface["host_id"] != str(session_key.host_id)
+            or surface["provider"] != session_key.provider.value
+            or surface["transport"] != "tmux"
+            or surface["role"] != "session"
+            or surface["launch_id"] != launch["launch_id"]
+            or surface["retired_at"] is not None
+        ):
+            continue
+        try:
+            locator = TmuxLocator.from_storage(surface["transport_locator"])
+        except TmuxError:
+            continue
+        if (
+            locator.socket == pane.socket
+            and locator.session == pane.session
+            and locator.window == pane.window
+            and locator.pane == pane.pane_id
+        ):
+            return str(launch["launch_id"])
+    return None
 
 
 def _error_record(
@@ -785,6 +831,7 @@ def reconcile_live(
 
         claimed_pids.add(process.pid)
         pane = _pane_for_process(process, tmux_scan.panes, process_scan.parents)
+        launch_id = _pending_launch_for_pane(registry, key, pane)
         tmux_observed = pane is not None or tmux_scan.complete
         attachment = None
         if pane is not None:
@@ -793,6 +840,7 @@ def reconcile_live(
             attachment = Attachment.NONE
         values = {
             "session": str(key),
+            "launch": launch_id,
             "pid": process.pid,
             "birth": process.birth_id,
             "socket": None if pane is None else pane.socket,
@@ -818,6 +866,7 @@ def reconcile_live(
                 tmux_session=None if pane is None else pane.session,
                 tmux_window=None if pane is None else pane.window,
                 tmux_pane=None if pane is None else pane.pane_id,
+                launch_id=launch_id,
             )
         )
 

@@ -27,7 +27,8 @@ from agent_switchboard.live import (
     scan_codex_processes,
     scan_tmux_panes,
 )
-from agent_switchboard.storage import Registry, StorageError
+from agent_switchboard.storage import IdentityConflict, Registry, StorageError
+from agent_switchboard.tmux import TmuxLocator
 
 HOST_ID = "11111111-1111-4111-8111-111111111111"
 SESSION_ID = "22222222-2222-4222-8222-222222222222"
@@ -35,6 +36,9 @@ SECOND_SESSION_ID = "33333333-3333-4333-8333-333333333333"
 V7_SESSION_ID = "019a1234-5678-7abc-8def-0123456789ab"
 SESSION_KEY = f"{HOST_ID}:codex:{SESSION_ID}"
 BOOT_ID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+LAUNCH_ID = "44444444-4444-4444-8444-444444444444"
+SURFACE_ID = "55555555-5555-4555-8555-555555555555"
+REQUEST_ID = "66666666-6666-4666-8666-666666666666"
 
 
 def _proc_entry(
@@ -120,6 +124,7 @@ def _observation(
     tmux_observed: bool = False,
     pane: str | None = None,
     source: str = "test",
+    launch_id: str | None = None,
 ) -> NormalizedRuntimeObservation:
     parsed = SessionKey.parse(session_key)
     return NormalizedRuntimeObservation(
@@ -142,6 +147,50 @@ def _observation(
         tmux_session="work" if pane is not None else None,
         tmux_window="0" if pane is not None else None,
         tmux_pane=pane,
+        launch_id=launch_id,
+    )
+
+
+def _prepare_pending_resume(registry: Registry, locator: TmuxLocator) -> None:
+    registry.reserve_launch(
+        {
+            "host_id": HOST_ID,
+            "provider": "codex",
+            "action": "resume",
+            "project_id": None,
+            "location_id": None,
+            "cwd": None,
+            "source_handoff_id": None,
+            "target_session_key": SESSION_KEY,
+            "transport": "tmux",
+        },
+        request_id=REQUEST_ID,
+        launch_id=LAUNCH_ID,
+        lease_owner="bootstrap",
+        capability_hash="a" * 64,
+        expires_at=150,
+        created_at=100,
+    )
+    registry.activate_launch_surface(
+        LAUNCH_ID,
+        {
+            "surface_id": SURFACE_ID,
+            "host_id": HOST_ID,
+            "provider": "codex",
+            "transport": "tmux",
+            "transport_locator": locator.to_storage(),
+            "role": "session",
+            "created_at": 110,
+            "last_observed_at": 110,
+        },
+        lease_owner="bootstrap",
+        observed_at=110,
+    )
+    registry.transition_launch(
+        LAUNCH_ID,
+        "provider_started",
+        lease_owner="bootstrap",
+        observed_at=120,
     )
 
 
@@ -293,7 +342,7 @@ def test_fd_fallback_accepts_uuidv7_only_in_canonical_rollout_targets(
 
 
 def test_tmux_scan_uses_argv_and_rejects_malformed_output() -> None:
-    output = b"/tmp/fake\t%7\t50\twork\t1\t2\t1\n"
+    output = b"/tmp/fake\t%7\t50\twork\t@1\t2\t1\n"
     scan = scan_tmux_panes((None,), runner=_tmux_runner(output))
     assert scan.complete is True
     assert scan.panes[0].pane_id == "%7"
@@ -401,7 +450,7 @@ def test_reconcile_confirms_birth_maps_exact_pane_then_parks_dead_runtime(
             ),
         )
     )
-    pane = b"/tmp/fake\t%7\t50\twork\t1\t2\t1\n"
+    pane = b"/tmp/fake\t%7\t50\twork\t@1\t2\t1\n"
 
     live = reconcile_live(
         registry,
@@ -421,7 +470,7 @@ def test_reconcile_confirms_birth_maps_exact_pane_then_parks_dead_runtime(
     assert retained["runtime_process_birth_id"] == process.birth_id
     assert retained["tmux_socket"] == "/tmp/fake"
     assert retained["tmux_session"] == "work"
-    assert retained["tmux_window"] == "1"
+    assert retained["tmux_window"] == "@1"
     assert retained["tmux_pane"] == "%7"
     assert retained["attachment"] == "attached"
     assert retained["activity"] == "ready"
@@ -449,6 +498,84 @@ def test_reconcile_confirms_birth_maps_exact_pane_then_parks_dead_runtime(
     assert parked["runtime_process_birth_id"] is None
     assert parked["tmux_socket"] is None
     assert parked["tmux_pane"] is None
+
+
+def test_reconcile_binds_pending_resume_after_missed_hook(
+    registry: Registry, tmp_path: Path
+) -> None:
+    locator = TmuxLocator("/tmp/fake", "work", "@1", "%7")
+    _prepare_pending_resume(registry, locator)
+    root = _proc_root(tmp_path)
+    _proc_entry(root, 50, ppid=1, argv=("/bin/sh",), start=500)
+    _proc_entry(
+        root,
+        100,
+        ppid=50,
+        argv=("/usr/bin/codex", "resume", SESSION_ID),
+        start=1_000,
+        session_ids=(SESSION_ID,),
+    )
+
+    result = reconcile_live(
+        registry,
+        HOST_ID,
+        proc_root=root,
+        uid=os.getuid(),
+        environment={},
+        tmux_runner=_tmux_runner(b"/tmp/fake\t%7\t50\twork\t@1\t2\t1\n"),
+        entry_ns=200_000_000,
+    )
+
+    assert result.errors == ()
+    launch = registry.get_launch(LAUNCH_ID)
+    assert launch is not None
+    assert launch["state"] == "bound"
+    assert launch["lease_owner"] is None
+    session = registry.get_session(SESSION_KEY)
+    assert session is not None
+    assert session["surface_id"] == SURFACE_ID
+    assert session["runtime_presence"] == "live"
+    assert session["attachment"] == "attached"
+    surface = registry.get_surface(SURFACE_ID)
+    assert surface is not None
+    assert surface["current_session_key"] == SESSION_KEY
+    assert surface["binding_confidence"] == "confirmed"
+    assert surface["client_attached"] == 1
+    observation = registry.connection.execute(
+        "SELECT * FROM runtime_observations WHERE launch_id = ?", (LAUNCH_ID,)
+    ).fetchone()
+    assert observation is not None
+    assert observation["session_key"] == SESSION_KEY
+
+
+def test_runtime_launch_binding_rejects_a_different_tmux_locator(
+    registry: Registry,
+) -> None:
+    _prepare_pending_resume(registry, TmuxLocator("/tmp/fake", "work", "@1", "%7"))
+    observation = _observation(
+        key="wrong-launch-pane",
+        entry_ns=200_000_000,
+        presence=RuntimePresence.LIVE,
+        pid=100,
+        birth="b" * 64,
+        attachment=Attachment.ATTACHED,
+        tmux_observed=True,
+        pane="%8",
+        source="liveness",
+        launch_id=LAUNCH_ID,
+    )
+
+    with pytest.raises(IdentityConflict, match="launch surface locator"):
+        registry.apply_runtime_observations((observation,))
+
+    assert registry.get_launch(LAUNCH_ID)["state"] == "provider_started"  # type: ignore[index]
+    assert registry.get_surface(SURFACE_ID)["current_session_key"] is None  # type: ignore[index]
+    assert (
+        registry.connection.execute(
+            "SELECT COUNT(*) FROM runtime_observations"
+        ).fetchone()[0]
+        == 0
+    )
 
 
 def test_newer_hook_resurrects_after_higher_priority_liveness_stop(

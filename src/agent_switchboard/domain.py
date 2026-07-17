@@ -457,6 +457,7 @@ class NormalizedRuntimeObservation:
     tmux_session: str | None = None
     tmux_window: str | None = None
     tmux_pane: str | None = None
+    launch_id: LaunchId | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.host_id, HostId):
@@ -549,6 +550,8 @@ class NormalizedRuntimeObservation:
             raise ValidationError("tmux evidence requires tmux_observed")
         if self.activity is None and self.activity_reason is not None:
             raise ValidationError("activity_reason requires activity evidence")
+        if self.launch_id is not None and not isinstance(self.launch_id, LaunchId):
+            object.__setattr__(self, "launch_id", LaunchId(self.launch_id))
 
     def storage_mapping(self) -> dict[str, Any]:
         """Return the private normalized mapping accepted by the registry."""
@@ -582,6 +585,7 @@ class NormalizedRuntimeObservation:
             "tmux_session": self.tmux_session,
             "tmux_window": self.tmux_window,
             "tmux_pane": self.tmux_pane,
+            "launch_id": None if self.launch_id is None else str(self.launch_id),
         }
 
 
