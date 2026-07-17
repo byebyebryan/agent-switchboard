@@ -39,9 +39,10 @@ Phase 2, and Phase 3A existing-session presentation:
   the separate DMS integration
 - unit, migration, concurrency, provider, protocol, and packaging tests
 
-Phase 2 remains partial because Claude discovery, hooks, and liveness are not
-implemented. Phase 3 also remains partial: new-session/project preparation,
-Claude workspaces, remote SSH transport, and the TUI remain later work. See
+The next roadmap batch is Phase 2B: Claude discovery, hooks, supervisor/process
+liveness, and normalized runtime truth. Phase 3B then adds project-aware new
+local Codex sessions, followed by Phase 3C Claude workspace/surface parity.
+The searchable TUI remains Phase 4 and remote SSH transport remains Phase 5. See
 [the design](docs/design.md), the
 [Phase 1 validation record](docs/phase-1-validation.md), and the
 [Phase 2 validation record](docs/phase-2-validation.md), and the

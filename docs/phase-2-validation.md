@@ -173,9 +173,11 @@ would make the source archive digest self-referential and stale on every edit.
 
 - Claude supervisor discovery with capability-gated fallback, hook ingestion,
   process/supervisor liveness, and normalized runtime transitions.
-- Launch preparation, leases, tmux surface actions, and project-aware new or
-  resume flows.
-- DMS local migration and niri/Ghostty presentation parity.
+- Project-aware new-session preparation after the Claude provider foundation.
 - Pull-based remote snapshots, caching, and remote actions.
 - Searchable TUI, curation/handoffs, context retrieval, and session-scoped
   agent tools.
+
+Existing local Codex resume preparation, tmux surface actions, and DMS
+niri/Ghostty parity were completed later in Phase 3A; see
+[`docs/phase-3a-validation.md`](phase-3a-validation.md).

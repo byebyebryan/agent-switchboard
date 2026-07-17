@@ -92,8 +92,9 @@ depends on that single event when exact live evidence is available.
 
 ## Remaining implementation scope
 
-- Project-aware `prepare-new` and new local Codex session creation.
-- Claude discovery/liveness from Phase 2 and Claude manager/session surface
-  policy from Phase 3.
+- Phase 2B Claude discovery, hooks, supervisor/process liveness, and normalized
+  runtime truth.
+- Phase 3B project-aware `prepare-new` and new local Codex session creation.
+- Phase 3C Claude manager/session workspace and surface policy.
 - Remote snapshot and action transport.
 - Searchable TUI, curation, handoffs, and current-session agent tools.

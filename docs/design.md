@@ -1813,8 +1813,20 @@ this does not claim serialization against arbitrary noncooperating writers. The
 evidence and exact remaining boundary are recorded in
 [`docs/phase-2-validation.md`](phase-2-validation.md).
 
-Claude discovery, hooks, supervisor/process liveness, and normalized live-state
-transitions remain unimplemented parts of Phase 2.
+For execution tracking, the completed local Codex slice is **Phase 2A**.
+**Phase 2B is the next implementation batch** and closes the provider
+foundation before Switchboard adds more presentation types:
+
+- refresh the retained Claude contract fixtures against the current supported
+  CLI on `snap.lan`;
+- implement capability-gated supervisor discovery and provider normalization;
+- add identifiable Claude hook management and atomic lifecycle ingestion;
+- reconcile supervisor rows, native processes, manager state, and retained
+  resumability without treating a manager as a bound session surface; and
+- validate degraded Agent View behavior plus canonical Snapshot v1 output.
+
+Phase 2B ends at trustworthy Claude runtime truth. It does not add Claude DMS
+actions, workspaces, or tmux presentation policy.
 
 ### Phase 3: Atomic launch, tmux, and DMS parity
 
@@ -1826,13 +1838,27 @@ plan and owns niri/Ghostty execution. Exact evidence and the live acceptance
 result are recorded in
 [`docs/phase-3a-validation.md`](phase-3a-validation.md).
 
-Remaining Phase 3 work:
+The remaining Phase 3 work is split by dependency:
 
-- Implement `prepare-new`, `prepare-workspace`, and project-aware new-session
-  flows.
-- Implement the one-workspace Claude tmux policy and manager/session windows.
-- Extend DMS action parity to those new and Claude workspace operations. Its
-  existing remote helper remains the fallback until Phase 5.
+#### Phase 3B: project-aware new local Codex sessions
+
+- Implement provider-neutral `prepare-new` contracts and project/location/cwd
+  selection.
+- Prove the first new-session path with local Codex, including leased waiting
+  surfaces, hook or exact-live identity binding, rollback, and idempotency.
+- Extend DMS action parity to the validated new-Codex presentation plans.
+
+#### Phase 3C: Claude workspace and surface parity
+
+- Implement `prepare-workspace` and the one-workspace-per-host Claude tmux
+  policy.
+- Model manager and exact-attach session windows without presenting manager
+  state as evidence of a session binding.
+- Extend DMS parity to Claude workspace and session actions only after Phase
+  2B capabilities and runtime identity are available.
+
+The existing DMS helper remains the Claude and remote fallback until these
+paths and, later, Phase 5 pass equivalent live tests.
 
 ### Phase 4: Curation, context, and TUI
 
