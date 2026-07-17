@@ -69,6 +69,21 @@ def _codex_executable(config: SwitchboardConfig) -> str | None:
     return None
 
 
+def materialize_configured_projects(
+    registry: Registry,
+    host_id: str,
+    config: SwitchboardConfig,
+) -> None:
+    """Persist the validated host-local project catalog for launch resolution."""
+
+    registry.upsert_host(
+        host_id,
+        config.host.display_name,
+        is_local=True,
+    )
+    registry.materialize_projects(host_id, _project_catalog(config))
+
+
 def build_local_snapshot_json(
     *, reconcile: Literal["none", "live", "full"] = "none"
 ) -> str:
@@ -94,12 +109,7 @@ def build_local_snapshot_json(
             config = load_config(host_id=host_id)
         if needs_bootstrap or reconcile == "full":
             assert config is not None
-            registry.upsert_host(
-                str(host_id),
-                config.host.display_name,
-                is_local=True,
-            )
-            registry.materialize_projects(str(host_id), _project_catalog(config))
+            materialize_configured_projects(registry, str(host_id), config)
 
         capabilities = ()
         errors: tuple = ()
@@ -128,4 +138,4 @@ def build_local_snapshot_json(
         )
 
 
-__all__ = ["build_local_snapshot_json"]
+__all__ = ["build_local_snapshot_json", "materialize_configured_projects"]

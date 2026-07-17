@@ -39,6 +39,8 @@ BOOT_ID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
 LAUNCH_ID = "44444444-4444-4444-8444-444444444444"
 SURFACE_ID = "55555555-5555-4555-8555-555555555555"
 REQUEST_ID = "66666666-6666-4666-8666-666666666666"
+PROJECT_ID = "77777777-7777-4777-8777-777777777777"
+LOCATION_ID = "88888888-8888-4888-8888-888888888888"
 
 
 def _proc_entry(
@@ -169,6 +171,68 @@ def _prepare_pending_resume(registry: Registry, locator: TmuxLocator) -> None:
         lease_owner="bootstrap",
         capability_hash="a" * 64,
         expires_at=150,
+        created_at=100,
+    )
+    registry.activate_launch_surface(
+        LAUNCH_ID,
+        {
+            "surface_id": SURFACE_ID,
+            "host_id": HOST_ID,
+            "provider": "codex",
+            "transport": "tmux",
+            "transport_locator": locator.to_storage(),
+            "role": "session",
+            "created_at": 110,
+            "last_observed_at": 110,
+        },
+        lease_owner="bootstrap",
+        observed_at=110,
+    )
+    registry.transition_launch(
+        LAUNCH_ID,
+        "provider_started",
+        lease_owner="bootstrap",
+        observed_at=120,
+    )
+
+
+def _prepare_pending_new(registry: Registry, locator: TmuxLocator) -> None:
+    registry.materialize_projects(
+        HOST_ID,
+        [
+            {
+                "project_id": PROJECT_ID,
+                "name": "project",
+                "default_provider": "codex",
+                "default_transport": "tmux",
+                "locations": [
+                    {
+                        "location_id": LOCATION_ID,
+                        "path": "/work/project",
+                        "is_default": True,
+                    }
+                ],
+            }
+        ],
+        observed_at=2,
+    )
+    registry.reserve_launch(
+        {
+            "host_id": HOST_ID,
+            "provider": "codex",
+            "action": "new",
+            "project_id": PROJECT_ID,
+            "location_id": LOCATION_ID,
+            "cwd": "/work/project",
+            "source_handoff_id": None,
+            "target_session_key": None,
+            "transport": "tmux",
+        },
+        request_id=REQUEST_ID,
+        launch_id=LAUNCH_ID,
+        lease_owner="bootstrap",
+        capability_hash="b" * 64,
+        expires_at=250,
         created_at=100,
     )
     registry.activate_launch_surface(
@@ -546,6 +610,50 @@ def test_reconcile_binds_pending_resume_after_missed_hook(
     ).fetchone()
     assert observation is not None
     assert observation["session_key"] == SESSION_KEY
+
+
+def test_reconcile_binds_pending_new_launch_after_missed_hook(
+    registry: Registry, tmp_path: Path
+) -> None:
+    locator = TmuxLocator("/tmp/fake", "work", "@1", "%7")
+    _prepare_pending_new(registry, locator)
+    root = _proc_root(tmp_path)
+    _proc_entry(root, 50, ppid=1, argv=("/bin/sh",), start=500)
+    _proc_entry(
+        root,
+        100,
+        ppid=50,
+        argv=("/usr/bin/codex",),
+        start=1_000,
+        session_ids=(SESSION_ID,),
+    )
+
+    result = reconcile_live(
+        registry,
+        HOST_ID,
+        proc_root=root,
+        uid=os.getuid(),
+        environment={},
+        tmux_runner=_tmux_runner(b"/tmp/fake\t%7\t50\twork\t@1\t2\t1\n"),
+        entry_ns=200_000_000,
+    )
+
+    assert result.errors == ()
+    launch = registry.get_launch(LAUNCH_ID)
+    assert launch is not None
+    assert launch["state"] == "bound"
+    assert launch["target_session_key"] == SESSION_KEY
+    session = registry.get_session(SESSION_KEY)
+    assert session is not None
+    assert session["project_id"] == PROJECT_ID
+    assert session["location_id"] == LOCATION_ID
+    assert session["cwd"] == "/work/project"
+    assert session["metadata_source"] == "launch"
+    assert session["surface_id"] == SURFACE_ID
+    surface = registry.get_surface(SURFACE_ID)
+    assert surface is not None
+    assert surface["current_session_key"] == SESSION_KEY
+    assert surface["binding_confidence"] == "confirmed"
 
 
 def test_runtime_launch_binding_rejects_a_different_tmux_locator(

@@ -3690,7 +3690,7 @@ class Registry:
         session: Mapping[str, Any],
         values: Mapping[str, Any],
     ) -> None:
-        """Consume exact live tmux evidence for a missed resume hook."""
+        """Consume exact live tmux evidence for a missed launch hook."""
 
         launch_id = values["launch_id"]
         if launch_id is None:
@@ -3726,8 +3726,15 @@ class Registry:
         if (
             launch["host_id"] != values["host_id"]
             or launch["provider"] != values["provider"]
-            or launch["action"] not in {"resume", "attach"}
-            or launch["target_session_key"] != session["session_key"]
+            or launch["action"] not in {"new", "resume", "attach"}
+            or (
+                launch["action"] in {"resume", "attach"}
+                and launch["target_session_key"] != session["session_key"]
+            )
+            or (
+                launch["action"] == "new"
+                and launch["target_session_key"] not in {None, session["session_key"]}
+            )
             or surface["host_id"] != values["host_id"]
             or surface["provider"] != values["provider"]
             or surface["transport"] != "tmux"
@@ -3764,6 +3771,28 @@ class Registry:
             raise StorageError("runtime launch is not ready for provider binding")
         if int(values["observed_at"]) < int(launch["updated_at"]):
             raise StorageError("stale runtime launch observation")
+        if launch["action"] == "new":
+            connection.execute(
+                """
+                UPDATE sessions
+                SET project_id = ?, location_id = ?, cwd = ?,
+                    metadata_source = 'launch', continued_from_handoff_id = ?
+                WHERE session_key = ?
+                """,
+                (
+                    launch["project_id"],
+                    launch["location_id"],
+                    launch["cwd"],
+                    launch["source_handoff_id"],
+                    session["session_key"],
+                ),
+            )
+            refreshed = connection.execute(
+                "SELECT * FROM sessions WHERE session_key = ?",
+                (session["session_key"],),
+            ).fetchone()
+            assert refreshed is not None
+            session = refreshed
         cls._bind_surface_row(
             connection,
             surface,
@@ -3774,11 +3803,12 @@ class Registry:
         connection.execute(
             """
             UPDATE launch_intents
-            SET state = 'bound', lease_owner = NULL, updated_at = ?,
+            SET state = 'bound', target_session_key = ?, lease_owner = NULL,
+                updated_at = ?,
                 failure_code = NULL, failure_detail = NULL
             WHERE launch_id = ?
             """,
-            (values["observed_at"], launch_id),
+            (session["session_key"], values["observed_at"], launch_id),
         )
 
     @staticmethod

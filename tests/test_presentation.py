@@ -7,7 +7,15 @@ from uuid import NAMESPACE_URL, uuid5
 
 import pytest
 
-from agent_switchboard.domain import HostId, PresentationContext
+from agent_switchboard.domain import (
+    HostId,
+    LocationId,
+    PresentationContext,
+    Project,
+    ProjectId,
+    ProjectLocation,
+    ProviderId,
+)
 from agent_switchboard.presentation import (
     LaunchCoordinator,
     PresentationError,
@@ -30,6 +38,10 @@ SECOND_SESSION_ID = "33333333-3333-4333-8333-333333333333"
 SESSION_KEY = f"{HOST_ID}:codex:{SESSION_ID}"
 SECOND_SESSION_KEY = f"{HOST_ID}:codex:{SECOND_SESSION_ID}"
 REQUEST_ID = "44444444-4444-4444-8444-444444444444"
+PROJECT_ID = "55555555-5555-4555-8555-555555555555"
+LOCATION_ID = "66666666-6666-4666-8666-666666666666"
+NEW_SESSION_ID = "77777777-7777-4777-8777-777777777777"
+NEW_SESSION_KEY = f"{HOST_ID}:codex:{NEW_SESSION_ID}"
 SOCKET = "/tmp/tmux-1000/default"
 LOCATOR = TmuxLocator(SOCKET, "as-surface", "@4", "%7")
 
@@ -79,7 +91,7 @@ class FakeTmux:
         self.create_calls.append(values)
         self.metadata = TmuxMetadata(
             str(values["surface_id"]),
-            str(values["session_key"]),
+            (str(values["session_key"]) if values["session_key"] is not None else None),
             str(values["provider"]),
             str(values["launch_id"]),
             str(values["role"]),
@@ -168,22 +180,506 @@ def add_session(
 
 
 def coordinator(
-    registry: Registry, tmux: FakeTmux, *, clock: int = 100
+    registry: Registry,
+    tmux: FakeTmux,
+    *,
+    clock: int = 100,
+    codex_executable: str | None = "/opt/codex",
 ) -> LaunchCoordinator:
     return LaunchCoordinator(
         registry,
         host_id=HostId(HOST_ID),
         tmux=tmux,  # type: ignore[arg-type]
         swbctl_executable="/opt/swbctl",
-        codex_executable="/opt/codex",
+        codex_executable=codex_executable,
         launch_timeout_seconds=2,
         clock=lambda: clock,
         sleeper=lambda _seconds: None,
     )
 
 
+def add_project(
+    registry: Registry,
+    path: Path,
+    *,
+    project_id: str = PROJECT_ID,
+    locations: tuple[tuple[str, Path, bool], ...] | None = None,
+    default_provider: str | None = "codex",
+) -> tuple[Project, tuple[ProjectLocation, ...]]:
+    configured_locations = locations or ((LOCATION_ID, path, True),)
+    registry.materialize_projects(
+        HOST_ID,
+        [
+            {
+                "project_id": project_id,
+                "name": "Switchboard",
+                "aliases": (),
+                "default_provider": default_provider,
+                "default_transport": "tmux",
+                "context_sources": (),
+                "locations": [
+                    {
+                        "location_id": location_id,
+                        "path": str(location_path),
+                        "display_name": location_path.name,
+                        "is_default": is_default,
+                    }
+                    for location_id, location_path, is_default in configured_locations
+                ],
+            }
+        ],
+        observed_at=2,
+    )
+    project = Project(
+        ProjectId(project_id),
+        "Switchboard",
+        default_provider=(
+            ProviderId(default_provider) if default_provider is not None else None
+        ),
+    )
+    domain_locations = tuple(
+        ProjectLocation(
+            LocationId(location_id),
+            project.project_id,
+            HostId(HOST_ID),
+            location_path,
+            display_name=location_path.name,
+            is_default=is_default,
+        )
+        for location_id, location_path, is_default in configured_locations
+    )
+    return project, domain_locations
+
+
+def new_coordinator(
+    registry: Registry,
+    tmux: FakeTmux,
+    path: Path,
+    *,
+    projects: tuple[Project, ...] | None = None,
+    locations: tuple[ProjectLocation, ...] | None = None,
+    clock: int = 100,
+    codex_executable: str | None = "/opt/codex",
+) -> LaunchCoordinator:
+    if projects is None or locations is None:
+        project, configured_locations = add_project(registry, path)
+        projects = (project,)
+        locations = configured_locations
+    return LaunchCoordinator(
+        registry,
+        host_id=HostId(HOST_ID),
+        tmux=tmux,  # type: ignore[arg-type]
+        swbctl_executable="/opt/swbctl",
+        codex_executable=codex_executable,
+        projects=projects,
+        locations=locations,
+        launch_timeout_seconds=2,
+        clock=lambda: clock,
+        sleeper=lambda _seconds: None,
+        cwd_reader=lambda: path,
+    )
+
+
 DMS_CONTEXT = PresentationContext(False, None, True, True)
 ATTACH_CONTEXT = PresentationContext(False, None, False, True)
+
+
+def test_new_project_launch_is_unbound_waiting_and_idempotent(
+    registry: Registry, tmp_path: Path
+) -> None:
+    project_path = tmp_path / "project"
+    project_path.mkdir()
+    tmux = FakeTmux()
+    launch = new_coordinator(
+        registry,
+        tmux,
+        project_path,
+        clock=time.time_ns() // 1_000_000,
+    )
+
+    plan = launch.prepare_new(
+        PROJECT_ID,
+        location_id=None,
+        provider=None,
+        request_id=REQUEST_ID,
+        context=ATTACH_CONTEXT,
+    )
+
+    assert plan.kind is PresentationPlanKind.ATTACH
+    assert plan.surface_id is not None
+    launches = registry.list_launches()
+    assert len(launches) == 1
+    stored = launches[0]
+    assert stored["action"] == "new"
+    assert stored["project_id"] == PROJECT_ID
+    assert stored["location_id"] == LOCATION_ID
+    assert stored["cwd"] == str(project_path)
+    assert stored["target_session_key"] is None
+    assert stored["state"] == "waiting_for_client"
+    assert tmux.metadata.session_key is None
+    assert tmux.create_calls[0]["cwd"] == project_path
+    assert tmux.create_calls[0]["command"] == (
+        "/opt/swbctl",
+        "bootstrap",
+        stored["launch_id"],
+    )
+    assert tmux.create_calls[0]["environment"] == {
+        "AGENT_SWITCHBOARD_LAUNCH_ID": stored["launch_id"],
+        "AGENT_SWITCHBOARD_SURFACE_ID": str(plan.surface_id),
+    }
+    assert attach_surface_argv(
+        registry,
+        host_id=HOST_ID,
+        surface_id=str(plan.surface_id),
+        tmux=tmux,  # type: ignore[arg-type]
+    ) == ["tmux", "-S", SOCKET, "-u", "attach-session"]
+
+    retry = launch.prepare_new(
+        PROJECT_ID,
+        location_id=LOCATION_ID,
+        provider="codex",
+        request_id=REQUEST_ID,
+        context=DMS_CONTEXT,
+    )
+    assert retry.surface_id == plan.surface_id
+    assert len(tmux.create_calls) == 1
+
+
+def test_new_project_resolution_blocks_missing_provider_and_ambiguous_location(
+    registry: Registry, tmp_path: Path
+) -> None:
+    first = tmp_path / "first"
+    second = tmp_path / "second"
+    first.mkdir()
+    second.mkdir()
+    second_location_id = stable_uuid("second-location")
+    project, locations = add_project(
+        registry,
+        first,
+        locations=((LOCATION_ID, first, False), (second_location_id, second, False)),
+        default_provider=None,
+    )
+    launch = new_coordinator(
+        registry,
+        FakeTmux(),
+        first,
+        projects=(project,),
+        locations=locations,
+    )
+
+    ambiguous = launch.prepare_new(
+        PROJECT_ID,
+        location_id=None,
+        provider="codex",
+        request_id=REQUEST_ID,
+        context=ATTACH_CONTEXT,
+    )
+    assert ambiguous.error is not None
+    assert ambiguous.error.code == "project_location_ambiguous"
+
+    missing_provider = launch.prepare_new(
+        PROJECT_ID,
+        location_id=LOCATION_ID,
+        provider=None,
+        request_id=stable_uuid("missing-provider"),
+        context=ATTACH_CONTEXT,
+    )
+    assert missing_provider.error is not None
+    assert missing_provider.error.code == "project_provider_missing"
+    assert registry.list_launches() == []
+
+
+def test_new_project_resolution_blocks_unknown_foreign_unavailable_and_claude(
+    registry: Registry, tmp_path: Path
+) -> None:
+    project_path = tmp_path / "project"
+    project_path.mkdir()
+    project, locations = add_project(registry, project_path)
+    foreign_location = ProjectLocation(
+        LocationId(stable_uuid("foreign-location")),
+        ProjectId(stable_uuid("foreign-project")),
+        HostId(HOST_ID),
+        project_path,
+    )
+    launch = new_coordinator(
+        registry,
+        FakeTmux(),
+        project_path,
+        projects=(project,),
+        locations=(*locations, foreign_location),
+    )
+
+    unknown = launch.prepare_new(
+        stable_uuid("unknown-project"),
+        location_id=None,
+        provider=None,
+        request_id=stable_uuid("unknown-project-request"),
+        context=ATTACH_CONTEXT,
+    )
+    assert unknown.error is not None and unknown.error.code == "project_not_found"
+    foreign = launch.prepare_new(
+        PROJECT_ID,
+        location_id=str(foreign_location.location_id),
+        provider=None,
+        request_id=stable_uuid("foreign-location-request"),
+        context=ATTACH_CONTEXT,
+    )
+    assert foreign.error is not None and foreign.error.code == "location_not_found"
+
+    missing_path = tmp_path / "missing"
+    missing_project, missing_locations = add_project(registry, missing_path)
+    unavailable = new_coordinator(
+        registry,
+        FakeTmux(),
+        missing_path,
+        projects=(missing_project,),
+        locations=missing_locations,
+    ).prepare_new(
+        PROJECT_ID,
+        location_id=None,
+        provider=None,
+        request_id=stable_uuid("unavailable-request"),
+        context=ATTACH_CONTEXT,
+    )
+    assert unavailable.error is not None
+    assert unavailable.error.code == "working_directory_unavailable"
+
+    claude_project, claude_locations = add_project(
+        registry,
+        project_path,
+        default_provider="claude",
+    )
+    unsupported = new_coordinator(
+        registry,
+        FakeTmux(),
+        project_path,
+        projects=(claude_project,),
+        locations=claude_locations,
+    ).prepare_new(
+        PROJECT_ID,
+        location_id=None,
+        provider=None,
+        request_id=stable_uuid("claude-request"),
+        context=ATTACH_CONTEXT,
+    )
+    assert unsupported.error is not None
+    assert unsupported.error.code == "provider_new_not_supported"
+    assert registry.list_launches() == []
+
+
+def test_disabled_codex_blocks_new_without_mutating_launch_state(
+    registry: Registry, tmp_path: Path
+) -> None:
+    project_path = tmp_path / "project"
+    project_path.mkdir()
+    launch = new_coordinator(
+        registry,
+        FakeTmux(),
+        project_path,
+        codex_executable=None,
+    )
+
+    blocked = launch.prepare_new(
+        PROJECT_ID,
+        location_id=None,
+        provider=None,
+        request_id=REQUEST_ID,
+        context=ATTACH_CONTEXT,
+    )
+
+    assert blocked.kind is PresentationPlanKind.BLOCKED
+    assert blocked.error is not None
+    assert blocked.error.code == "provider_unavailable"
+    assert registry.list_launches() == []
+
+
+def test_new_request_id_conflicts_when_the_configured_location_changes(
+    registry: Registry, tmp_path: Path
+) -> None:
+    first = tmp_path / "first"
+    second = tmp_path / "second"
+    first.mkdir()
+    second.mkdir()
+    second_location_id = stable_uuid("conflict-location")
+    project, locations = add_project(
+        registry,
+        first,
+        locations=((LOCATION_ID, first, True), (second_location_id, second, False)),
+    )
+    tmux = FakeTmux()
+    launch = new_coordinator(
+        registry,
+        tmux,
+        first,
+        projects=(project,),
+        locations=locations,
+        clock=time.time_ns() // 1_000_000,
+    )
+    launch.prepare_new(
+        PROJECT_ID,
+        location_id=LOCATION_ID,
+        provider=None,
+        request_id=REQUEST_ID,
+        context=ATTACH_CONTEXT,
+    )
+
+    conflict = launch.prepare_new(
+        PROJECT_ID,
+        location_id=second_location_id,
+        provider=None,
+        request_id=REQUEST_ID,
+        context=ATTACH_CONTEXT,
+    )
+
+    assert conflict.kind is PresentationPlanKind.BLOCKED
+    assert conflict.error is not None and conflict.error.code == "request_conflict"
+    assert len(registry.list_launches()) == 1
+    assert len(tmux.create_calls) == 1
+
+
+def test_new_bootstrap_starts_exact_codex_after_attachment(
+    registry: Registry, tmp_path: Path
+) -> None:
+    project_path = tmp_path / "project"
+    project_path.mkdir()
+    tmux = FakeTmux()
+    launch = new_coordinator(registry, tmux, project_path)
+    launch.prepare_new(
+        PROJECT_ID,
+        location_id=None,
+        provider=None,
+        request_id=REQUEST_ID,
+        context=ATTACH_CONTEXT,
+    )
+    launch_id = str(registry.list_launches()[0]["launch_id"])
+    tmux.attached = True
+    captured: list[object] = []
+
+    def capture(executable: str, argv: Sequence[str]) -> None:
+        captured.extend((executable, tuple(argv)))
+        raise ExecCaptured
+
+    with pytest.raises(ExecCaptured):
+        launch.bootstrap(launch_id, exec_provider=capture)  # type: ignore[arg-type]
+
+    assert captured == ["/opt/codex", ("/opt/codex",)]
+    started = registry.get_launch(launch_id)
+    assert started["state"] == "provider_started"
+    assert started["expires_at"] == 300_100
+
+
+def test_new_bootstrap_rejects_disappeared_location(
+    registry: Registry, tmp_path: Path
+) -> None:
+    project_path = tmp_path / "project"
+    project_path.mkdir()
+    tmux = FakeTmux()
+    launch = new_coordinator(registry, tmux, project_path)
+    launch.prepare_new(
+        PROJECT_ID,
+        location_id=None,
+        provider=None,
+        request_id=REQUEST_ID,
+        context=ATTACH_CONTEXT,
+    )
+    launch_id = str(registry.list_launches()[0]["launch_id"])
+    tmux.attached = True
+    project_path.rmdir()
+
+    assert launch.bootstrap(launch_id) == 1
+    failed = registry.get_launch(launch_id)
+    assert failed["state"] == "failed"
+    assert failed["failure_code"] == "launch_target_changed"
+
+
+def test_new_bootstrap_rejects_a_reconfigured_location(
+    registry: Registry, tmp_path: Path
+) -> None:
+    original = tmp_path / "original"
+    changed = tmp_path / "changed"
+    original.mkdir()
+    changed.mkdir()
+    tmux = FakeTmux()
+    launch = new_coordinator(registry, tmux, original)
+    launch.prepare_new(
+        PROJECT_ID,
+        location_id=None,
+        provider=None,
+        request_id=REQUEST_ID,
+        context=ATTACH_CONTEXT,
+    )
+    launch_id = str(registry.list_launches()[0]["launch_id"])
+    tmux.attached = True
+    project = launch.projects[PROJECT_ID]
+    changed_location = ProjectLocation(
+        LocationId(LOCATION_ID),
+        project.project_id,
+        HostId(HOST_ID),
+        changed,
+        display_name="changed",
+        is_default=True,
+    )
+    reconfigured = new_coordinator(
+        registry,
+        tmux,
+        changed,
+        projects=(project,),
+        locations=(changed_location,),
+    )
+
+    assert reconfigured.bootstrap(launch_id) == 1
+    failed = registry.get_launch(launch_id)
+    assert failed["state"] == "failed"
+    assert failed["failure_code"] == "launch_target_changed"
+
+
+def test_bound_new_session_promotes_tmux_metadata_and_reopens(
+    registry: Registry, tmp_path: Path
+) -> None:
+    project_path = tmp_path / "project"
+    project_path.mkdir()
+    tmux = FakeTmux()
+    launch = new_coordinator(registry, tmux, project_path)
+    launch.prepare_new(
+        PROJECT_ID,
+        location_id=None,
+        provider=None,
+        request_id=REQUEST_ID,
+        context=ATTACH_CONTEXT,
+    )
+    launch_id = str(registry.list_launches()[0]["launch_id"])
+    tmux.attached = True
+
+    def capture(_executable: str, _argv: Sequence[str]) -> None:
+        raise ExecCaptured
+
+    with pytest.raises(ExecCaptured):
+        launch.bootstrap(launch_id, exec_provider=capture)  # type: ignore[arg-type]
+    registry.bind_provider_session(
+        launch_id,
+        {
+            "session_key": NEW_SESSION_KEY,
+            "host_id": HOST_ID,
+            "provider": "codex",
+            "provider_session_id": NEW_SESSION_ID,
+            "runtime_presence": "live",
+            "last_observed_at": 150,
+        },
+        lease_owner=f"bootstrap:{launch_id}",
+        observed_at=150,
+    )
+    assert tmux.metadata.session_key is None
+    tmux.client_ids = ("/dev/pts/8",)
+
+    reopened = launch.prepare_open(
+        NEW_SESSION_KEY,
+        request_id=stable_uuid("reopen-new"),
+        context=DMS_CONTEXT,
+    )
+
+    assert reopened.kind is PresentationPlanKind.FOCUS
+    assert tmux.metadata.session_key == NEW_SESSION_KEY
+    assert len(tmux.create_calls) == 1
 
 
 def test_parked_open_creates_one_waiting_surface_and_is_idempotent(
@@ -292,6 +788,25 @@ def test_live_tmux_session_is_adopted_and_focused(
     assert registry.list_launches() == []
 
 
+def test_disabled_codex_can_still_focus_an_existing_live_surface(
+    registry: Registry, tmp_path: Path
+) -> None:
+    tmux = FakeTmux()
+    tmux.attached = True
+    tmux.client_ids = ("/dev/pts/8",)
+    add_session(registry, tmp_path, runtime_presence="live", tmux=tmux)
+
+    plan = coordinator(registry, tmux, codex_executable=None).prepare_open(
+        SESSION_KEY,
+        request_id=REQUEST_ID,
+        context=DMS_CONTEXT,
+    )
+
+    assert plan.kind is PresentationPlanKind.FOCUS
+    assert plan.surface_id is not None
+    assert registry.list_launches() == []
+
+
 def test_existing_surface_switches_only_the_supplied_live_client(
     registry: Registry, tmp_path: Path
 ) -> None:
@@ -365,7 +880,9 @@ def test_bootstrap_starts_exact_resume_only_after_attachment(
         "/opt/codex",
         ("/opt/codex", "resume", SESSION_ID),
     ]
-    assert registry.get_launch(launch_id)["state"] == "provider_started"
+    started = registry.get_launch(launch_id)
+    assert started["state"] == "provider_started"
+    assert started["expires_at"] == 300_100
 
 
 def test_bootstrap_final_reconciliation_refuses_a_duplicate_runtime(

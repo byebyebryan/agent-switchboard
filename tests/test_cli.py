@@ -200,6 +200,62 @@ def test_prepare_open_emits_one_presentation_envelope_and_context_flags(
     assert observed[0].can_launch_terminal
 
 
+def test_prepare_new_emits_one_presentation_envelope_and_context_flags(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    request_id = "44444444-4444-4444-8444-444444444444"
+    observed: list[argparse.Namespace] = []
+    plan = PresentationPlan(
+        PresentationPlanKind.BLOCKED,
+        HostId("11111111-1111-4111-8111-111111111111"),
+        error=ErrorRecord(
+            "project_location_missing",
+            "No local location.",
+            ErrorScope.PROJECT,
+            False,
+            1,
+            host_id=HostId("11111111-1111-4111-8111-111111111111"),
+            provider="codex",
+        ),
+    )
+
+    def prepare(arguments):
+        observed.append(arguments)
+        return PresentationPlanEnvelope(plan).to_json()
+
+    monkeypatch.setattr(cli_module, "_prepare_new", prepare)
+
+    assert (
+        main(
+            [
+                "prepare-new",
+                "--project",
+                PROJECT_ID,
+                "--location",
+                LOCATION_ID,
+                "--provider",
+                "codex",
+                "--request-id",
+                request_id,
+                "--can-focus-desktop",
+                "--can-launch-terminal",
+                "--json",
+            ]
+        )
+        == 0
+    )
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    parsed = PresentationPlanEnvelope.from_json(captured.out).plan
+    assert parsed.kind is PresentationPlanKind.BLOCKED
+    assert observed[0].project == PROJECT_ID
+    assert observed[0].location == LOCATION_ID
+    assert observed[0].provider == "codex"
+    assert observed[0].request_id == request_id
+    assert observed[0].can_focus_desktop
+    assert observed[0].can_launch_terminal
+
+
 def test_surface_action_commands_are_quiet_and_fail_safely(
     capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:

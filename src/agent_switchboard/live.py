@@ -621,15 +621,22 @@ def _pending_launch_for_pane(
     session_key: SessionKey,
     pane: TmuxPaneEvidence | None,
 ) -> str | None:
-    """Correlate a started resume with its launch-owned tmux surface."""
+    """Correlate one provider session with its started launch-owned surface."""
 
     if pane is None:
         return None
-    for launch in registry.list_launches(target_session_key=str(session_key)):
-        if launch["state"] != "provider_started" or launch["action"] not in {
-            "resume",
-            "attach",
-        }:
+    matches: list[str] = []
+    for launch in registry.list_launches(host_id=str(session_key.host_id)):
+        if (
+            launch["state"] != "provider_started"
+            or launch["provider"] != session_key.provider.value
+            or (
+                launch["action"] in {"resume", "attach"}
+                and launch["target_session_key"] != str(session_key)
+            )
+            or (launch["action"] == "new" and launch["target_session_key"] is not None)
+            or launch["action"] not in {"new", "resume", "attach"}
+        ):
             continue
         surface_id = launch["surface_id"]
         if not isinstance(surface_id, str):
@@ -655,8 +662,8 @@ def _pending_launch_for_pane(
             and locator.window == pane.window
             and locator.pane == pane.pane_id
         ):
-            return str(launch["launch_id"])
-    return None
+            matches.append(str(launch["launch_id"]))
+    return matches[0] if len(matches) == 1 else None
 
 
 def _error_record(

@@ -16,7 +16,7 @@ from .domain import HostId, PresentationContext, ProviderId, ValidationError
 from .hook_config import edit_codex_hooks, resolve_swbctl_executable
 from .hooks import HookInputError
 from .live import reconcile_live
-from .local import build_local_snapshot_json
+from .local import build_local_snapshot_json, materialize_configured_projects
 from .local_events import ingest_local_event
 from .migrations import MigrationError
 from .paths import database_path, load_or_create_host_id
@@ -110,6 +110,20 @@ def build_parser() -> argparse.ArgumentParser:
     prepare_open.add_argument("--can-launch-terminal", action="store_true")
     prepare_open.add_argument("--json", action="store_true", required=True)
 
+    prepare_new = commands.add_parser(
+        "prepare-new",
+        help="atomically prepare a new local project session for presentation",
+    )
+    prepare_new.add_argument("--project", required=True)
+    prepare_new.add_argument("--location")
+    prepare_new.add_argument("--provider", choices=("codex",))
+    prepare_new.add_argument("--request-id", required=True)
+    prepare_new.add_argument("--has-current-terminal", action="store_true")
+    prepare_new.add_argument("--current-tmux-client")
+    prepare_new.add_argument("--can-focus-desktop", action="store_true")
+    prepare_new.add_argument("--can-launch-terminal", action="store_true")
+    prepare_new.add_argument("--json", action="store_true", required=True)
+
     select = commands.add_parser(
         "select-surface",
         help="switch one revalidated tmux client to a managed surface",
@@ -140,13 +154,11 @@ def _codex_executable() -> tuple[str, HooksConfig]:
     raise ConfigError("providers.codex is unavailable")
 
 
-def _configured_codex_executable(config: SwitchboardConfig) -> str:
+def _configured_codex_executable(config: SwitchboardConfig) -> str | None:
     for provider in config.providers:
         if provider.provider is ProviderId.CODEX:
-            if not provider.enabled:
-                raise ConfigError("providers.codex is disabled")
-            return provider.executable or "codex"
-    raise ConfigError("providers.codex is unavailable")
+            return (provider.executable or "codex") if provider.enabled else None
+    return None
 
 
 def _coordinator(
@@ -161,6 +173,8 @@ def _coordinator(
         tmux=TmuxController(),
         swbctl_executable=resolve_swbctl_executable(),
         codex_executable=_configured_codex_executable(config),
+        projects=config.projects,
+        locations=config.locations,
         naming_prefix=config.tmux.naming_prefix,
         launch_timeout_seconds=config.tmux.launch_timeout_seconds,
     )
@@ -188,6 +202,28 @@ def _prepare_open(arguments: argparse.Namespace) -> str:
     return PresentationPlanEnvelope(plan).to_json()
 
 
+def _prepare_new(arguments: argparse.Namespace) -> str:
+    host_id = load_or_create_host_id()
+    config = load_config(host_id=host_id)
+    context = PresentationContext(
+        arguments.has_current_terminal,
+        arguments.current_tmux_client,
+        arguments.can_focus_desktop,
+        arguments.can_launch_terminal,
+    )
+    with Registry(database_path()) as registry:
+        materialize_configured_projects(registry, str(host_id), config)
+        reconcile_live(registry, str(host_id))
+        plan = _coordinator(registry, host_id=host_id, config=config).prepare_new(
+            arguments.project,
+            location_id=arguments.location,
+            provider=arguments.provider,
+            request_id=arguments.request_id,
+            context=context,
+        )
+    return PresentationPlanEnvelope(plan).to_json()
+
+
 def _bootstrap(arguments: argparse.Namespace) -> int:
     launch_environment = os.environ.get("AGENT_SWITCHBOARD_LAUNCH_ID")
     surface_environment = os.environ.get("AGENT_SWITCHBOARD_SURFACE_ID")
@@ -196,6 +232,7 @@ def _bootstrap(arguments: argparse.Namespace) -> int:
     host_id = load_or_create_host_id()
     config = load_config(host_id=host_id)
     with Registry(database_path()) as registry:
+        materialize_configured_projects(registry, str(host_id), config)
         coordinator = _coordinator(registry, host_id=host_id, config=config)
         return coordinator.bootstrap(
             arguments.launch_id,
@@ -294,6 +331,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if arguments.command in {
         "prepare-open",
+        "prepare-new",
         "bootstrap",
         "select-surface",
         "attach-surface",
@@ -301,6 +339,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         try:
             if arguments.command == "prepare-open":
                 sys.stdout.write(f"{_prepare_open(arguments)}\n")
+                return 0
+            if arguments.command == "prepare-new":
+                sys.stdout.write(f"{_prepare_new(arguments)}\n")
                 return 0
             if arguments.command == "bootstrap":
                 return _bootstrap(arguments)

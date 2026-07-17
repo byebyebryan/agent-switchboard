@@ -14,9 +14,14 @@ from typing import Never
 
 from .domain import (
     HostId,
+    LocationId,
     PresentationContext,
+    Project,
+    ProjectId,
+    ProjectLocation,
     ProviderId,
     SessionKey,
+    Transport,
     ValidationError,
 )
 from .protocol import (
@@ -37,13 +42,18 @@ from .tmux import (
 PREPARE_CAPABILITY_HASH = hashlib.sha256(
     b"agent-switchboard:phase-3a:local-codex-existing-session"
 ).hexdigest()
+PREPARE_NEW_CAPABILITY_HASH = hashlib.sha256(
+    b"agent-switchboard:phase-3b:local-codex-new-session"
+).hexdigest()
 PREPARE_SURFACE_WAIT_SECONDS = 2.0
 BOOTSTRAP_START_WAIT_SECONDS = 5.0
+PROVIDER_BIND_GRACE_SECONDS = 300
 
 Clock = Callable[[], int]
 Sleeper = Callable[[float], None]
 ExecProvider = Callable[[str, Sequence[str]], Never]
 ReconcileRuntime = Callable[[], object]
+CwdReader = Callable[[], Path]
 
 
 class PresentationError(RuntimeError):
@@ -58,8 +68,48 @@ def _exec_provider(executable: str, argv: Sequence[str]) -> Never:
     os.execvp(executable, list(argv))
 
 
+def _synchronize_bound_new_metadata(
+    registry: Registry,
+    tmux: TmuxController,
+    surface: dict[str, object],
+    observed: TmuxSurfaceObservation,
+    expected_session_key: str,
+) -> TmuxSurfaceObservation:
+    """Promote an atomically bound new-session identity into pane metadata."""
+
+    metadata = observed.metadata
+    if metadata.session_key == expected_session_key:
+        return observed
+    launch_id = surface.get("launch_id")
+    if metadata.session_key is not None or not isinstance(launch_id, str):
+        return observed
+    launch = registry.get_launch(launch_id)
+    if (
+        launch is None
+        or launch["action"] != "new"
+        or launch["state"] != "bound"
+        or launch["target_session_key"] != expected_session_key
+        or surface.get("current_session_key") != expected_session_key
+        or surface.get("binding_confidence") != "confirmed"
+        or metadata.surface_id != surface.get("surface_id")
+        or metadata.provider != "codex"
+        or metadata.launch_id != launch_id
+        or metadata.role != "session"
+    ):
+        return observed
+    tmux.set_metadata(
+        observed.locator,
+        surface_id=str(surface["surface_id"]),
+        session_key=expected_session_key,
+        provider="codex",
+        launch_id=launch_id,
+        role="session",
+    )
+    return tmux.inspect_locator(observed.locator)
+
+
 class LaunchCoordinator:
-    """Prepare existing local Codex sessions without duplicating runtimes."""
+    """Prepare local Codex surfaces without exposing provider or tmux internals."""
 
     def __init__(
         self,
@@ -68,29 +118,169 @@ class LaunchCoordinator:
         host_id: HostId | str,
         tmux: TmuxController,
         swbctl_executable: str | Path,
-        codex_executable: str = "codex",
+        codex_executable: str | None = "codex",
+        projects: Sequence[Project] = (),
+        locations: Sequence[ProjectLocation] = (),
         naming_prefix: str = "as",
         launch_timeout_seconds: int = 30,
         clock: Clock = _now_ms,
         sleeper: Sleeper = time.sleep,
+        cwd_reader: CwdReader = Path.cwd,
     ) -> None:
         self.registry = registry
         self.host_id = host_id if isinstance(host_id, HostId) else HostId(host_id)
         self.tmux = tmux
         self.swbctl_executable = str(swbctl_executable)
         self.codex_executable = codex_executable
+        self.projects = {str(project.project_id): project for project in projects}
+        self.locations = {str(location.location_id): location for location in locations}
         self.naming_prefix = naming_prefix.replace(".", "-")
         self.launch_timeout_seconds = launch_timeout_seconds
         self.clock = clock
         self.sleeper = sleeper
+        self.cwd_reader = cwd_reader
         if not Path(self.swbctl_executable).is_absolute():
             raise PresentationError("swbctl executable must be an absolute path")
-        if not self.codex_executable or "\x00" in self.codex_executable:
+        if self.codex_executable is not None and (
+            not self.codex_executable or "\x00" in self.codex_executable
+        ):
             raise PresentationError("Codex executable is invalid")
         if not self.naming_prefix:
             raise PresentationError("tmux naming prefix is invalid")
         if not 1 <= self.launch_timeout_seconds <= 300:
             raise PresentationError("launch timeout must be between 1 and 300 seconds")
+
+    def prepare_new(
+        self,
+        project_id: str,
+        *,
+        location_id: str | None,
+        provider: str | None,
+        request_id: str,
+        context: PresentationContext,
+    ) -> PresentationPlan:
+        parsed_project_id = self._stable_id(project_id, ProjectId, "project ID")
+        parsed_location_id = (
+            self._stable_id(location_id, LocationId, "location ID")
+            if location_id is not None
+            else None
+        )
+        request_id = self._request_id(request_id)
+        now = self.clock()
+        project = self.projects.get(str(parsed_project_id))
+        if project is None:
+            return self._blocked_new(
+                "project_not_found",
+                "The selected project is not declared on this host.",
+                now,
+            )
+
+        candidates = sorted(
+            (
+                location
+                for location in self.locations.values()
+                if location.project_id == parsed_project_id
+                and location.host_id == self.host_id
+            ),
+            key=lambda location: str(location.location_id),
+        )
+        location: ProjectLocation | None = None
+        if parsed_location_id is not None:
+            location = self.locations.get(str(parsed_location_id))
+            if (
+                location is None
+                or location.project_id != parsed_project_id
+                or location.host_id != self.host_id
+            ):
+                return self._blocked_new(
+                    "location_not_found",
+                    "The selected location does not belong to this local project.",
+                    now,
+                )
+        elif len(candidates) == 1:
+            location = candidates[0]
+        else:
+            defaults = [candidate for candidate in candidates if candidate.is_default]
+            if len(defaults) == 1:
+                location = defaults[0]
+            elif not candidates:
+                return self._blocked_new(
+                    "project_location_missing",
+                    "The selected project has no location on this host.",
+                    now,
+                )
+            else:
+                return self._blocked_new(
+                    "project_location_ambiguous",
+                    "The selected project requires an explicit location.",
+                    now,
+                )
+        assert location is not None
+
+        resolved_provider: ProviderId | None
+        if provider is not None:
+            try:
+                resolved_provider = ProviderId(provider)
+            except ValueError:
+                return self._blocked_new(
+                    "provider_not_supported",
+                    "The selected provider is not supported.",
+                    now,
+                )
+        else:
+            resolved_provider = location.provider_override or project.default_provider
+        if resolved_provider is None:
+            return self._blocked_new(
+                "project_provider_missing",
+                "The selected project does not resolve a provider.",
+                now,
+            )
+        if resolved_provider is not ProviderId.CODEX:
+            return self._blocked_new(
+                "provider_new_not_supported",
+                "This phase can start only new local Codex sessions.",
+                now,
+                provider=resolved_provider,
+            )
+        if self.codex_executable is None:
+            return self._blocked_new(
+                "provider_unavailable",
+                "Codex is disabled in the current host configuration.",
+                now,
+            )
+        transport = location.transport_override or project.default_transport
+        if transport is not Transport.TMUX:
+            return self._blocked_new(
+                "transport_not_supported",
+                "This phase requires the tmux transport.",
+                now,
+                provider=resolved_provider,
+            )
+        if not location.path.is_absolute() or not location.path.is_dir():
+            return self._blocked_new(
+                "working_directory_unavailable",
+                "The selected project location is unavailable.",
+                now,
+                provider=resolved_provider,
+            )
+        return self._prepare_new(
+            project,
+            location,
+            request_id=request_id,
+            context=context,
+            now=now,
+        )
+
+    @staticmethod
+    def _stable_id[T: ProjectId | LocationId](
+        value: str,
+        value_type: type[T],
+        field: str,
+    ) -> T:
+        parsed = value_type(value)
+        if str(parsed) != value:
+            raise ValidationError(f"{field} must use canonical UUID spelling")
+        return parsed
 
     def prepare_open(
         self,
@@ -134,6 +324,13 @@ class LaunchCoordinator:
             return self._blocked(
                 "session_not_resumable",
                 "The selected Codex session is not currently resumable.",
+                parsed_key,
+                now,
+            )
+        if self.codex_executable is None:
+            return self._blocked(
+                "provider_unavailable",
+                "Codex is disabled in the current host configuration.",
                 parsed_key,
                 now,
             )
@@ -223,6 +420,13 @@ class LaunchCoordinator:
                 now,
                 retryable=True,
             )
+        observed = _synchronize_bound_new_metadata(
+            self.registry,
+            self.tmux,
+            surface,
+            observed,
+            str(session_key),
+        )
         if not self._metadata_matches(
             observed,
             surface_id=surface_id,
@@ -380,6 +584,7 @@ class LaunchCoordinator:
 
         surface_id = str(uuid.uuid4())
         session_name = f"{self.naming_prefix}-{surface_id[:12]}"
+        observed: TmuxSurfaceObservation | None = None
         try:
             observed = self.tmux.create_surface(
                 name=session_name,
@@ -413,7 +618,97 @@ class LaunchCoordinator:
                 observed_at=max(now, self.clock()),
             )
         except (StorageError, TmuxError, sqlite3.Error) as error:
-            if "observed" in locals():
+            if observed is not None:
+                with suppress(TmuxError):
+                    self.tmux.kill_surface(observed.locator)
+            self._fail_launch(launch_id, lease_owner, "surface_creation_failed")
+            raise PresentationError("managed tmux surface creation failed") from error
+        return self._shape_plan(
+            activated.surface,
+            observed,
+            context,
+            lease_expires_at=int(activated.launch["expires_at"]),
+        )
+
+    def _prepare_new(
+        self,
+        project: Project,
+        location: ProjectLocation,
+        *,
+        request_id: str,
+        context: PresentationContext,
+        now: int,
+    ) -> PresentationPlan:
+        launch_id = str(uuid.uuid4())
+        lease_owner = self._lease_owner(launch_id)
+        request = {
+            "host_id": str(self.host_id),
+            "provider": "codex",
+            "action": "new",
+            "project_id": str(project.project_id),
+            "location_id": str(location.location_id),
+            "cwd": str(location.path),
+            "source_handoff_id": None,
+            "target_session_key": None,
+            "transport": "tmux",
+        }
+        try:
+            reservation = self.registry.reserve_launch(
+                request,
+                request_id=request_id,
+                launch_id=launch_id,
+                lease_owner=lease_owner,
+                capability_hash=PREPARE_NEW_CAPABILITY_HASH,
+                expires_at=now + self.launch_timeout_seconds * 1_000,
+                created_at=now,
+            )
+        except RequestConflict:
+            return self._blocked_new(
+                "request_conflict",
+                "The request ID was already used for a different new-session action.",
+                now,
+            )
+        launch = reservation.launch
+        if reservation.kind != "created":
+            return self._plan_for_launch(launch, None, context)
+
+        surface_id = str(uuid.uuid4())
+        session_name = f"{self.naming_prefix}-{surface_id[:12]}"
+        observed: TmuxSurfaceObservation | None = None
+        try:
+            observed = self.tmux.create_surface(
+                name=session_name,
+                cwd=location.path,
+                command=(self.swbctl_executable, "bootstrap", launch_id),
+                environment={
+                    "AGENT_SWITCHBOARD_LAUNCH_ID": launch_id,
+                    "AGENT_SWITCHBOARD_SURFACE_ID": surface_id,
+                },
+                surface_id=surface_id,
+                session_key=None,
+                provider="codex",
+                launch_id=launch_id,
+                role="session",
+            )
+            activated = self.registry.activate_launch_surface(
+                launch_id,
+                {
+                    "surface_id": surface_id,
+                    "host_id": str(self.host_id),
+                    "provider": "codex",
+                    "transport": "tmux",
+                    "transport_locator": observed.locator.to_storage(),
+                    "workspace_id": observed.locator.session,
+                    "role": "session",
+                    "launch_id": launch_id,
+                    "created_at": now,
+                    "client_attached": observed.client_attached,
+                },
+                lease_owner=lease_owner,
+                observed_at=max(now, self.clock()),
+            )
+        except (StorageError, TmuxError, sqlite3.Error) as error:
+            if observed is not None:
                 with suppress(TmuxError):
                     self.tmux.kill_surface(observed.locator)
             self._fail_launch(launch_id, lease_owner, "surface_creation_failed")
@@ -428,13 +723,13 @@ class LaunchCoordinator:
     def _plan_for_launch(
         self,
         launch: dict[str, object],
-        session_key: SessionKey,
+        session_key: SessionKey | None,
         context: PresentationContext,
     ) -> PresentationPlan:
         deadline = time.monotonic() + PREPARE_SURFACE_WAIT_SECONDS
         while launch["state"] in {"reserved", "surface_ready"}:
             if time.monotonic() >= deadline:
-                return self._blocked(
+                return self._blocked_target(
                     "launch_preparing",
                     "Another request is still preparing the session surface.",
                     session_key,
@@ -448,19 +743,25 @@ class LaunchCoordinator:
             launch = refreshed
         if launch["state"] in {"failed", "expired"}:
             code = "launch_failed" if launch["state"] == "failed" else "launch_expired"
-            return self._blocked(
+            return self._blocked_target(
                 code,
                 "The prior session-open attempt is no longer executable.",
                 session_key,
                 self.clock(),
                 retryable=True,
             )
+        if (
+            launch["state"] == "bound"
+            and session_key is None
+            and isinstance(launch.get("target_session_key"), str)
+        ):
+            session_key = SessionKey.parse(str(launch["target_session_key"]))
         surface_id = launch.get("surface_id")
         if not isinstance(surface_id, str):
             raise PresentationError("active launch has no surface")
         surface = self.registry.get_surface(surface_id)
         if surface is None or surface["retired_at"] is not None:
-            return self._blocked(
+            return self._blocked_target(
                 "launch_surface_unavailable",
                 "The prepared session surface is unavailable.",
                 session_key,
@@ -471,20 +772,28 @@ class LaunchCoordinator:
             locator = TmuxLocator.from_storage(surface["transport_locator"])
             observed = self.tmux.inspect_locator(locator)
         except TmuxError:
-            return self._blocked(
+            return self._blocked_target(
                 "launch_surface_unavailable",
                 "The prepared session surface could not be verified.",
                 session_key,
                 self.clock(),
                 retryable=True,
             )
+        if session_key is not None:
+            observed = _synchronize_bound_new_metadata(
+                self.registry,
+                self.tmux,
+                surface,
+                observed,
+                str(session_key),
+            )
         if not self._metadata_matches(
             observed,
             surface_id=surface_id,
-            session_key=str(session_key),
+            session_key=(str(session_key) if session_key is not None else None),
             launch_id=str(launch["launch_id"]),
         ):
-            return self._blocked(
+            return self._blocked_target(
                 "surface_identity_mismatch",
                 "The prepared tmux target no longer has the expected identity.",
                 session_key,
@@ -499,7 +808,7 @@ class LaunchCoordinator:
         observed: TmuxSurfaceObservation,
         *,
         surface_id: str,
-        session_key: str,
+        session_key: str | None,
         launch_id: object,
     ) -> bool:
         metadata = observed.metadata
@@ -554,11 +863,10 @@ class LaunchCoordinator:
         if context.current_tmux_client is not None:
             if not self.tmux.client_exists(locator, context.current_tmux_client):
                 session_key = observed.metadata.session_key
-                assert session_key is not None
-                return self._blocked(
+                return self._blocked_target(
                     "tmux_client_stale",
                     "The caller's tmux client could not be revalidated.",
-                    SessionKey.parse(session_key),
+                    SessionKey.parse(session_key) if session_key is not None else None,
                     self.clock(),
                     retryable=True,
                 )
@@ -592,11 +900,10 @@ class LaunchCoordinator:
             )
         else:
             session_key = observed.metadata.session_key
-            assert session_key is not None
-            return self._blocked(
+            return self._blocked_target(
                 "presentation_unavailable",
                 "The caller cannot focus, switch, or attach this session surface.",
-                SessionKey.parse(session_key),
+                SessionKey.parse(session_key) if session_key is not None else None,
                 self.clock(),
                 retryable=True,
             )
@@ -625,6 +932,52 @@ class LaunchCoordinator:
             ).to_dict()
         )
         return PresentationPlan(PresentationPlanKind.BLOCKED, self.host_id, error=error)
+
+    def _blocked_new(
+        self,
+        code: str,
+        message: str,
+        observed_at: int,
+        *,
+        retryable: bool = False,
+        provider: ProviderId | None = ProviderId.CODEX,
+    ) -> PresentationPlan:
+        error = ErrorRecord.from_dict(
+            ErrorRecord(
+                code,
+                message,
+                ErrorScope.PROJECT,
+                retryable,
+                observed_at,
+                host_id=self.host_id,
+                provider=provider,
+            ).to_dict()
+        )
+        return PresentationPlan(PresentationPlanKind.BLOCKED, self.host_id, error=error)
+
+    def _blocked_target(
+        self,
+        code: str,
+        message: str,
+        session_key: SessionKey | None,
+        observed_at: int,
+        *,
+        retryable: bool = False,
+    ) -> PresentationPlan:
+        if session_key is not None:
+            return self._blocked(
+                code,
+                message,
+                session_key,
+                observed_at,
+                retryable=retryable,
+            )
+        return self._blocked_new(
+            code,
+            message,
+            observed_at,
+            retryable=retryable,
+        )
 
     @staticmethod
     def _lease_owner(launch_id: str) -> str:
@@ -675,14 +1028,20 @@ class LaunchCoordinator:
         if (
             launch["host_id"] != str(self.host_id)
             or launch["provider"] != "codex"
-            or launch["action"] != "resume"
+            or launch["action"] not in {"new", "resume"}
         ):
-            raise PresentationError("bootstrap launch is not a local Codex resume")
+            raise PresentationError("bootstrap launch is not a local Codex session")
         if launch["state"] != "waiting_for_client":
             return 0 if launch["state"] == "bound" else 1
         surface_id = launch.get("surface_id")
         target_session_key = launch.get("target_session_key")
-        if not isinstance(surface_id, str) or not isinstance(target_session_key, str):
+        if (
+            not isinstance(surface_id, str)
+            or (
+                launch["action"] == "resume" and not isinstance(target_session_key, str)
+            )
+            or (launch["action"] == "new" and target_session_key is not None)
+        ):
             self._fail_launch(launch_id, lease_owner, "invalid_launch_identity")
             return 1
         if expected_surface_id is not None and surface_id != expected_surface_id:
@@ -741,15 +1100,38 @@ class LaunchCoordinator:
                     launch_id, lease_owner, "runtime_reconciliation_failed"
                 )
                 return 1
-        session = self.registry.get_session(target_session_key)
-        if session is None:
-            self._fail_launch(launch_id, lease_owner, "target_session_missing")
+        refreshed_launch = self.registry.get_launch(launch_id)
+        if refreshed_launch is None:
+            raise PresentationError("bootstrap launch disappeared")
+        if refreshed_launch["state"] == "bound":
+            return 0
+        if refreshed_launch["state"] != "waiting_for_client":
+            self._fail_launch(launch_id, lease_owner, "launch_state_changed")
             return 1
-        if session["runtime_presence"] == "live":
-            self._fail_launch(launch_id, lease_owner, "duplicate_runtime_detected")
+        launch = refreshed_launch
+        if launch["action"] == "resume":
+            assert isinstance(target_session_key, str)
+            session = self.registry.get_session(target_session_key)
+            if session is None:
+                self._fail_launch(launch_id, lease_owner, "target_session_missing")
+                return 1
+            if session["runtime_presence"] == "live":
+                self._fail_launch(launch_id, lease_owner, "duplicate_runtime_detected")
+                return 1
+        elif not self._new_target_is_current(launch):
+            self._fail_launch(launch_id, lease_owner, "launch_target_changed")
             return 1
         transition_at = max(self.clock(), int(launch["updated_at"]))
+        if self.codex_executable is None:
+            self._fail_launch(launch_id, lease_owner, "provider_unavailable")
+            return 1
         try:
+            self.registry.renew_launch_lease(
+                launch_id,
+                lease_owner=lease_owner,
+                expires_at=transition_at + PROVIDER_BIND_GRACE_SECONDS * 1_000,
+                observed_at=transition_at,
+            )
             self.registry.transition_launch(
                 launch_id,
                 "provider_started",
@@ -759,19 +1141,50 @@ class LaunchCoordinator:
         except StorageError:
             self._fail_launch(launch_id, lease_owner, "provider_start_rejected")
             return 1
-        parsed_key = SessionKey.parse(target_session_key)
-        argv = (
-            self.codex_executable,
-            "resume",
-            str(parsed_key.provider_session_id),
-        )
+        if launch["action"] == "resume":
+            assert isinstance(target_session_key, str)
+            parsed_key = SessionKey.parse(target_session_key)
+            argv = (
+                self.codex_executable,
+                "resume",
+                str(parsed_key.provider_session_id),
+            )
+        else:
+            argv = (self.codex_executable,)
         try:
+            assert self.codex_executable is not None
             exec_provider(self.codex_executable, argv)
         except OSError:
             self._fail_launch(launch_id, lease_owner, "provider_exec_failed")
             return 1
         self._fail_launch(launch_id, lease_owner, "provider_exec_returned")
         return 1
+
+    def _new_target_is_current(self, launch: dict[str, object]) -> bool:
+        project_id = launch.get("project_id")
+        location_id = launch.get("location_id")
+        cwd = launch.get("cwd")
+        if not all(isinstance(value, str) for value in (project_id, location_id, cwd)):
+            return False
+        project = self.projects.get(str(project_id))
+        location = self.locations.get(str(location_id))
+        if project is None or location is None:
+            return False
+        if (
+            location.project_id != project.project_id
+            or location.host_id != self.host_id
+            or str(location.path) != cwd
+            or not location.path.is_dir()
+        ):
+            return False
+        transport = location.transport_override or project.default_transport
+        if transport is not Transport.TMUX:
+            return False
+        try:
+            process_cwd = self.cwd_reader().resolve(strict=False)
+        except OSError:
+            return False
+        return process_cwd == location.path
 
 
 def actionable_surface_locator(
@@ -807,18 +1220,31 @@ def actionable_surface_locator(
             or launch["surface_id"] != surface_id
             or launch["host_id"] != str(parsed_host)
             or launch["provider"] != "codex"
-            or launch["action"] != "resume"
+            or launch["action"] not in {"new", "resume"}
             or launch["state"]
             not in {"waiting_for_client", "provider_started", "bound"}
         ):
             raise PresentationError("surface launch is no longer actionable")
         if launch["state"] != "bound" and now >= int(launch["expires_at"]):
             raise PresentationError("surface launch lease has expired")
-        if expected_session_key is None:
+        if expected_session_key is None and launch["action"] == "resume":
             expected_session_key = launch["target_session_key"]
+        if launch["state"] == "bound":
+            if (
+                not isinstance(launch["target_session_key"], str)
+                or expected_session_key != launch["target_session_key"]
+                or surface["binding_confidence"] != "confirmed"
+            ):
+                raise PresentationError("bound surface identity is inconsistent")
+        elif launch["action"] == "new" and (
+            expected_session_key is not None
+            or launch["target_session_key"] is not None
+            or surface["binding_confidence"] != "unknown"
+        ):
+            raise PresentationError("waiting new surface is already bound")
     elif expected_session_key is None or surface["binding_confidence"] != "confirmed":
         raise PresentationError("surface does not have a confirmed session binding")
-    if not isinstance(expected_session_key, str):
+    if expected_session_key is not None and not isinstance(expected_session_key, str):
         raise PresentationError("surface has no target session")
 
     try:
@@ -826,6 +1252,14 @@ def actionable_surface_locator(
         observed = tmux.inspect_locator(locator)
     except TmuxError as error:
         raise PresentationError("surface tmux target is unavailable") from error
+    if isinstance(expected_session_key, str):
+        observed = _synchronize_bound_new_metadata(
+            registry,
+            tmux,
+            surface,
+            observed,
+            expected_session_key,
+        )
     if not LaunchCoordinator._metadata_matches(
         observed,
         surface_id=surface_id,
@@ -872,7 +1306,9 @@ def attach_surface_argv(
 __all__ = [
     "BOOTSTRAP_START_WAIT_SECONDS",
     "PREPARE_CAPABILITY_HASH",
+    "PREPARE_NEW_CAPABILITY_HASH",
     "PREPARE_SURFACE_WAIT_SECONDS",
+    "PROVIDER_BIND_GRACE_SECONDS",
     "LaunchCoordinator",
     "PresentationError",
     "actionable_surface_locator",

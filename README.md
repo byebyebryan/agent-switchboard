@@ -11,7 +11,8 @@ status metadata, then hands the user back to the unmodified provider UI.
 ## Implementation status
 
 The current checkout contains the Phase 1 core, the local Codex portion of
-Phase 2, and Phase 3A existing-session presentation:
+Phase 2, Phase 3A existing-session presentation, and the Phase 3B core path for
+new project-aware Codex sessions:
 
 - Python package and finalized `swbctl` executable name
 - stable host identity and strict TOML configuration
@@ -35,19 +36,24 @@ Phase 2, and Phase 3A existing-session presentation:
   check before `codex resume`
 - exact process/session/tmux correlation that can atomically finish a pending
   resume when Codex omits the expected start hook
+- atomic project/location resolution and new-Codex preparation with an unbound
+  waiting surface, attach-before-start bootstrap, exact hook/live identity
+  binding, and same-request idempotency
 - versioned focus, switch, attach, and blocked presentation plans consumed by
   the separate DMS integration
 - unit, migration, concurrency, provider, protocol, and packaging tests
 
-The next roadmap batch is Phase 2B: Claude discovery, hooks, supervisor/process
-liveness, and normalized runtime truth. Phase 3B then adds project-aware new
-local Codex sessions, followed by Phase 3C Claude workspace/surface parity.
+Phase 3B implementation and live acceptance are complete in the core and
+separate DMS adapter. Phase 2B now adds Claude discovery, hooks,
+supervisor/process liveness, and normalized runtime truth, followed by Phase 3C
+Claude workspace/surface parity.
 The searchable TUI remains Phase 4 and remote SSH transport remains Phase 5. See
 [the design](docs/design.md), the
 [Phase 1 validation record](docs/phase-1-validation.md), and the
 [Phase 2 validation record](docs/phase-2-validation.md), and the
-[Phase 3A validation record](docs/phase-3a-validation.md) for the exact boundary
-and evidence.
+[Phase 3A validation record](docs/phase-3a-validation.md) for the implemented
+boundary and evidence. The accepted next-batch contract is in the
+[Phase 3B plan](docs/phase-3b-plan.md).
 
 ## Local commands
 
@@ -64,6 +70,8 @@ swbctl hooks uninstall --provider codex --dry-run
 swbctl doctor
 swbctl prepare-open <session-key> --request-id <uuid> \
   --can-focus-desktop --can-launch-terminal --json
+swbctl prepare-new --project <project-id> --location <location-id> \
+  --request-id <uuid> --can-focus-desktop --can-launch-terminal --json
 swbctl select-surface <surface-id> --client <tmux-client-id>
 swbctl attach-surface <surface-id>
 ```
@@ -113,6 +121,15 @@ without a trustworthy pane locator returns `unmanaged_surface` and is never
 duplicated. Frontends receive only versioned presentation fields and stable
 surface IDs. `select-surface` and `attach-surface` revalidate registry and tmux
 identity instead of accepting raw frontend tmux targets.
+
+`prepare-new` loads the current validated host configuration, resolves the
+selected project and local location, and creates an unbound leased tmux surface.
+Codex starts without shell interpolation only after a client attaches. The
+bootstrap revalidates the project, location, working directory, transport, and
+surface immediately before `exec`, then renews a bounded five-minute identity
+binding grace; the first exact lifecycle hook or complete live tmux/process
+correlation atomically assigns the provider UUID and confirms the
+session/surface binding.
 
 Snapshot assembly reads a bounded deterministic session candidate set and
 applies an actual UTF-8 byte budget. If sessions are omitted, the registry is

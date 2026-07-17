@@ -1814,8 +1814,7 @@ evidence and exact remaining boundary are recorded in
 [`docs/phase-2-validation.md`](phase-2-validation.md).
 
 For execution tracking, the completed local Codex slice is **Phase 2A**.
-**Phase 2B is the next implementation batch** and closes the provider
-foundation before Switchboard adds more presentation types:
+**Phase 2B remains the next provider-expansion batch**:
 
 - refresh the retained Claude contract fixtures against the current supported
   CLI on `snap.lan`;
@@ -1827,6 +1826,11 @@ foundation before Switchboard adds more presentation types:
 
 Phase 2B ends at trustworthy Claude runtime truth. It does not add Claude DMS
 actions, workspaces, or tmux presentation policy.
+
+Execution now proceeds through Phase 3B before Phase 2B so the already proven
+Codex read, runtime, existing-session, tmux, and DMS paths become one complete
+new-and-existing-session vertical slice. This ordering does not weaken the
+provider-neutral contracts or permit Claude presentation before Phase 2B.
 
 ### Phase 3: Atomic launch, tmux, and DMS parity
 
@@ -1847,6 +1851,11 @@ The remaining Phase 3 work is split by dependency:
 - Prove the first new-session path with local Codex, including leased waiting
   surfaces, hook or exact-live identity binding, rollback, and idempotency.
 - Extend DMS action parity to the validated new-Codex presentation plans.
+
+Phase 3B is implemented and live-accepted. Its exact first-increment boundary,
+command contract, resolution rules, failure behavior, DMS boundary, and
+acceptance evidence are recorded in
+[`docs/phase-3b-plan.md`](phase-3b-plan.md).
 
 #### Phase 3C: Claude workspace and surface parity
 
