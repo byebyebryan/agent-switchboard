@@ -16,7 +16,8 @@ to the reserved launch and surface.
 This ordering is deliberate. It exercises the existing provider-neutral
 project, location, launch-request, launch-intent, surface, and presentation
 contracts before adding Claude-specific hook, process, and tmux semantics.
-Phase 2B remains the next provider-expansion batch after Phase 3B.
+Phase 2B was the next provider-expansion batch after Phase 3B and is now
+complete.
 
 The first increment is local, Codex-only, tmux-only, and configuration-driven.
 It does not include handoff continuation, arbitrary ad-hoc working-directory
@@ -244,8 +245,6 @@ machine configuration.
 
 ## Deferred work
 
-- Phase 2B Claude hooks, Agent-View-disabled capability checks, process/tmux
-  liveness, and normalized foreground runtime truth.
 - Phase 3C Claude new/resume/native-history tmux and DMS presentation policy.
 - Handoff-based continuation and other Phase 4 curation operations.
 - Arbitrary cwd launch, project catalog editing, and a terminal TUI workflow.

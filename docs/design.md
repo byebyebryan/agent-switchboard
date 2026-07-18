@@ -1837,24 +1837,24 @@ evidence and exact remaining boundary are recorded in
 [`docs/phase-2-validation.md`](phase-2-validation.md).
 
 For execution tracking, the completed local Codex slice is **Phase 2A**.
-**Phase 2B remains the next provider-expansion batch**:
+The **Phase 2B provider-expansion implementation is complete**:
 
-- refresh the retained Claude contract fixtures against the current supported
+- refreshed the retained Claude contract fixtures against the current supported
   CLI on `snap.lan`;
-- require and diagnose the Agent-View-disabled operational profile;
-- add identifiable Claude hook management and atomic lifecycle ingestion;
-- reconcile native processes, tmux surfaces, and retained resumability without
+- required and diagnosed the Agent-View-disabled operational profile;
+- added identifiable Claude hook management and atomic lifecycle ingestion;
+- reconciled native processes, tmux surfaces, and retained resumability without
   treating foreground turn completion as child-task completion; and
-- validate native resume fallback plus canonical Snapshot v1 output.
+- validated native resume fallback plus canonical Snapshot v1 output.
 
 Phase 2B ends at trustworthy Claude runtime truth. It does not add Claude DMS
 actions or tmux presentation policy.
 
 The 2026-07-16 Claude contract refresh, exact implementation boundary, state
 mapping, delivery slices, DMS compatibility rule, and acceptance gates are
-recorded in [`docs/phase-2b-plan.md`](phase-2b-plan.md). With Phase 3B now
-complete, execution returns to Phase 2B. Claude presentation remains gated on
-that provider foundation.
+recorded in [`docs/phase-2b-plan.md`](phase-2b-plan.md). Implementation, the
+user-profile Agent View cutover, and live acceptance are complete. Claude
+presentation remains Phase 3C.
 
 ### Phase 3: Atomic launch, tmux, and DMS parity
 

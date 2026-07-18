@@ -71,6 +71,21 @@ then exits 2, proving prompt identity and effective hook loading before any API
 request. On the recorded 2.1.210 run it completed with zero turns and zero
 reported cost.
 
+The durable production-path version creates temporary settings and an isolated
+Switchboard registry, installs the exact six exec-form handlers into that
+temporary document, and adds a second blocking prompt hook:
+
+```sh
+.venv/bin/python scripts/live_claude_smoke.py \
+  --claude "$(command -v claude)" \
+  --swbctl "$(pwd)/.venv/bin/swbctl"
+```
+
+It does not invoke Agent View, modify user settings, persist a Claude session,
+or print provider identity. Success is one sanitized JSON summary containing
+only the version, feature names, lifecycle-event counts, session count, elapsed
+time, reported turns, and reported cost.
+
 The original `agents-probe.json` and dated `agents-probe-2026-07-16.json`
 captures are both retained because the same provider version produced
 different valid optional-field and state/status combinations over time.

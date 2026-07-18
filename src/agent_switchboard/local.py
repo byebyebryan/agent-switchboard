@@ -10,8 +10,9 @@ from .config import SwitchboardConfig, load_config
 from .domain import ProjectId, ProviderId
 from .live import reconcile_live
 from .paths import database_path, load_or_create_host_id
+from .providers.claude import ClaudeProvider, inspect_claude_settings
 from .providers.codex import CodexProvider
-from .reconcile import reconcile_codex_discovery
+from .reconcile import reconcile_claude_capability, reconcile_codex_discovery
 from .snapshot import build_host_snapshot_json
 from .storage import Registry
 
@@ -62,13 +63,6 @@ def _project_catalog(config: SwitchboardConfig) -> tuple[Mapping[str, Any], ...]
     )
 
 
-def _codex_executable(config: SwitchboardConfig) -> str | None:
-    for provider in config.providers:
-        if provider.provider is ProviderId.CODEX:
-            return (provider.executable or "codex") if provider.enabled else None
-    return None
-
-
 def materialize_configured_projects(
     registry: Registry,
     host_id: str,
@@ -111,30 +105,40 @@ def build_local_snapshot_json(
             assert config is not None
             materialize_configured_projects(registry, str(host_id), config)
 
-        capabilities = ()
-        errors: tuple = ()
-        executable = (
-            _codex_executable(config)
-            if reconcile == "full" and config is not None
-            else None
-        )
-        if executable is not None:
-            result = reconcile_codex_discovery(
-                registry,
-                str(host_id),
-                CodexProvider(executable=executable).discover_sessions(),
-            )
-            capabilities = (result.capability,)
-            errors = result.errors
+        capabilities = []
+        errors = []
+        if reconcile == "full" and config is not None:
+            for provider in config.providers:
+                if not provider.enabled:
+                    continue
+                if provider.provider is ProviderId.CODEX:
+                    result = reconcile_codex_discovery(
+                        registry,
+                        str(host_id),
+                        CodexProvider(
+                            executable=provider.executable or "codex"
+                        ).discover_sessions(),
+                    )
+                else:
+                    result = reconcile_claude_capability(
+                        str(host_id),
+                        ClaudeProvider(
+                            executable=provider.executable or "claude"
+                        ).inspect_capability(inspect_claude_settings()),
+                    )
+                capabilities.append(result.capability)
+                errors.extend(result.errors)
         if reconcile in {"live", "full"}:
             live = reconcile_live(registry, str(host_id))
-            errors = (*errors, *live.errors)
+            errors.extend(live.errors)
 
         return build_host_snapshot_json(
             registry,
             str(host_id),
-            capabilities=capabilities,
-            errors=errors,
+            capabilities=tuple(
+                sorted(capabilities, key=lambda capability: capability.provider.value)
+            ),
+            errors=tuple(errors),
         )
 
 

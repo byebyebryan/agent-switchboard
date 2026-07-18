@@ -7,7 +7,7 @@ import socket
 from collections.abc import Mapping
 from typing import BinaryIO, Final
 
-from .hooks import normalize_codex_event, read_hook_json
+from .hooks import normalize_claude_event, normalize_codex_event, read_hook_json
 from .paths import database_path, load_or_create_host_id
 from .storage import HookIngestionResult, Registry
 
@@ -23,11 +23,15 @@ def ingest_local_event(
 ) -> HookIngestionResult:
     """Normalize stdin and perform one local SQLite ingestion transaction."""
 
-    if provider != "codex":
+    normalizers = {
+        "claude": normalize_claude_event,
+        "codex": normalize_codex_event,
+    }
+    if provider not in normalizers:
         raise ValueError("event ingestion is not implemented for this provider")
     payload = read_hook_json(stream)
     try:
-        normalized = normalize_codex_event(
+        normalized = normalizers[provider](
             payload,
             os.environ if environment is None else environment,
             entry_ns=entry_ns,

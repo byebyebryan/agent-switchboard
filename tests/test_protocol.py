@@ -73,13 +73,13 @@ def test_snapshot_contract_fields_and_capability_report() -> None:
     )
 
 
-def test_structured_degraded_capability_reason() -> None:
+def test_claude_disabled_agent_view_profile_is_healthy() -> None:
     envelope = CapabilityEnvelope.from_json((FIXTURES / "capability.json").read_bytes())
     capability = envelope.capability
     assert capability.provider_version == "2.1.210"
-    assert capability.degraded_reasons[0].code == "agent_view_disabled"
-    assert capability.degraded_reasons[0].feature == "agent_view"
-    assert capability.degraded_reasons[0].details == {"fallback": "native_resume"}
+    assert capability.available
+    assert capability.features == ("hooks", "native_resume", "tmux_runtime")
+    assert capability.degraded_reasons == ()
 
 
 def test_unavailable_capability_requires_degraded_reason() -> None:
@@ -293,9 +293,14 @@ def test_retained_details_use_an_explicit_typed_safe_field_contract() -> None:
         ErrorEnvelope.from_dict(data)
 
     capability = json.loads((FIXTURES / "capability.json").read_text())
-    capability["capability"]["degradedReasons"][0]["details"] = {
-        "payloadHash": "arbitrary retained content"
-    }
+    capability["capability"]["degradedReasons"] = [
+        {
+            "code": "example_degradation",
+            "message": "Structured example.",
+            "retryable": False,
+            "details": {"payloadHash": "arbitrary retained content"},
+        }
+    ]
     with pytest.raises(ProtocolError, match="lowercase SHA-256"):
         CapabilityEnvelope.from_dict(capability)
 

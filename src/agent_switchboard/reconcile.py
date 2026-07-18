@@ -11,6 +11,7 @@ from .protocol import (
     ErrorRecord,
     ErrorScope,
 )
+from .providers.claude import ClaudeCapabilityReport
 from .providers.codex import (
     CodexCapabilityReport,
     CodexDiscoveryResult,
@@ -29,6 +30,14 @@ class CodexReconciliationResult:
     """Ephemeral output of applying one Codex discovery result."""
 
     reconciliation: ProviderSessionReconciliationResult | None
+    capability: Capability
+    errors: tuple[ErrorRecord, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class ClaudeReconciliationResult:
+    """Ephemeral Claude capability output; Phase 2B has no history scan."""
+
     capability: Capability
     errors: tuple[ErrorRecord, ...]
 
@@ -175,4 +184,56 @@ def reconcile_codex_discovery(
     return CodexReconciliationResult(reconciliation, capability, ())
 
 
-__all__ = ["CodexReconciliationResult", "reconcile_codex_discovery"]
+def reconcile_claude_capability(
+    host_id: str,
+    report: ClaudeCapabilityReport,
+    *,
+    observed_at: int | None = None,
+) -> ClaudeReconciliationResult:
+    """Convert one read-only Claude capability probe to public protocol rows."""
+
+    parsed_host_id = _canonical_host_id(host_id)
+    timestamp = _observed_at(observed_at)
+    capability = Capability.from_dict(
+        Capability(
+            provider=ProviderId.CLAUDE,
+            available=report.available,
+            provider_version=report.provider_version,
+            tested_contract_min=report.tested_contract_min,
+            tested_contract_max=report.tested_contract_max,
+            features=report.features,
+            schema_fingerprint=None,
+            degraded_reasons=tuple(
+                CapabilityDegradation(
+                    code=issue.code,
+                    message=issue.message,
+                    retryable=issue.retryable,
+                    feature=issue.feature,
+                )
+                for issue in report.degraded_reasons
+            ),
+        ).to_dict()
+    )
+    errors = tuple(
+        ErrorRecord.from_dict(
+            ErrorRecord(
+                code=issue.code,
+                message=issue.message,
+                scope=ErrorScope.PROVIDER,
+                retryable=issue.retryable,
+                observed_at=timestamp,
+                host_id=parsed_host_id,
+                provider=ProviderId.CLAUDE,
+            ).to_dict()
+        )
+        for issue in report.degraded_reasons
+    )
+    return ClaudeReconciliationResult(capability, errors)
+
+
+__all__ = [
+    "ClaudeReconciliationResult",
+    "CodexReconciliationResult",
+    "reconcile_claude_capability",
+    "reconcile_codex_discovery",
+]

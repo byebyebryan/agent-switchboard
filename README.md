@@ -10,9 +10,9 @@ status metadata, then hands the user back to the unmodified provider UI.
 
 ## Implementation status
 
-The current checkout contains the Phase 1 core, the local Codex portion of
-Phase 2, Phase 3A existing-session presentation, and the Phase 3B core path for
-new project-aware Codex sessions:
+The current checkout contains the Phase 1 core, the local Codex and Claude
+provider foundations from Phase 2, Phase 3A existing-session presentation, and
+the Phase 3B core path for new project-aware Codex sessions:
 
 - Python package and finalized `swbctl` executable name
 - stable host identity and strict TOML configuration
@@ -21,14 +21,20 @@ new project-aware Codex sessions:
 - SQLite schema, migrations, and registry operations
 - production Codex `0.144.4` app-server discovery, normalization, atomic
   reconciliation, and canonical local snapshots
+- bounded Claude Code `2.1.210` capability detection for the
+  Agent-View-disabled profile without supervisor or transcript discovery
 - retained no-refresh reads, structured provider degradation, and explicit
   snapshot-session truncation
 - privacy-safe Codex lifecycle hook ingestion with atomic launch binding and
   deterministic event ordering
+- privacy-safe Claude lifecycle ingestion with canonical prompt identity,
+  retained exact PID/birth evidence, and foreground-only activity semantics
 - bounded `/proc` and tmux reconciliation for normalized live activity,
   attachment, and parked state
 - explicit, ownership-safe Codex hook installation and effective hook/trust
   diagnostics through the supported app-server contract
+- ownership-safe Claude user-hook installation, profile diagnostics, and
+  isolated zero-model effective-hook acceptance
 - validated tmux surface discovery, creation, metadata, selection, attachment,
   and rollback without shell interpolation
 - atomic existing-Codex preparation with live-pane adoption, resumable-session
@@ -44,11 +50,9 @@ new project-aware Codex sessions:
 - unit, migration, concurrency, provider, protocol, and packaging tests
 
 Phase 3B implementation and live acceptance are complete in the core and
-separate DMS adapter. Phase 2B planning and contract refresh are complete;
-implementation next adds Claude hooks, Agent-View-disabled capability checks,
-process/tmux liveness, and normalized foreground runtime truth. Phase 3C then
-reuses the Codex managed-tmux lifecycle for Claude and adds DMS session/history
-actions.
+separate DMS adapter. Phase 2B implementation, Agent View cutover, and live
+acceptance are also complete. Phase 3C then reuses the Codex managed-tmux
+lifecycle for Claude and adds DMS session/history actions.
 The searchable TUI remains Phase 4 and remote SSH transport remains Phase 5. See
 [the design](docs/design.md), the
 [Phase 1 validation record](docs/phase-1-validation.md), and the
@@ -70,6 +74,8 @@ swbctl list --json
 swbctl list --refresh --json
 swbctl hooks install --provider codex --dry-run
 swbctl hooks uninstall --provider codex --dry-run
+swbctl hooks install --provider claude --dry-run
+swbctl hooks uninstall --provider claude --dry-run
 swbctl doctor
 swbctl prepare-open <session-key> --request-id <uuid> \
   --can-focus-desktop --can-launch-terminal --json
@@ -152,7 +158,7 @@ python3.12 -m venv .venv
 Run the local acceptance gates from the repository root:
 
 ```sh
-.venv/bin/python -m compileall -q src tests spikes
+.venv/bin/python -m compileall -q src tests spikes scripts
 .venv/bin/ruff format --check .
 .venv/bin/ruff check .
 .venv/bin/pytest

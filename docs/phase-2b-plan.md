@@ -2,7 +2,8 @@
 
 Date: 2026-07-17
 
-Status: Agent View pivot captured; implementation pending
+Status: core, DMS implementation, user-profile cutover, and live acceptance
+complete
 
 ## Decision and boundary
 
@@ -412,6 +413,95 @@ configuration-conflict behavior, settings restoration, and whether development
 hooks were left installed. No prompt, response, transcript path, cwd, session
 UUID, runtime ID, PID, raw argv, or private provider payload is printed.
 
+## Implementation and acceptance record
+
+The implementation and non-destructive acceptance gates completed on
+2026-07-17; the user-profile cutover completed on 2026-07-18. The current host
+reported Python 3.14.6, tmux 3.7b, Claude Code 2.1.210, and `swbctl` 0.1.0.
+The reviewed wheel was installed through the existing `uv tool` distribution
+rather than from the source checkout.
+
+The core verification entry points were:
+
+```text
+python -m compileall -q src tests spikes scripts
+ruff format --check .
+ruff check .
+pytest
+python scripts/verify_distributions.py BUILD_A BUILD_B
+```
+
+They passed with 465 tests. Two isolated PEP 517 builds at
+`SOURCE_DATE_EPOCH=1784073600` were byte-identical and matched the exact
+allowlists: 26 package files, 31 wheel files, and 37 source-distribution files.
+Fresh wheel and source-distribution environments passed dependency, import,
+migration, snapshot, entry-point, and Claude hook dry-run smoke checks.
+
+The cross-repository gate was:
+
+```text
+cd /home/bryan/code/agent-switchboard-dms
+./scripts/check
+```
+
+It passed 115 Python tests and 19 deterministic JavaScript behavior groups.
+The mixed-provider fixture produces exactly the pre-existing Codex-only bridge
+model, including unchanged launch targets and warnings. No QML, desktop
+helper, presentation-plan, or action code changed.
+
+The effective no-model hook check was:
+
+```text
+.venv/bin/python scripts/live_claude_smoke.py \
+  --claude "$(command -v claude)" \
+  --swbctl /home/bryan/code/agent-switchboard/.venv/bin/swbctl
+```
+
+It used temporary Claude settings and XDG roots, emitted exactly one each of
+`SessionStart`, `UserPromptSubmit`, and `SessionEnd` into an isolated registry,
+reported one session, zero model turns, and zero cost, and printed no provider
+identity or private payload. A separate disposable tmux server proved that a
+hook-observed Claude process with no attached client remained `live` and
+`detached`; `/exit` then reconciled it to `stopped` and `resumable`. With
+`CLAUDE_CODE_DISABLE_AGENT_VIEW=1`, `claude agents --all --json` exited 1 with
+zero stdout bytes while `claude --resume` kept the native picker open. No
+conversation content was selected or displayed.
+
+Read-only preflight originally found `disableAgentView` unset, no Switchboard
+handlers, one Agent View client, one transient daemon supervisor, and active
+provider work. The user later confirmed that work was wrapped or paused and
+authorized stopping the Agent View daemon. Claude's supported
+`daemon stop --any` command stopped that supervisor and reported three
+terminated background sessions. The follow-up status reported no running
+daemon, an unreachable control socket, and an empty worker roster. One
+unrelated non-daemon Claude process remained and was deliberately neither
+killed nor adopted.
+
+The migration preserved the existing `0644` settings mode and unrelated
+settings while adding `disableAgentView=true`. It left `disableAllHooks` unset
+and installed exactly six user-level Switchboard handlers. Every handler uses
+the installed absolute `/home/bryan/.local/bin/swbctl` path, exec-form arguments
+`event --provider claude`, no matcher, a one-second timeout, and the owned
+status marker. A second install was idempotent. Installed `swbctl doctor`
+reported both Codex and Claude healthy; Claude 2.1.210 measured a 101.9 ms cold
+event start and 91.2 ms warm p95 on that run.
+
+With the retained user profile, `claude agents --all --json` exited 1 with zero
+stdout bytes, the native resume picker remained open without selecting or
+displaying content, and the transient daemon stayed stopped. A blocking
+no-model probe loaded the actual user hooks, redirected Switchboard state to a
+temporary registry, observed exactly one each of `SessionStart`,
+`UserPromptSubmit`, and `SessionEnd`, reported one session, zero turns, and zero
+cost, and retained none of its private sentinel.
+
+Finally, the installed DMS bridge read an isolated retained Codex snapshot and
+then the same snapshot with an added Claude session. Every projected field
+except the expected generation timestamp remained identical: one Codex item,
+zero launch targets, and zero warnings. Claude items and actions therefore
+remain absent until Phase 3C. The development installation is intentionally
+left in the dogfood state with Agent View disabled and all six Switchboard
+handlers installed.
+
 ## Proposed commit boundaries
 
 Keep reviewable behavior together rather than splitting code from the tests
@@ -422,9 +512,12 @@ that define it:
 3. core lifecycle hook management, diagnostics, and CLI integration commit;
 4. DMS mixed-provider compatibility-test commit.
 
-The exact split can collapse core commits 2 and 3 if storage changes make an
-intermediate state non-coherent. No commit or push is implied until the
-completed diff is reviewed.
+Review found that core slices 2 and 3 share the event schema, retained runtime
+identity, CLI, doctor, fake provider, and installed-artifact gates. They should
+ship as one coherent core implementation commit rather than manufacture a
+partially usable intermediate commit. The DMS fixture and exact projection
+tests remain a separate repository commit. The final diff review and complete
+acceptance gates precede both commits and pushes.
 
 ## Deferred work
 

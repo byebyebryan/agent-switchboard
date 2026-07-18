@@ -12,13 +12,14 @@ import shlex
 import shutil
 import stat
 import sys
-from collections.abc import Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Final
 
 from .config import ConfigError
+from .providers.claude import claude_settings_path
 
 HOOK_STATUS_MESSAGE: Final = "Agent Switchboard: tracking session"
 HOOK_EVENTS: Final = (
@@ -28,6 +29,8 @@ HOOK_EVENTS: Final = (
     "PostToolUse",
     "Stop",
 )
+CLAUDE_HOOK_STATUS_MESSAGE: Final = "Agent Switchboard: tracking Claude session"
+CLAUDE_HOOK_EVENTS: Final = (*HOOK_EVENTS, "SessionEnd")
 APP_SERVER_EVENT_NAMES: Final = {
     "SessionStart": "sessionStart",
     "UserPromptSubmit": "userPromptSubmit",
@@ -57,6 +60,23 @@ class HookEditResult:
     removed_handlers: int
     installed_handlers: int
     dry_run: bool
+
+
+@dataclass(frozen=True, slots=True)
+class ClaudeHookCandidate:
+    event: str
+    handler_type: str | None
+    command: str | None
+    args: tuple[str, ...] | None
+    matcher: str | None
+    timeout_seconds: int | None
+    status_message: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class ClaudeHooksInspection:
+    path: Path
+    candidates: tuple[ClaudeHookCandidate, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -160,6 +180,32 @@ def canonical_hook_groups(
     return result
 
 
+def canonical_claude_hook_groups(
+    executable: str | Path,
+    *,
+    timeout_seconds: int,
+) -> dict[str, dict[str, Any]]:
+    if type(timeout_seconds) is not int or not 1 <= timeout_seconds <= 60:
+        raise HookConfigError("hook timeout must be between 1 and 60 seconds")
+    path = Path(executable)
+    if not path.is_absolute():
+        raise HookConfigError("the swbctl hook command must use an absolute path")
+    result: dict[str, dict[str, Any]] = {}
+    for event in CLAUDE_HOOK_EVENTS:
+        result[event] = {
+            "hooks": [
+                {
+                    "type": "command",
+                    "command": str(path),
+                    "args": ["event", "--provider", "claude"],
+                    "timeout": timeout_seconds,
+                    "statusMessage": CLAUDE_HOOK_STATUS_MESSAGE,
+                }
+            ]
+        }
+    return result
+
+
 def command_argv(handler: Mapping[str, Any]) -> tuple[str, ...] | None:
     if handler.get("type") != "command" or not isinstance(handler.get("command"), str):
         return None
@@ -180,6 +226,21 @@ def is_switchboard_handler(handler: Mapping[str, Any]) -> bool:
         and argv[1:] == ("event", "--provider", "codex")
         and Path(argv[0]).name == "swbctl"
         and handler.get("statusMessage") == HOOK_STATUS_MESSAGE
+    )
+
+
+def is_claude_switchboard_handler(handler: Mapping[str, Any]) -> bool:
+    """Recognize only Switchboard's exact Claude exec-form handler."""
+
+    command = handler.get("command")
+    args = handler.get("args")
+    return bool(
+        handler.get("type") == "command"
+        and isinstance(command, str)
+        and Path(command).is_absolute()
+        and Path(command).name == "swbctl"
+        and args == ["event", "--provider", "claude"]
+        and handler.get("statusMessage") == CLAUDE_HOOK_STATUS_MESSAGE
     )
 
 
@@ -257,6 +318,18 @@ def _validate_raw_handler(value: object, event: str) -> None:
             maximum=16_384,
             nonempty=True,
         )
+        args = value.get("args")
+        if args is not None:
+            if not isinstance(args, list) or len(args) > 256:
+                raise HookConfigError(
+                    f"Codex hook field {event!r}.args must be a bounded array"
+                )
+            for index, argument in enumerate(args):
+                _raw_hook_string(
+                    argument,
+                    f"{event}.args[{index}]",
+                    maximum=16_384,
+                )
     for field in ("commandWindows", "statusMessage"):
         field_value = value.get(field)
         if field_value is not None:
@@ -523,7 +596,10 @@ def _load_document(path: Path) -> _LoadedDocument:
         _close_codex_directory(handle)
 
 
-def _remove_owned(document: dict[str, Any]) -> int:
+def _remove_owned(
+    document: dict[str, Any],
+    owned: Callable[[Mapping[str, Any]], bool] = is_switchboard_handler,
+) -> int:
     hooks = document.get("hooks")
     if not isinstance(hooks, dict):
         return 0
@@ -533,9 +609,7 @@ def _remove_owned(document: dict[str, Any]) -> int:
         retained_groups: list[dict[str, Any]] = []
         for group in groups:
             handlers = group["hooks"]
-            retained = [
-                handler for handler in handlers if not is_switchboard_handler(handler)
-            ]
+            retained = [handler for handler in handlers if not owned(handler)]
             removed += len(handlers) - len(retained)
             if retained:
                 group["hooks"] = retained
@@ -595,6 +669,7 @@ def _atomic_write(
     path: Path,
     payload: bytes,
     expected: _FileToken,
+    mode: int = 0o600,
 ) -> None:
     directory = handle.directory
     descriptor = -1
@@ -606,7 +681,7 @@ def _atomic_write(
                 "Codex hooks configuration changed before it could be updated"
             )
         descriptor, temporary = _temporary_file(directory, path)
-        os.fchmod(descriptor, 0o600)
+        os.fchmod(descriptor, mode)
         written = 0
         while written < len(payload):
             written += os.write(descriptor, payload[written:])
@@ -647,18 +722,21 @@ def _prepare_edit(
     executable: str | Path,
     timeout_seconds: int,
     dry_run: bool,
+    groups: Callable[..., dict[str, dict[str, Any]]] = canonical_hook_groups,
+    owned: Callable[[Mapping[str, Any]], bool] = is_switchboard_handler,
+    require_private_mode: bool = True,
 ) -> tuple[HookEditResult, bytes]:
     document = loaded.document
-    needs_private_mode = bool(loaded.exists and loaded.mode != 0o600)
+    needs_private_mode = bool(
+        require_private_mode and loaded.exists and loaded.mode != 0o600
+    )
     before = _encode(document) if loaded.exists else None
-    removed = _remove_owned(document)
+    removed = _remove_owned(document, owned)
     installed = 0
     if action == "install":
         hooks = document.setdefault("hooks", {})
         assert isinstance(hooks, dict)
-        for event, group in canonical_hook_groups(
-            executable, timeout_seconds=timeout_seconds
-        ).items():
+        for event, group in groups(executable, timeout_seconds=timeout_seconds).items():
             hooks.setdefault(event, []).append(group)
             installed += 1
     after = _encode(document)
@@ -711,17 +789,136 @@ def edit_codex_hooks(
         return result
 
 
+def edit_claude_hooks(
+    action: str,
+    *,
+    executable: str | Path,
+    timeout_seconds: int,
+    dry_run: bool = False,
+    environ: Mapping[str, str] | None = None,
+) -> HookEditResult:
+    """Install or uninstall only Switchboard-owned Claude user hooks."""
+
+    if action not in {"install", "uninstall"}:
+        raise HookConfigError("hook action must be install or uninstall")
+    try:
+        path = claude_settings_path(environ=environ)
+    except ValueError as error:
+        raise HookConfigError(str(error)) from error
+    if dry_run:
+        result, _payload = _prepare_edit(
+            action,
+            path=path,
+            loaded=_load_document(path),
+            executable=executable,
+            timeout_seconds=timeout_seconds,
+            dry_run=True,
+            groups=canonical_claude_hook_groups,
+            owned=is_claude_switchboard_handler,
+            require_private_mode=False,
+        )
+        return result
+
+    with _locked_codex_directory(path.parent) as handle:
+        loaded = _read_from_directory(
+            handle.directory,
+            path.name,
+            directory_identity=handle.identity,
+        )
+        result, payload = _prepare_edit(
+            action,
+            path=path,
+            loaded=loaded,
+            executable=executable,
+            timeout_seconds=timeout_seconds,
+            dry_run=False,
+            groups=canonical_claude_hook_groups,
+            owned=is_claude_switchboard_handler,
+            require_private_mode=False,
+        )
+        if result.changed:
+            _atomic_write(
+                handle,
+                path,
+                payload,
+                loaded.token,
+                mode=loaded.mode if loaded.mode is not None else 0o600,
+            )
+        return result
+
+
+def inspect_claude_hooks(
+    *, environ: Mapping[str, str] | None = None
+) -> ClaudeHooksInspection:
+    """Return only bounded Switchboard-like Claude hook metadata."""
+
+    try:
+        path = claude_settings_path(environ=environ)
+    except ValueError as error:
+        raise HookConfigError(str(error)) from error
+    document = _load_document(path).document
+    hooks = document.get("hooks", {})
+    assert isinstance(hooks, dict)
+    candidates: list[ClaudeHookCandidate] = []
+    for event, groups in hooks.items():
+        for group in groups:
+            for handler in group["hooks"]:
+                command = handler.get("command")
+                raw_args = handler.get("args")
+                args = (
+                    tuple(raw_args)
+                    if isinstance(raw_args, list)
+                    and all(isinstance(argument, str) for argument in raw_args)
+                    else None
+                )
+                looks_owned = bool(
+                    is_claude_switchboard_handler(handler)
+                    or handler.get("statusMessage") == CLAUDE_HOOK_STATUS_MESSAGE
+                    or args == ("event", "--provider", "claude")
+                )
+                if not looks_owned:
+                    continue
+                candidates.append(
+                    ClaudeHookCandidate(
+                        event,
+                        handler.get("type")
+                        if isinstance(handler.get("type"), str)
+                        else None,
+                        command if isinstance(command, str) else None,
+                        args,
+                        group.get("matcher")
+                        if isinstance(group.get("matcher"), str)
+                        else None,
+                        handler.get("timeout")
+                        if type(handler.get("timeout")) is int
+                        else None,
+                        handler.get("statusMessage")
+                        if isinstance(handler.get("statusMessage"), str)
+                        else None,
+                    )
+                )
+    return ClaudeHooksInspection(path, tuple(candidates))
+
+
 __all__ = [
     "APP_SERVER_EVENT_NAMES",
+    "CLAUDE_HOOK_EVENTS",
+    "CLAUDE_HOOK_STATUS_MESSAGE",
     "HOOK_EVENTS",
     "HOOK_STATUS_MESSAGE",
+    "ClaudeHookCandidate",
+    "ClaudeHooksInspection",
     "HookConfigError",
     "HookEditResult",
+    "canonical_claude_hook_groups",
     "canonical_hook_groups",
     "codex_home",
     "command_argv",
+    "edit_claude_hooks",
     "edit_codex_hooks",
     "hook_command",
+    "inspect_claude_hooks",
+    "is_claude_switchboard_handler",
     "is_switchboard_handler",
     "resolve_swbctl_executable",
 ]

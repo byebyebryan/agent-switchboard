@@ -27,15 +27,34 @@ _TURN_EVENTS: Final = frozenset(
         HookEvent.STOP,
     }
 )
+_CLAUDE_EVENTS: Final = frozenset(
+    {
+        HookEvent.SESSION_START,
+        HookEvent.USER_PROMPT_SUBMIT,
+        HookEvent.PERMISSION_REQUEST,
+        HookEvent.POST_TOOL_USE,
+        HookEvent.STOP,
+        HookEvent.SESSION_END,
+    }
+)
 _SESSION_START_SOURCES: Final = frozenset({"startup", "resume", "clear", "compact"})
 _TMUX_PANE = re.compile(r"^%[0-9]+$")
 _PROCESS_BIRTH_DIGEST_LENGTH: Final = 64
 _MAX_TMUX_SOCKET_LENGTH: Final = 4096
 _MAX_TMUX_PANE_LENGTH: Final = 256
+_MAX_PROC_HOOK_BYTES: Final = 4096
 
 
 class HookInputError(ValueError):
     """A hook payload cannot be accepted without risking incorrect state."""
+
+
+def _bounded_proc_ascii(path: Path) -> str:
+    with path.open("rb") as stream:
+        raw = stream.read(_MAX_PROC_HOOK_BYTES + 1)
+    if len(raw) > _MAX_PROC_HOOK_BYTES:
+        raise ValueError("process metadata exceeds hook bound")
+    return raw.decode("ascii")
 
 
 def _canonical_json(value: object) -> str:
@@ -73,6 +92,12 @@ def _canonical_uuid(payload: Mapping[str, Any], field: str) -> str:
     return value
 
 
+def _optional_canonical_uuid(payload: Mapping[str, Any], field: str) -> str | None:
+    if payload.get(field) is None:
+        return None
+    return _canonical_uuid(payload, field)
+
+
 def _json_depth(value: object) -> int:
     maximum = 1
     stack: list[tuple[object, int]] = [(value, 1)]
@@ -107,13 +132,11 @@ def read_hook_json(stream: BinaryIO) -> Mapping[str, Any]:
     return value
 
 
-def _linux_process_birth_id() -> str | None:
-    """Return an opaque birth token for the nearest Codex-like ancestor."""
+def _linux_process_identity(provider: str = "codex") -> tuple[int, str] | None:
+    """Return PID plus opaque birth token for the nearest provider ancestor."""
 
     try:
-        boot_id = (
-            Path("/proc/sys/kernel/random/boot_id").read_text(encoding="ascii").strip()
-        )
+        boot_id = _bounded_proc_ascii(Path("/proc/sys/kernel/random/boot_id")).strip()
     except (OSError, UnicodeError):
         return None
 
@@ -125,7 +148,7 @@ def _linux_process_birth_id() -> str | None:
             break
         seen.add(pid)
         try:
-            stat = (Path("/proc") / str(pid) / "stat").read_text(encoding="ascii")
+            stat = _bounded_proc_ascii(Path("/proc") / str(pid) / "stat")
             close = stat.rfind(")")
             fields = stat[close + 2 :].split()
             parent_pid = int(fields[1])
@@ -134,13 +157,24 @@ def _linux_process_birth_id() -> str | None:
         except (OSError, UnicodeError, ValueError, IndexError):
             break
         fallback = fallback or (pid, start_ticks)
-        if "codex" in comm:
-            fallback = (pid, start_ticks)
-            break
+        provider_process = (
+            comm == "claude" if provider == "claude" else provider in comm
+        )
+        if provider_process:
+            return pid, _digest({"boot": boot_id, "pid": pid, "start": start_ticks})
         pid = parent_pid
-    if fallback is None:
+    # Preserve the shipped Codex fallback. Claude identity must never bind to
+    # an intermediate hook shell when no Claude process was found.
+    if fallback is None or provider != "codex":
         return None
-    return _digest({"boot": boot_id, "pid": fallback[0], "start": fallback[1]})
+    return fallback[0], _digest(
+        {"boot": boot_id, "pid": fallback[0], "start": fallback[1]}
+    )
+
+
+def _linux_process_birth_id(provider: str = "codex") -> str | None:
+    identity = _linux_process_identity(provider)
+    return None if identity is None else identity[1]
 
 
 def _tmux_locator(environment: Mapping[str, str]) -> tuple[str | None, str | None]:
@@ -182,6 +216,7 @@ class NormalizedHookEvent:
     received_at: int
     launch_id: str | None
     surface_id: str | None
+    process_pid: int | None
     process_birth_id: str | None
     tmux_socket: str | None
     tmux_pane: str | None
@@ -204,6 +239,7 @@ class NormalizedHookEvent:
             "received_at": self.received_at,
             "launch_id": self.launch_id,
             "surface_id": self.surface_id,
+            "pid": self.process_pid,
             "process_birth_id": self.process_birth_id,
             "tmux_socket": self.tmux_socket,
             "tmux_pane": self.tmux_pane,
@@ -216,6 +252,7 @@ def normalize_codex_event(
     *,
     entry_ns: int | None = None,
     observed_at: int | None = None,
+    process_pid: int | None = None,
     process_birth_id: str | None = None,
 ) -> NormalizedHookEvent:
     """Allowlist Codex identity/lifecycle fields and discard everything else."""
@@ -265,9 +302,25 @@ def normalize_codex_event(
     ):
         raise HookInputError("hook observation time must be a non-negative integer")
 
-    birth_id = (
-        process_birth_id if process_birth_id is not None else _linux_process_birth_id()
+    discovered_identity = (
+        None
+        if process_birth_id is not None or process_pid is not None
+        else _linux_process_identity("codex")
     )
+    pid = process_pid if discovered_identity is None else discovered_identity[0]
+    birth_id = (
+        process_birth_id if discovered_identity is None else discovered_identity[1]
+    )
+    if pid is not None and (
+        isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0
+    ):
+        raise HookInputError("process PID must be a positive integer")
+    # Explicit test evidence may historically supply only the opaque birth
+    # token. Keep accepting it, but production discovery always supplies both.
+    if (pid is None) != (birth_id is None) and (
+        process_pid is not None or process_birth_id is None
+    ):
+        raise HookInputError("process PID and birth identity must agree")
     if birth_id is not None and (
         len(birth_id) != _PROCESS_BIRTH_DIGEST_LENGTH
         or any(character not in "0123456789abcdef" for character in birth_id)
@@ -323,6 +376,145 @@ def normalize_codex_event(
         received_at=timestamp_ms,
         launch_id=launch_id,
         surface_id=surface_id,
+        process_pid=pid,
+        process_birth_id=birth_id,
+        tmux_socket=tmux_socket,
+        tmux_pane=tmux_pane,
+    )
+
+
+def normalize_claude_event(
+    payload: Mapping[str, Any],
+    environment: Mapping[str, str],
+    *,
+    entry_ns: int | None = None,
+    observed_at: int | None = None,
+    process_pid: int | None = None,
+    process_birth_id: str | None = None,
+) -> NormalizedHookEvent:
+    """Allowlist Claude lifecycle identity without retaining private payloads."""
+
+    if not isinstance(payload, Mapping):
+        raise HookInputError("hook input must be one JSON object")
+    event_name = _bounded_string(payload, "hook_event_name", maximum=64)
+    try:
+        event_kind = HookEvent(event_name)
+    except ValueError as error:
+        raise HookInputError("unsupported Claude hook event") from error
+    if event_kind not in _CLAUDE_EVENTS:
+        raise HookInputError("unsupported Claude hook event")
+
+    provider_session_id = _canonical_uuid(payload, "session_id")
+    cwd = _bounded_string(payload, "cwd", maximum=4096)
+    if not Path(cwd).is_absolute():
+        raise HookInputError("hook field 'cwd' must be an absolute path")
+
+    provider_turn_id: str | None = None
+    tool_name: str | None = None
+    tool_use_id: str | None = None
+    source: str | None = None
+    reason: str | None = None
+    if event_kind in _TURN_EVENTS:
+        provider_turn_id = _canonical_uuid(payload, "prompt_id")
+    elif event_kind is HookEvent.SESSION_END:
+        provider_turn_id = _optional_canonical_uuid(payload, "prompt_id")
+    if event_kind in {HookEvent.PERMISSION_REQUEST, HookEvent.POST_TOOL_USE}:
+        tool_name = _bounded_string(payload, "tool_name", maximum=256)
+    if event_kind is HookEvent.POST_TOOL_USE:
+        tool_use_id = _bounded_string(payload, "tool_use_id", maximum=256)
+    if event_kind is HookEvent.SESSION_START:
+        source = _bounded_string(payload, "source", maximum=64)
+    if event_kind is HookEvent.SESSION_END:
+        reason = _bounded_string(payload, "reason", maximum=128)
+
+    timestamp_ns = time.time_ns() if entry_ns is None else entry_ns
+    if (
+        isinstance(timestamp_ns, bool)
+        or not isinstance(timestamp_ns, int)
+        or timestamp_ns < 0
+    ):
+        raise HookInputError("hook entry time must be a non-negative integer")
+    timestamp_ms = timestamp_ns // 1_000_000 if observed_at is None else observed_at
+    if (
+        isinstance(timestamp_ms, bool)
+        or not isinstance(timestamp_ms, int)
+        or timestamp_ms < 0
+    ):
+        raise HookInputError("hook observation time must be a non-negative integer")
+    discovered_identity = (
+        None
+        if process_birth_id is not None or process_pid is not None
+        else _linux_process_identity("claude")
+    )
+    pid = process_pid if discovered_identity is None else discovered_identity[0]
+    birth_id = (
+        process_birth_id if discovered_identity is None else discovered_identity[1]
+    )
+    if pid is not None and (
+        isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0
+    ):
+        raise HookInputError("process PID must be a positive integer")
+    if (pid is None) != (birth_id is None) and (
+        process_pid is not None or process_birth_id is None
+    ):
+        raise HookInputError("process PID and birth identity must agree")
+    if birth_id is not None and (
+        len(birth_id) != _PROCESS_BIRTH_DIGEST_LENGTH
+        or any(character not in "0123456789abcdef" for character in birth_id)
+    ):
+        raise HookInputError(
+            "process birth identity must be an opaque lowercase digest"
+        )
+
+    launch_id = environment.get("AGENT_SWITCHBOARD_LAUNCH_ID")
+    surface_id = environment.get("AGENT_SWITCHBOARD_SURFACE_ID")
+    if (launch_id is None) != (surface_id is None):
+        raise HookInputError("launch and surface identities must be supplied together")
+    if launch_id is not None:
+        launch_id = _canonical_uuid({"launch_id": launch_id}, "launch_id")
+        surface_id = _canonical_uuid({"surface_id": surface_id}, "surface_id")
+    tmux_socket, tmux_pane = _tmux_locator(environment)
+
+    identity: dict[str, object] = {
+        "provider": "claude",
+        "session": provider_session_id,
+        "event": event_kind.value,
+    }
+    if event_kind is HookEvent.SESSION_START:
+        identity.update(
+            source=source,
+            process=birth_id or "unknown",
+            occurrence_bucket=timestamp_ns // 1_000_000_000,
+        )
+    elif event_kind is HookEvent.SESSION_END:
+        identity.update(
+            prompt=provider_turn_id,
+            reason=reason,
+            process=birth_id or "unknown",
+            occurrence_bucket=timestamp_ns // 1_000_000_000,
+        )
+    else:
+        identity["prompt"] = provider_turn_id
+        if event_kind is HookEvent.PERMISSION_REQUEST:
+            identity["tool"] = tool_name
+        elif event_kind is HookEvent.POST_TOOL_USE:
+            identity["tool_use"] = tool_use_id
+
+    return NormalizedHookEvent(
+        provider="claude",
+        provider_session_id=provider_session_id,
+        cwd=cwd,
+        event_kind=event_kind,
+        provider_turn_id=provider_turn_id,
+        idempotency_key=f"hook:{_digest(identity)}",
+        source_priority=HOOK_SOURCE_PRIORITY,
+        kind_priority=hook_transition(event_kind).kind_priority,
+        entry_ns=timestamp_ns,
+        observed_at=timestamp_ms,
+        received_at=timestamp_ms,
+        launch_id=launch_id,
+        surface_id=surface_id,
+        process_pid=pid,
         process_birth_id=birth_id,
         tmux_socket=tmux_socket,
         tmux_pane=tmux_pane,
@@ -335,6 +527,7 @@ __all__ = [
     "MAX_HOOK_JSON_DEPTH",
     "HookInputError",
     "NormalizedHookEvent",
+    "normalize_claude_event",
     "normalize_codex_event",
     "read_hook_json",
 ]

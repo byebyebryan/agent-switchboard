@@ -71,6 +71,7 @@ def test_ci_smokes_wheel_and_source_distribution_installations() -> None:
         "agent_switchboard.live",
         "agent_switchboard.paths",
         "agent_switchboard.providers.codex",
+        "agent_switchboard.providers.claude",
         "agent_switchboard.reconcile",
         "agent_switchboard.snapshot",
     ):

@@ -21,6 +21,8 @@ from pathlib import Path
 from typing import Any, Final
 
 from .domain import (
+    Activity,
+    ActivityReason,
     Attachment,
     HandoffId,
     HostId,
@@ -215,6 +217,7 @@ _HOOK_EVENT_HASH_FIELDS: Final = (
     *_EVENT_HASH_FIELDS,
     "provider_session_id",
     "cwd",
+    "pid",
     "process_birth_id",
     "tmux_socket",
     "tmux_pane",
@@ -303,6 +306,7 @@ class _PreparedHookEvent:
     received_at: int
     launch_id: str | None
     surface_id: str | None
+    pid: int | None
     process_birth_id: str | None
     tmux_socket: str | None
     tmux_pane: str | None
@@ -522,8 +526,6 @@ def _prepare_hook_event(
 
     host_id = _canonical_host_id(event["host_id"])
     provider = _canonical_provider(event["provider"])
-    if provider != "codex":
-        raise StorageError("hook ingestion is not implemented for this provider")
     provider_session_id = _canonical_plain_uuid(
         event["provider_session_id"], "provider_session_id"
     )
@@ -535,7 +537,17 @@ def _prepare_hook_event(
         event_kind = HookEvent(event["event_kind"])
     except (TypeError, ValueError) as error:
         raise StorageError("unsupported normalized hook event") from error
-    if event_kind is HookEvent.SESSION_END:
+    allowed_events = {
+        "codex": {
+            HookEvent.SESSION_START,
+            HookEvent.USER_PROMPT_SUBMIT,
+            HookEvent.PERMISSION_REQUEST,
+            HookEvent.POST_TOOL_USE,
+            HookEvent.STOP,
+        },
+        "claude": set(HookEvent),
+    }
+    if event_kind not in allowed_events[provider]:
         raise StorageError("unsupported normalized hook event")
     transition = hook_transition(event_kind)
     kind_priority = _evidence_priority(event["kind_priority"], "kind_priority")
@@ -559,6 +571,7 @@ def _prepare_hook_event(
 
     idempotency_key = event["idempotency_key"]
     provider_turn_id = event.get("provider_turn_id")
+    pid = event.get("pid")
     process_birth_id = event.get("process_birth_id")
     tmux_socket = event.get("tmux_socket")
     tmux_pane = event.get("tmux_pane")
@@ -582,6 +595,14 @@ def _prepare_hook_event(
     if event_kind is HookEvent.SESSION_START:
         if provider_turn_id is not None:
             raise StorageError("SessionStart must not carry a provider turn ID")
+    elif event_kind is HookEvent.SESSION_END:
+        if provider_turn_id is not None and (
+            not isinstance(provider_turn_id, str)
+            or not 1 <= len(provider_turn_id) <= 256
+        ):
+            raise StorageError(
+                "SessionEnd provider turn ID must be null or a bounded string"
+            )
     elif not isinstance(provider_turn_id, str) or not 1 <= len(provider_turn_id) <= 256:
         raise StorageError("turn hook events require a bounded provider turn ID")
     if process_birth_id is not None and (
@@ -590,6 +611,12 @@ def _prepare_hook_event(
         or any(character not in "0123456789abcdef" for character in process_birth_id)
     ):
         raise StorageError("process birth ID must be an opaque lowercase digest")
+    if pid is not None and (
+        isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0
+    ):
+        raise StorageError("hook process PID must be a positive integer")
+    if pid is not None and process_birth_id is None:
+        raise StorageError("hook process PID requires a process birth ID")
     if (tmux_socket is None) != (tmux_pane is None):
         raise StorageError("tmux socket and pane must be supplied together")
     if tmux_socket is not None and (
@@ -643,6 +670,7 @@ def _prepare_hook_event(
         received_at=received_at,
         launch_id=launch_id,
         surface_id=surface_id,
+        pid=pid,
         process_birth_id=process_birth_id,
         tmux_socket=tmux_socket,
         tmux_pane=tmux_pane,
@@ -3233,7 +3261,9 @@ class Registry:
             event.provider_turn_id is not None
             and session["last_hook_turn_id"] == event.provider_turn_id
         )
-        if same_turn and event.source_priority == int(
+        if event.transition.activity is None:
+            activity_allowed = False
+        elif same_turn and event.source_priority == int(
             session["activity_source_priority"]
         ):
             stored_kind = session["last_hook_kind_priority"]
@@ -3254,9 +3284,10 @@ class Registry:
                 last_observed_at=max(
                     event.observed_at, int(session["last_observed_at"])
                 ),
-                last_activity_at=max(
-                    event.observed_at, int(session["last_activity_at"] or 0)
-                ),
+            )
+        if activity_allowed:
+            updates["last_activity_at"] = max(
+                event.observed_at, int(session["last_activity_at"] or 0)
             )
         if runtime_allowed:
             # A hook proves this runtime is live, but only the evidence carried
@@ -3274,7 +3305,7 @@ class Registry:
                 runtime_observed_at=event.observed_at,
                 runtime_source_priority=event.source_priority,
                 runtime_order_ns=max(event.entry_ns, int(session["runtime_order_ns"])),
-                runtime_pid=None,
+                runtime_pid=event.pid,
                 provider_runtime_id=None,
                 runtime_process_birth_id=event.process_birth_id,
                 tmux_session=None,
@@ -3351,8 +3382,8 @@ class Registry:
             ),
         )
 
-        assert event.transition.activity is not None
-        assert event.transition.activity_reason is not None
+        activity = event.transition.activity or Activity.UNKNOWN
+        activity_reason = event.transition.activity_reason or ActivityReason.UNKNOWN
         observation_key = f"event:{event.idempotency_key}"
         runtime_values = {
             "observation_key": observation_key,
@@ -3364,10 +3395,10 @@ class Registry:
             "source_priority": event.source_priority,
             "runtime_presence": event.transition.runtime_presence.value,
             "resumability": "unknown",
-            "activity": event.transition.activity.value,
-            "activity_reason": event.transition.activity_reason.value,
+            "activity": activity.value,
+            "activity_reason": activity_reason.value,
             "attachment": "unknown",
-            "pid": None,
+            "pid": event.pid,
             "provider_runtime_id": None,
             "tmux_session": None,
             "tmux_window": None,
@@ -3393,7 +3424,7 @@ class Registry:
                 tmux_window, tmux_pane, observed_at, received_at, payload_hash,
                 entry_ns, process_birth_id, tmux_socket
             ) VALUES (
-                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL,
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL,
                 NULL, ?, ?, ?, ?, ?, ?, ?
             )
             """,
@@ -3408,9 +3439,10 @@ class Registry:
                 event.source_priority,
                 event.transition.runtime_presence.value,
                 "unknown",
-                event.transition.activity.value,
-                event.transition.activity_reason.value,
+                activity.value,
+                activity_reason.value,
                 "unknown",
+                event.pid,
                 event.tmux_pane,
                 event.observed_at,
                 event.received_at,

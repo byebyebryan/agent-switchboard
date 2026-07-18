@@ -31,6 +31,7 @@ from agent_switchboard.storage import Registry
 
 ROOT = Path(__file__).parents[1]
 FAKE_CODEX = ROOT / "tests" / "fakes" / "fake_codex.py"
+FAKE_CLAUDE = ROOT / "tests" / "fakes" / "fake_claude.py"
 APP_DIR = "agent-switchboard"
 PROJECT_ID = "22222222-2222-4222-8222-222222222222"
 LOCATION_ID = "33333333-3333-4333-8333-333333333333"
@@ -61,10 +62,13 @@ def cli_environment(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> CliEnvir
     binary_directory.mkdir()
     executable = binary_directory / "codex"
     executable.symlink_to(FAKE_CODEX.resolve())
+    (binary_directory / "claude").symlink_to(FAKE_CLAUDE.resolve())
 
     plan = tmp_path / "plan.json"
     log = tmp_path / "fake-codex.log"
     plan.write_text("{}", encoding="utf-8")
+    claude_plan = tmp_path / "claude-plan.json"
+    claude_plan.write_text("{}", encoding="utf-8")
     monkeypatch.setenv("XDG_CONFIG_HOME", str(config_home))
     monkeypatch.setenv("XDG_STATE_HOME", str(state_home))
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
@@ -74,6 +78,10 @@ def cli_environment(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> CliEnvir
     )
     monkeypatch.setenv("FAKE_CODEX_PLAN", str(plan))
     monkeypatch.setenv("FAKE_CODEX_LOG", str(log))
+    monkeypatch.setenv("FAKE_CLAUDE_PLAN", str(claude_plan))
+    claude_settings = tmp_path / "home" / ".claude" / "settings.json"
+    claude_settings.parent.mkdir(parents=True)
+    claude_settings.write_text('{"disableAgentView":true}', encoding="utf-8")
     # CLI contract tests must never inspect the developer's real /proc or tmux
     # state. Live-reconciliation behavior is covered with isolated fakes.
     monkeypatch.setattr(
@@ -397,6 +405,35 @@ def test_event_write_lock_fails_within_hook_latency_budget(
     assert elapsed < 0.9
 
 
+def test_claude_event_cli_registers_one_privacy_safe_session(
+    cli_environment: CliEnvironment,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session_id = "77777777-7777-4777-8777-777777777777"
+    start = {
+        "session_id": session_id,
+        "cwd": "/work/claude-session",
+        "hook_event_name": "SessionStart",
+        "source": "startup",
+        "prompt": "SECRET prompt",
+        "transcript_path": "/private/SECRET.jsonl",
+    }
+    monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(start)))
+
+    assert main(["event", "--provider", "claude"]) == 0
+    assert capsys.readouterr().out == ""
+    with Registry(cli_environment.database) as registry:
+        sessions = [
+            session
+            for session in registry.list_sessions()
+            if session["provider"] == "claude"
+        ]
+    assert len(sessions) == 1
+    assert sessions[0]["provider_session_id"] == session_id
+    assert b"SECRET" not in cli_environment.database.read_bytes()
+
+
 def test_cli_has_no_config_override_flag(capsys: pytest.CaptureFixture[str]) -> None:
     with pytest.raises(SystemExit) as exit_info:
         main(["snapshot", "--json", "--config", "/tmp/config.toml"])
@@ -516,10 +553,15 @@ def test_full_reconcile_paginates_and_emits_one_private_safe_snapshot(
         thread(1)["id"],
         thread(2)["id"],
     ]
-    assert snapshot["capabilities"][0]["provider"] == "codex"
-    assert snapshot["capabilities"][0]["available"] is True
+    assert {item["provider"] for item in snapshot["capabilities"]} == {
+        "claude",
+        "codex",
+    }
+    codex = next(
+        item for item in snapshot["capabilities"] if item["provider"] == "codex"
+    )
+    assert codex["available"] is True
     assert snapshot["errors"] == []
-    assert "claude" not in raw
     for private_value in (
         "SECRET PREVIEW",
         "SECRET TRANSCRIPT",
@@ -630,10 +672,9 @@ def test_provider_failure_retains_rows_and_exits_successfully(
         item["sessionKey"] for item in seeded["sessions"]
     ]
     assert failed["sessions"][0]["resumability"] == "resumable"
-    assert failed["capabilities"][0]["available"] is False
-    assert expected_code in {
-        item["code"] for item in failed["capabilities"][0]["degradedReasons"]
-    }
+    codex = next(item for item in failed["capabilities"] if item["provider"] == "codex")
+    assert codex["available"] is False
+    assert expected_code in {item["code"] for item in codex["degradedReasons"]}
     assert [item["code"] for item in failed["errors"]][-1] == expected_code
     assert "SECRET provider failure payload" not in raw
 
@@ -675,10 +716,11 @@ def test_oversized_provider_integer_is_structured_and_retains_rows(
     assert [item["sessionKey"] for item in degraded["sessions"]] == [
         item["sessionKey"] for item in seeded["sessions"]
     ]
-    assert degraded["capabilities"][0]["available"] is False
-    assert degraded["capabilities"][0]["degradedReasons"][-1]["code"] == (
-        "app_server_malformed_json"
+    codex = next(
+        item for item in degraded["capabilities"] if item["provider"] == "codex"
     )
+    assert codex["available"] is False
+    assert codex["degradedReasons"][-1]["code"] == ("app_server_malformed_json")
     assert degraded["errors"][-1]["code"] == "app_server_malformed_json"
     assert private_marker not in raw
 
@@ -756,7 +798,10 @@ def test_list_refresh_uses_the_snapshot_envelope_and_refreshes_codex(
         "errors",
     }
     assert snapshot["sessions"][0]["providerSessionId"] == thread(7)["id"]
-    assert snapshot["capabilities"][0]["available"] is True
+    codex = next(
+        item for item in snapshot["capabilities"] if item["provider"] == "codex"
+    )
+    assert codex["available"] is True
 
 
 def test_disabled_codex_is_not_invoked_or_reported(
@@ -770,7 +815,8 @@ def test_disabled_codex_is_not_invoked_or_reported(
         ["snapshot", "--reconcile", "full", "--json"],
     )
 
-    assert snapshot["capabilities"] == []
+    assert [item["provider"] for item in snapshot["capabilities"]] == ["claude"]
+    assert snapshot["capabilities"][0]["available"] is True
     assert snapshot["errors"] == []
     assert not cli_environment.log.exists()
 

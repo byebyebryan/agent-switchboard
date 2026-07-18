@@ -154,6 +154,22 @@ class ProcessScan:
 
 
 @dataclass(frozen=True, slots=True)
+class ProcessIdentity:
+    pid: int
+    parent_pid: int
+    start_ticks: str
+    birth_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class ProcessIdentityScan:
+    processes: tuple[ProcessIdentity, ...]
+    parents: Mapping[int, int]
+    complete: bool
+    issues: tuple[RuntimeProbeIssue, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class TmuxPaneEvidence:
     socket: str
     pane_id: str
@@ -380,6 +396,86 @@ def scan_codex_processes(
     return ProcessScan(tuple(processes), parents, complete, tuple(issues))
 
 
+def scan_process_identities(
+    *,
+    proc_root: Path = Path("/proc"),
+    uid: int | None = None,
+) -> ProcessIdentityScan:
+    """Return bounded same-UID PID birth evidence without reading argv or FDs."""
+
+    expected_uid = os.getuid() if uid is None else uid
+    try:
+        boot_id = (
+            _bounded_bytes(proc_root / "sys/kernel/random/boot_id", 256)
+            .decode("ascii")
+            .strip()
+        )
+        UUID(boot_id)
+        entries = sorted(
+            (entry for entry in proc_root.iterdir() if entry.name.isdecimal()),
+            key=lambda entry: int(entry.name),
+        )
+    except (OSError, UnicodeError, ValueError) as error:
+        return ProcessIdentityScan(
+            (),
+            {},
+            False,
+            (
+                RuntimeProbeIssue(
+                    "process_probe_unavailable",
+                    f"Linux process liveness is unavailable: {type(error).__name__}.",
+                ),
+            ),
+        )
+    if len(entries) > MAX_PROC_PIDS:
+        return ProcessIdentityScan(
+            (),
+            {},
+            False,
+            (
+                RuntimeProbeIssue(
+                    "process_probe_truncated",
+                    "Linux process enumeration exceeded the safe PID bound.",
+                ),
+            ),
+        )
+    complete = True
+    parents: dict[int, int] = {}
+    processes: list[ProcessIdentity] = []
+    for entry in entries:
+        pid = int(entry.name)
+        try:
+            if entry.stat().st_uid != expected_uid:
+                continue
+            parent_pid, start_ticks = _process_stat(entry / "stat")
+        except FileNotFoundError:
+            continue
+        except (OSError, UnicodeError, ValueError):
+            complete = False
+            continue
+        parents[pid] = parent_pid
+        processes.append(
+            ProcessIdentity(
+                pid,
+                parent_pid,
+                start_ticks,
+                _digest({"boot": boot_id, "pid": pid, "start": start_ticks}),
+            )
+        )
+    issues = (
+        (
+            RuntimeProbeIssue(
+                "process_probe_incomplete",
+                "Some same-user process evidence could not be read; retained "
+                "runtime state was not destructively changed.",
+            ),
+        )
+        if not complete
+        else ()
+    )
+    return ProcessIdentityScan(tuple(processes), parents, complete, issues)
+
+
 def _default_tmux_runner(
     argv: Sequence[str], timeout: float
 ) -> subprocess.CompletedProcess[bytes]:
@@ -603,8 +699,16 @@ def _pane_for_process(
     panes: Sequence[TmuxPaneEvidence],
     parents: Mapping[int, int],
 ) -> TmuxPaneEvidence | None:
+    return _pane_for_pid(process.pid, panes, parents)
+
+
+def _pane_for_pid(
+    pid: int,
+    panes: Sequence[TmuxPaneEvidence],
+    parents: Mapping[int, int],
+) -> TmuxPaneEvidence | None:
     distances: dict[int, int] = {}
-    current = process.pid
+    current = pid
     for distance in range(MAX_ANCESTRY_DEPTH + 1):
         if current <= 0 or current in distances:
             break
@@ -670,6 +774,7 @@ def _error_record(
     issue: RuntimeProbeIssue,
     host_id: HostId,
     observed_at: int,
+    provider: ProviderId = ProviderId.CODEX,
 ) -> ErrorRecord:
     session_key = (
         None if issue.session_key is None else SessionKey.parse(issue.session_key)
@@ -683,7 +788,7 @@ def _error_record(
             issue.retryable,
             observed_at,
             host_id=host_id,
-            provider=ProviderId.CODEX,
+            provider=provider if session_key is None else session_key.provider,
             session_key=session_key,
         ).to_dict()
     )
@@ -716,20 +821,37 @@ def reconcile_live(
     ):
         raise StorageError("entry_ns must be a non-negative integer")
     observed_at = timestamp_ns // 1_000_000
+    all_sessions = tuple(registry.list_sessions(host_id=host_id))
     sessions = tuple(
-        row
-        for row in registry.list_sessions(host_id=host_id)
-        if row["provider"] == ProviderId.CODEX.value
+        row for row in all_sessions if row["provider"] == ProviderId.CODEX.value
+    )
+    claude_sessions = tuple(
+        sorted(
+            (row for row in all_sessions if row["provider"] == ProviderId.CLAUDE.value),
+            key=lambda row: (
+                int(row["runtime_order_ns"]),
+                int(row["last_observed_at"]),
+                str(row["session_key"]),
+            ),
+            reverse=True,
+        )
     )
 
     process_scan = scan_codex_processes(proc_root=proc_root, uid=uid)
+    claude_process_scan = (
+        scan_process_identities(proc_root=proc_root, uid=uid)
+        if claude_sessions
+        else ProcessIdentityScan((), {}, True, ())
+    )
     env = os.environ if environment is None else environment
     sockets: list[str | None] = [None]
     current_socket = _current_tmux_socket(env)
     if current_socket is not None:
         sockets.append(current_socket)
     sockets.extend(
-        str(row["tmux_socket"]) for row in sessions if row["tmux_socket"] is not None
+        str(row["tmux_socket"])
+        for row in all_sessions
+        if row["tmux_socket"] is not None
     )
     tmux_scan = scan_tmux_panes(
         sockets,
@@ -737,6 +859,9 @@ def reconcile_live(
         socket_lstat=tmux_socket_lstat,
     )
     issues = [*process_scan.issues, *tmux_scan.issues]
+    claude_issues = (
+        [*claude_process_scan.issues, *tmux_scan.issues] if claude_sessions else []
+    )
 
     by_pid = {process.pid: process for process in process_scan.processes}
     by_birth: dict[str, list[ProcessEvidence]] = {}
@@ -877,10 +1002,133 @@ def reconcile_live(
             )
         )
 
+    claude_by_pid = {process.pid: process for process in claude_process_scan.processes}
+    claimed_claude_pids: set[int] = set()
+
+    def stop_claude_session(
+        key: SessionKey, *, reason: str
+    ) -> NormalizedRuntimeObservation:
+        attachment = Attachment.NONE if tmux_scan.complete else None
+        values = {
+            "session": str(key),
+            "presence": RuntimePresence.STOPPED.value,
+            "resumability": "resumable",
+            "reason": reason,
+            "tmux_observed": tmux_scan.complete,
+            "attachment": None if attachment is None else attachment.value,
+        }
+        return NormalizedRuntimeObservation(
+            f"live:{_digest(values)}",
+            parsed_host,
+            ProviderId.CLAUDE,
+            key,
+            "liveness",
+            LIVE_SOURCE_PRIORITY,
+            timestamp_ns,
+            observed_at,
+            runtime_presence=RuntimePresence.STOPPED,
+            resumability="resumable",
+            attachment=attachment,
+            tmux_observed=tmux_scan.complete,
+        )
+
+    for row in claude_sessions:
+        key = SessionKey.parse(str(row["session_key"]))
+        stored_pid = row["runtime_pid"]
+        stored_birth = row["runtime_process_birth_id"]
+        process: ProcessIdentity | None = None
+        if stored_pid is not None and stored_birth is not None:
+            candidate = claude_by_pid.get(int(stored_pid))
+            if candidate is not None and candidate.birth_id == stored_birth:
+                process = candidate
+        elif stored_birth is not None:
+            claude_issues.append(
+                RuntimeProbeIssue(
+                    "runtime_locator_incomplete",
+                    "Claude runtime evidence lacks the PID required for "
+                    "exact validation.",
+                    session_key=str(key),
+                )
+            )
+            continue
+
+        if process is None:
+            if (
+                claude_process_scan.complete
+                and stored_pid is not None
+                and stored_birth is not None
+            ):
+                observations.append(
+                    stop_claude_session(key, reason="exact_process_absent")
+                )
+            continue
+
+        if process.pid in claimed_claude_pids:
+            # Claude /resume switching reuses one CLI process. The newest hook
+            # identity owns that process; older identities remain resumable.
+            observations.append(
+                stop_claude_session(key, reason="process_rebound_to_newer_session")
+            )
+            continue
+        claimed_claude_pids.add(process.pid)
+
+        pane = _pane_for_pid(process.pid, tmux_scan.panes, claude_process_scan.parents)
+        if pane is not None and (
+            row["tmux_socket"] is None
+            or row["tmux_pane"] is None
+            or pane.socket != row["tmux_socket"]
+            or pane.pane_id != row["tmux_pane"]
+        ):
+            # A hook may prove the process without granting ownership of an
+            # arbitrary inherited tmux pane.
+            pane = None
+        tmux_observed = pane is not None or tmux_scan.complete
+        attachment = None
+        if pane is not None:
+            attachment = Attachment.ATTACHED if pane.attached else Attachment.DETACHED
+        elif tmux_scan.complete and row["tmux_socket"] is not None:
+            attachment = Attachment.NONE
+        values = {
+            "session": str(key),
+            "pid": process.pid,
+            "birth": process.birth_id,
+            "socket": None if pane is None else pane.socket,
+            "pane": None if pane is None else pane.pane_id,
+            "attached": None if attachment is None else attachment.value,
+        }
+        observations.append(
+            NormalizedRuntimeObservation(
+                f"live:{_digest(values)}",
+                parsed_host,
+                ProviderId.CLAUDE,
+                key,
+                "liveness",
+                LIVE_SOURCE_PRIORITY,
+                timestamp_ns,
+                observed_at,
+                runtime_presence=RuntimePresence.LIVE,
+                resumability="resumable",
+                attachment=attachment,
+                pid=process.pid,
+                process_birth_id=process.birth_id,
+                tmux_observed=tmux_observed,
+                tmux_socket=None if pane is None else pane.socket,
+                tmux_session=None if pane is None else pane.session,
+                tmux_window=None if pane is None else pane.window,
+                tmux_pane=None if pane is None else pane.pane_id,
+            )
+        )
+
     application = registry.apply_runtime_observations(tuple(observations))
-    errors = tuple(
-        _error_record(issue, parsed_host, observed_at)
-        for issue in dict.fromkeys(issues)
+    errors = (
+        *(
+            _error_record(issue, parsed_host, observed_at, ProviderId.CODEX)
+            for issue in dict.fromkeys(issues)
+        ),
+        *(
+            _error_record(issue, parsed_host, observed_at, ProviderId.CLAUDE)
+            for issue in dict.fromkeys(claude_issues)
+        ),
     )
     return LiveReconciliationResult(application, errors)
 
@@ -889,11 +1137,14 @@ __all__ = [
     "LIVE_SOURCE_PRIORITY",
     "LiveReconciliationResult",
     "ProcessEvidence",
+    "ProcessIdentity",
+    "ProcessIdentityScan",
     "ProcessScan",
     "RuntimeProbeIssue",
     "TmuxPaneEvidence",
     "TmuxScan",
     "reconcile_live",
     "scan_codex_processes",
+    "scan_process_identities",
     "scan_tmux_panes",
 ]

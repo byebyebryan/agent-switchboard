@@ -10,10 +10,10 @@ import time
 from collections.abc import Sequence
 
 from . import __version__
-from .config import ConfigError, HooksConfig, SwitchboardConfig, load_config
-from .doctor import run_doctor
+from .config import SwitchboardConfig, load_config
+from .doctor import run_all_doctors
 from .domain import HostId, PresentationContext, ProviderId, ValidationError
-from .hook_config import edit_codex_hooks, resolve_swbctl_executable
+from .hook_config import edit_claude_hooks, edit_codex_hooks, resolve_swbctl_executable
 from .hooks import HookInputError
 from .live import reconcile_live
 from .local import build_local_snapshot_json, materialize_configured_projects
@@ -73,7 +73,7 @@ def build_parser() -> argparse.ArgumentParser:
     list_command.add_argument(
         "--refresh",
         action="store_true",
-        help="refresh Codex before reading",
+        help="refresh enabled providers before reading",
     )
     list_command.add_argument("--json", action="store_true", required=True)
 
@@ -81,7 +81,7 @@ def build_parser() -> argparse.ArgumentParser:
         "event",
         help="ingest one provider lifecycle event from standard input",
     )
-    event.add_argument("--provider", choices=("codex",), required=True)
+    event.add_argument("--provider", choices=("codex", "claude"), required=True)
 
     hooks = commands.add_parser(
         "hooks",
@@ -90,7 +90,9 @@ def build_parser() -> argparse.ArgumentParser:
     hook_actions = hooks.add_subparsers(dest="hook_action", required=True)
     for action in ("install", "uninstall"):
         hook_action = hook_actions.add_parser(action)
-        hook_action.add_argument("--provider", choices=("codex",), required=True)
+        hook_action.add_argument(
+            "--provider", choices=("codex", "claude"), required=True
+        )
         hook_action.add_argument("--dry-run", action="store_true")
 
     commands.add_parser(
@@ -142,16 +144,6 @@ def build_parser() -> argparse.ArgumentParser:
     )
     bootstrap.add_argument("launch_id")
     return parser
-
-
-def _codex_executable() -> tuple[str, HooksConfig]:
-    config = load_config(host_id=_EPHEMERAL_CONFIG_HOST_ID)
-    for provider in config.providers:
-        if provider.provider is ProviderId.CODEX:
-            if not provider.enabled:
-                raise ConfigError("providers.codex is disabled")
-            return provider.executable or "codex", config.hooks
-    raise ConfigError("providers.codex is unavailable")
 
 
 def _configured_codex_executable(config: SwitchboardConfig) -> str | None:
@@ -294,7 +286,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         try:
             config = load_config(host_id=_EPHEMERAL_CONFIG_HOST_ID)
             executable = resolve_swbctl_executable()
-            result = edit_codex_hooks(
+            editor = (
+                edit_codex_hooks if arguments.provider == "codex" else edit_claude_hooks
+            )
+            result = editor(
                 arguments.hook_action,
                 executable=executable,
                 timeout_seconds=config.hooks.timeout_seconds,
@@ -310,18 +305,18 @@ def main(argv: Sequence[str] | None = None) -> int:
                 if arguments.hook_action == "install"
                 else "not installed"
             )
-        print(f"Codex hooks {qualifier}: {result.path}")
-        if arguments.hook_action == "install":
+        provider_name = "Codex" if arguments.provider == "codex" else "Claude"
+        print(f"{provider_name} hooks {qualifier}: {result.path}")
+        if arguments.hook_action == "install" and arguments.provider == "codex":
             print("Review and trust the Agent Switchboard hooks with Codex /hooks.")
         return 0
 
     if arguments.command == "doctor":
         try:
-            codex_executable, hooks_config = _codex_executable()
-            result = run_doctor(
-                codex_executable=codex_executable,
+            config = load_config(host_id=_EPHEMERAL_CONFIG_HOST_ID)
+            result = run_all_doctors(
+                config=config,
                 swbctl_executable=resolve_swbctl_executable(),
-                hooks=hooks_config,
             )
         except (ValidationError, OSError, ValueError) as error:
             print(f"swbctl: {_safe_error_message(error)}", file=sys.stderr)

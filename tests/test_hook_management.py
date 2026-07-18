@@ -12,7 +12,7 @@ import pytest
 import agent_switchboard.cli as cli_module
 import agent_switchboard.hook_config as hook_config_module
 from agent_switchboard.config import ConfigError, HooksConfig, parse_config
-from agent_switchboard.doctor import DoctorResult, run_doctor
+from agent_switchboard.doctor import CombinedDoctorResult, DoctorResult, run_doctor
 from agent_switchboard.domain import HostId
 from agent_switchboard.hook_config import (
     HOOK_EVENTS,
@@ -876,24 +876,24 @@ def test_doctor_cli_returns_health_exit_status(
 ) -> None:
     swbctl = tmp_path / "swbctl"
     swbctl.touch(mode=0o755)
-    monkeypatch.setattr(
-        cli_module,
-        "_codex_executable",
-        lambda: ("codex", HooksConfig()),
-    )
     monkeypatch.setattr(cli_module, "resolve_swbctl_executable", lambda: swbctl)
     monkeypatch.setattr(
         cli_module,
-        "run_doctor",
-        lambda **_options: DoctorResult(True, "0.144.4", 1.0, 2.0, ()),
+        "run_all_doctors",
+        lambda **_options: CombinedDoctorResult(
+            True, (("Codex", DoctorResult(True, "0.144.4", 1.0, 2.0, ())),)
+        ),
     )
     assert cli_module.main(["doctor"]) == 0
     assert "doctor: healthy" in capsys.readouterr().out
 
     monkeypatch.setattr(
         cli_module,
-        "run_doctor",
-        lambda **_options: DoctorResult(False, "0.144.4", None, None, ()),
+        "run_all_doctors",
+        lambda **_options: CombinedDoctorResult(
+            False,
+            (("Codex", DoctorResult(False, "0.144.4", None, None, ())),),
+        ),
     )
     assert cli_module.main(["doctor"]) == 1
     assert "doctor: unhealthy" in capsys.readouterr().out
