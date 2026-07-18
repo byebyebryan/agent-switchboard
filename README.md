@@ -19,9 +19,9 @@ the Phase 3B core path for new project-aware Codex sessions:
 - provider-neutral domain and state models
 - versioned machine protocols and privacy validation
 - SQLite schema, migrations, and registry operations
-- production Codex `0.144.4` app-server discovery, normalization, atomic
+- production Codex `0.144.6` app-server discovery, normalization, atomic
   reconciliation, and canonical local snapshots
-- bounded Claude Code `2.1.210` capability detection for the
+- bounded Claude Code `2.1.214` capability detection for the
   Agent-View-disabled profile without supervisor or transcript discovery
 - retained no-refresh reads, structured provider degradation, and explicit
   snapshot-session truncation
@@ -40,6 +40,8 @@ the Phase 3B core path for new project-aware Codex sessions:
 - atomic existing-Codex preparation with live-pane adoption, resumable-session
   leases, waiting bootstrap, idempotent retries, and a final duplicate-runtime
   check before `codex resume`
+- atomic existing-Claude preparation through the same managed-tmux lifecycle,
+  with forced disabled Agent View and exact `claude --resume` execution
 - exact process/session/tmux correlation that can atomically finish a pending
   resume when Codex omits the expected start hook
 - atomic project/location resolution and new-Codex preparation with an unbound
@@ -51,8 +53,10 @@ the Phase 3B core path for new project-aware Codex sessions:
 
 Phase 3B implementation and live acceptance are complete in the core and
 separate DMS adapter. Phase 2B implementation, Agent View cutover, and live
-acceptance are also complete. Phase 3C then reuses the Codex managed-tmux
-lifecycle for Claude and adds DMS session/history actions.
+acceptance are also complete. The first Phase 3C increment now reuses the Codex
+managed-tmux lifecycle for known Claude sessions and projects them through the
+separate DMS adapter. Its contract, verification, and remaining live-compositor
+caveat are recorded in [`docs/phase-3c-plan.md`](docs/phase-3c-plan.md).
 The searchable TUI remains Phase 4 and remote SSH transport remains Phase 5. See
 [the design](docs/design.md), the
 [Phase 1 validation record](docs/phase-1-validation.md), and the

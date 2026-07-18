@@ -38,6 +38,7 @@ def test_static_pep_621_metadata_and_stdlib_runtime() -> None:
         "docs/phase-2b-plan.md",
         "docs/phase-3a-validation.md",
         "docs/phase-3b-plan.md",
+        "docs/phase-3c-plan.md",
     ]
     assert metadata["tool"]["pytest"]["ini_options"]["pythonpath"] == ["src"]
 
@@ -91,6 +92,7 @@ def test_ci_smokes_wheel_and_source_distribution_installations() -> None:
     assert '"docs/phase-2b-plan.md"' in verifier
     assert '"docs/phase-3a-validation.md"' in verifier
     assert '"docs/phase-3b-plan.md"' in verifier
+    assert '"docs/phase-3c-plan.md"' in verifier
     assert '"agent_switchboard/migrations/v0003_name_provenance_runtime_index.py"' in (
         verifier
     )

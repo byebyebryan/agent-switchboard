@@ -42,6 +42,9 @@ from .tmux import (
 PREPARE_CAPABILITY_HASH = hashlib.sha256(
     b"agent-switchboard:phase-3a:local-codex-existing-session"
 ).hexdigest()
+PREPARE_CLAUDE_CAPABILITY_HASH = hashlib.sha256(
+    b"agent-switchboard:phase-3c:local-claude-existing-session"
+).hexdigest()
 PREPARE_NEW_CAPABILITY_HASH = hashlib.sha256(
     b"agent-switchboard:phase-3b:local-codex-new-session"
 ).hexdigest()
@@ -109,7 +112,7 @@ def _synchronize_bound_new_metadata(
 
 
 class LaunchCoordinator:
-    """Prepare local Codex surfaces without exposing provider or tmux internals."""
+    """Prepare local managed surfaces without exposing provider or tmux internals."""
 
     def __init__(
         self,
@@ -119,6 +122,7 @@ class LaunchCoordinator:
         tmux: TmuxController,
         swbctl_executable: str | Path,
         codex_executable: str | None = "codex",
+        claude_executable: str | None = "claude",
         projects: Sequence[Project] = (),
         locations: Sequence[ProjectLocation] = (),
         naming_prefix: str = "as",
@@ -132,6 +136,7 @@ class LaunchCoordinator:
         self.tmux = tmux
         self.swbctl_executable = str(swbctl_executable)
         self.codex_executable = codex_executable
+        self.claude_executable = claude_executable
         self.projects = {str(project.project_id): project for project in projects}
         self.locations = {str(location.location_id): location for location in locations}
         self.naming_prefix = naming_prefix.replace(".", "-")
@@ -141,10 +146,12 @@ class LaunchCoordinator:
         self.cwd_reader = cwd_reader
         if not Path(self.swbctl_executable).is_absolute():
             raise PresentationError("swbctl executable must be an absolute path")
-        if self.codex_executable is not None and (
-            not self.codex_executable or "\x00" in self.codex_executable
+        for provider_name, executable in (
+            ("Codex", self.codex_executable),
+            ("Claude", self.claude_executable),
         ):
-            raise PresentationError("Codex executable is invalid")
+            if executable is not None and (not executable or "\x00" in executable):
+                raise PresentationError(f"{provider_name} executable is invalid")
         if not self.naming_prefix:
             raise PresentationError("tmux naming prefix is invalid")
         if not 1 <= self.launch_timeout_seconds <= 300:
@@ -299,13 +306,6 @@ class LaunchCoordinator:
                 parsed_key,
                 now,
             )
-        if parsed_key.provider is not ProviderId.CODEX:
-            return self._blocked(
-                "provider_open_not_supported",
-                "This phase can open only existing Codex sessions.",
-                parsed_key,
-                now,
-            )
         session = self.registry.get_session(str(parsed_key))
         if session is None:
             return self._blocked(
@@ -323,14 +323,15 @@ class LaunchCoordinator:
         if session["resumability"] != "resumable":
             return self._blocked(
                 "session_not_resumable",
-                "The selected Codex session is not currently resumable.",
+                "The selected session is not currently resumable.",
                 parsed_key,
                 now,
             )
-        if self.codex_executable is None:
+        if self._provider_executable(parsed_key.provider) is None:
             return self._blocked(
                 "provider_unavailable",
-                "Codex is disabled in the current host configuration.",
+                f"{self._provider_label(parsed_key.provider)} is disabled in the "
+                "current host configuration.",
                 parsed_key,
                 now,
             )
@@ -353,6 +354,15 @@ class LaunchCoordinator:
             context=context,
             now=now,
         )
+
+    def _provider_executable(self, provider: ProviderId) -> str | None:
+        if provider is ProviderId.CODEX:
+            return self.codex_executable
+        return self.claude_executable
+
+    @staticmethod
+    def _provider_label(provider: ProviderId) -> str:
+        return "Codex" if provider is ProviderId.CODEX else "Claude"
 
     @staticmethod
     def _session_key(value: str) -> SessionKey:
@@ -392,7 +402,7 @@ class LaunchCoordinator:
             )
         if (
             surface["host_id"] != str(self.host_id)
-            or surface["provider"] != "codex"
+            or surface["provider"] != session_key.provider.value
             or surface["role"] != "session"
             or surface["retired_at"] is not None
             or surface["current_session_key"] != str(session_key)
@@ -431,6 +441,7 @@ class LaunchCoordinator:
             observed,
             surface_id=surface_id,
             session_key=str(session_key),
+            provider=session_key.provider.value,
             launch_id=surface.get("launch_id"),
         ):
             return self._blocked(
@@ -455,7 +466,7 @@ class LaunchCoordinator:
         if not isinstance(socket, str) or not isinstance(pane, str):
             return self._blocked(
                 "unmanaged_surface",
-                "The live Codex runtime has no trustworthy tmux surface locator.",
+                "The live runtime has no trustworthy tmux surface locator.",
                 session_key,
                 now,
             )
@@ -464,7 +475,7 @@ class LaunchCoordinator:
         except TmuxError:
             return self._blocked(
                 "unmanaged_surface",
-                "The live Codex runtime's tmux surface could not be verified.",
+                "The live runtime's tmux surface could not be verified.",
                 session_key,
                 now,
                 retryable=True,
@@ -492,7 +503,7 @@ class LaunchCoordinator:
         surface = {
             "surface_id": surface_id,
             "host_id": str(self.host_id),
-            "provider": "codex",
+            "provider": session_key.provider.value,
             "transport": "tmux",
             "transport_locator": observed.locator.to_storage(),
             "workspace_id": observed.locator.session,
@@ -521,7 +532,7 @@ class LaunchCoordinator:
                 observed.locator,
                 surface_id=surface_id,
                 session_key=str(session_key),
-                provider="codex",
+                provider=session_key.provider.value,
                 launch_id=None,
                 role="session",
             )
@@ -533,6 +544,7 @@ class LaunchCoordinator:
             verified,
             surface_id=surface_id,
             session_key=str(session_key),
+            provider=session_key.provider.value,
             launch_id=None,
         ):
             self.registry.retire_surface(surface_id, observed_at=max(now, self.clock()))
@@ -548,11 +560,12 @@ class LaunchCoordinator:
         context: PresentationContext,
         now: int,
     ) -> PresentationPlan:
+        provider = session_key.provider
         launch_id = str(uuid.uuid4())
         lease_owner = self._lease_owner(launch_id)
         request = {
             "host_id": str(self.host_id),
-            "provider": "codex",
+            "provider": provider.value,
             "action": "resume",
             "project_id": None,
             "location_id": None,
@@ -567,7 +580,11 @@ class LaunchCoordinator:
                 request_id=request_id,
                 launch_id=launch_id,
                 lease_owner=lease_owner,
-                capability_hash=PREPARE_CAPABILITY_HASH,
+                capability_hash=(
+                    PREPARE_CAPABILITY_HASH
+                    if provider is ProviderId.CODEX
+                    else PREPARE_CLAUDE_CAPABILITY_HASH
+                ),
                 expires_at=now + self.launch_timeout_seconds * 1_000,
                 created_at=now,
             )
@@ -584,19 +601,22 @@ class LaunchCoordinator:
 
         surface_id = str(uuid.uuid4())
         session_name = f"{self.naming_prefix}-{surface_id[:12]}"
+        environment = {
+            "AGENT_SWITCHBOARD_LAUNCH_ID": launch_id,
+            "AGENT_SWITCHBOARD_SURFACE_ID": surface_id,
+        }
+        if provider is ProviderId.CLAUDE:
+            environment["CLAUDE_CODE_DISABLE_AGENT_VIEW"] = "1"
         observed: TmuxSurfaceObservation | None = None
         try:
             observed = self.tmux.create_surface(
                 name=session_name,
                 cwd=Path(str(session["cwd"])),
                 command=(self.swbctl_executable, "bootstrap", launch_id),
-                environment={
-                    "AGENT_SWITCHBOARD_LAUNCH_ID": launch_id,
-                    "AGENT_SWITCHBOARD_SURFACE_ID": surface_id,
-                },
+                environment=environment,
                 surface_id=surface_id,
                 session_key=str(session_key),
-                provider="codex",
+                provider=provider.value,
                 launch_id=launch_id,
                 role="session",
             )
@@ -605,7 +625,7 @@ class LaunchCoordinator:
                 {
                     "surface_id": surface_id,
                     "host_id": str(self.host_id),
-                    "provider": "codex",
+                    "provider": provider.value,
                     "transport": "tmux",
                     "transport_locator": observed.locator.to_storage(),
                     "workspace_id": observed.locator.session,
@@ -791,6 +811,7 @@ class LaunchCoordinator:
             observed,
             surface_id=surface_id,
             session_key=(str(session_key) if session_key is not None else None),
+            provider=str(launch["provider"]),
             launch_id=str(launch["launch_id"]),
         ):
             return self._blocked_target(
@@ -809,13 +830,14 @@ class LaunchCoordinator:
         *,
         surface_id: str,
         session_key: str | None,
+        provider: str,
         launch_id: object,
     ) -> bool:
         metadata = observed.metadata
         return (
             metadata.surface_id == surface_id
             and metadata.session_key == session_key
-            and metadata.provider == "codex"
+            and metadata.provider == provider
             and metadata.launch_id == launch_id
             and metadata.role == "session"
         )
@@ -1025,12 +1047,18 @@ class LaunchCoordinator:
             launch = self.registry.get_launch(launch_id)
         if launch is None:
             raise PresentationError("unknown bootstrap launch")
+        try:
+            provider = ProviderId(str(launch["provider"]))
+        except (TypeError, ValueError) as error:
+            raise PresentationError(
+                "bootstrap launch has an invalid provider"
+            ) from error
         if (
             launch["host_id"] != str(self.host_id)
-            or launch["provider"] != "codex"
             or launch["action"] not in {"new", "resume"}
+            or (provider is ProviderId.CLAUDE and launch["action"] != "resume")
         ):
-            raise PresentationError("bootstrap launch is not a local Codex session")
+            raise PresentationError("bootstrap launch is not a supported local session")
         if launch["state"] != "waiting_for_client":
             return 0 if launch["state"] == "bound" else 1
         surface_id = launch.get("surface_id")
@@ -1053,7 +1081,7 @@ class LaunchCoordinator:
             return 1
         if (
             surface["host_id"] != str(self.host_id)
-            or surface["provider"] != "codex"
+            or surface["provider"] != provider.value
             or surface["role"] != "session"
             or surface["launch_id"] != launch_id
             or surface["retired_at"] is not None
@@ -1070,6 +1098,7 @@ class LaunchCoordinator:
             observed,
             surface_id=surface_id,
             session_key=target_session_key,
+            provider=provider.value,
             launch_id=launch_id,
         ):
             self._fail_launch(launch_id, lease_owner, "surface_identity_mismatch")
@@ -1122,7 +1151,8 @@ class LaunchCoordinator:
             self._fail_launch(launch_id, lease_owner, "launch_target_changed")
             return 1
         transition_at = max(self.clock(), int(launch["updated_at"]))
-        if self.codex_executable is None:
+        provider_executable = self._provider_executable(provider)
+        if provider_executable is None:
             self._fail_launch(launch_id, lease_owner, "provider_unavailable")
             return 1
         try:
@@ -1144,16 +1174,22 @@ class LaunchCoordinator:
         if launch["action"] == "resume":
             assert isinstance(target_session_key, str)
             parsed_key = SessionKey.parse(target_session_key)
-            argv = (
-                self.codex_executable,
-                "resume",
-                str(parsed_key.provider_session_id),
-            )
+            if provider is ProviderId.CODEX:
+                argv = (
+                    provider_executable,
+                    "resume",
+                    str(parsed_key.provider_session_id),
+                )
+            else:
+                argv = (
+                    provider_executable,
+                    "--resume",
+                    str(parsed_key.provider_session_id),
+                )
         else:
-            argv = (self.codex_executable,)
+            argv = (provider_executable,)
         try:
-            assert self.codex_executable is not None
-            exec_provider(self.codex_executable, argv)
+            exec_provider(provider_executable, argv)
         except OSError:
             self._fail_launch(launch_id, lease_owner, "provider_exec_failed")
             return 1
@@ -1202,14 +1238,17 @@ def actionable_surface_locator(
     surface = registry.get_surface(surface_id)
     if surface is None:
         raise PresentationError("unknown surface")
+    try:
+        provider = ProviderId(str(surface["provider"]))
+    except (TypeError, ValueError) as error:
+        raise PresentationError("surface has an invalid provider") from error
     if (
         surface["host_id"] != str(parsed_host)
-        or surface["provider"] != "codex"
         or surface["transport"] != "tmux"
         or surface["role"] != "session"
         or surface["retired_at"] is not None
     ):
-        raise PresentationError("surface is not an active local Codex surface")
+        raise PresentationError("surface is not an active local session surface")
 
     launch_id = surface["launch_id"]
     expected_session_key = surface["current_session_key"]
@@ -1219,8 +1258,9 @@ def actionable_surface_locator(
             launch is None
             or launch["surface_id"] != surface_id
             or launch["host_id"] != str(parsed_host)
-            or launch["provider"] != "codex"
+            or launch["provider"] != provider.value
             or launch["action"] not in {"new", "resume"}
+            or (provider is ProviderId.CLAUDE and launch["action"] != "resume")
             or launch["state"]
             not in {"waiting_for_client", "provider_started", "bound"}
         ):
@@ -1264,6 +1304,7 @@ def actionable_surface_locator(
         observed,
         surface_id=surface_id,
         session_key=expected_session_key,
+        provider=provider.value,
         launch_id=launch_id,
     ):
         raise PresentationError("surface tmux identity did not revalidate")
@@ -1306,6 +1347,7 @@ def attach_surface_argv(
 __all__ = [
     "BOOTSTRAP_START_WAIT_SECONDS",
     "PREPARE_CAPABILITY_HASH",
+    "PREPARE_CLAUDE_CAPABILITY_HASH",
     "PREPARE_NEW_CAPABILITY_HASH",
     "PREPARE_SURFACE_WAIT_SECONDS",
     "PROVIDER_BIND_GRACE_SECONDS",

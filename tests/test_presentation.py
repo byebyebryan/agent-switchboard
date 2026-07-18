@@ -17,6 +17,7 @@ from agent_switchboard.domain import (
     ProviderId,
 )
 from agent_switchboard.presentation import (
+    PREPARE_CLAUDE_CAPABILITY_HASH,
     LaunchCoordinator,
     PresentationError,
     actionable_surface_locator,
@@ -36,6 +37,7 @@ HOST_ID = "11111111-1111-4111-8111-111111111111"
 SESSION_ID = "22222222-2222-4222-8222-222222222222"
 SECOND_SESSION_ID = "33333333-3333-4333-8333-333333333333"
 SESSION_KEY = f"{HOST_ID}:codex:{SESSION_ID}"
+CLAUDE_SESSION_KEY = f"{HOST_ID}:claude:{SESSION_ID}"
 SECOND_SESSION_KEY = f"{HOST_ID}:codex:{SECOND_SESSION_ID}"
 REQUEST_ID = "44444444-4444-4444-8444-444444444444"
 PROJECT_ID = "55555555-5555-4555-8555-555555555555"
@@ -137,6 +139,7 @@ def add_session(
     *,
     session_key: str = SESSION_KEY,
     session_id: str = SESSION_ID,
+    provider: str = "codex",
     runtime_presence: str = "stopped",
     resumability: str = "resumable",
     tmux: FakeTmux | None = None,
@@ -145,7 +148,7 @@ def add_session(
         {
             "session_key": session_key,
             "host_id": HOST_ID,
-            "provider": "codex",
+            "provider": provider,
             "provider_session_id": session_id,
             "cwd": str(cwd),
             "runtime_presence": runtime_presence,
@@ -185,6 +188,7 @@ def coordinator(
     *,
     clock: int = 100,
     codex_executable: str | None = "/opt/codex",
+    claude_executable: str | None = "/opt/claude",
 ) -> LaunchCoordinator:
     return LaunchCoordinator(
         registry,
@@ -192,6 +196,7 @@ def coordinator(
         tmux=tmux,  # type: ignore[arg-type]
         swbctl_executable="/opt/swbctl",
         codex_executable=codex_executable,
+        claude_executable=claude_executable,
         launch_timeout_seconds=2,
         clock=lambda: clock,
         sleeper=lambda _seconds: None,
@@ -722,6 +727,91 @@ def test_parked_open_creates_one_waiting_surface_and_is_idempotent(
     assert len(tmux.create_calls) == 1
 
 
+def test_parked_claude_open_forces_disabled_agent_view_and_is_idempotent(
+    registry: Registry, tmp_path: Path
+) -> None:
+    tmux = FakeTmux()
+    add_session(
+        registry,
+        tmp_path,
+        session_key=CLAUDE_SESSION_KEY,
+        provider="claude",
+    )
+    launch = coordinator(registry, tmux)
+
+    plan = launch.prepare_open(
+        CLAUDE_SESSION_KEY,
+        request_id=REQUEST_ID,
+        context=DMS_CONTEXT,
+    )
+
+    assert plan.kind is PresentationPlanKind.ATTACH
+    launches = registry.list_launches(target_session_key=CLAUDE_SESSION_KEY)
+    assert len(launches) == 1
+    assert launches[0]["provider"] == "claude"
+    assert launches[0]["capability_hash"] == PREPARE_CLAUDE_CAPABILITY_HASH
+    surface = registry.get_surface(str(plan.surface_id))
+    assert surface is not None and surface["provider"] == "claude"
+    create = tmux.create_calls[0]
+    assert create["provider"] == "claude"
+    assert create["session_key"] == CLAUDE_SESSION_KEY
+    assert create["environment"] == {
+        "AGENT_SWITCHBOARD_LAUNCH_ID": launches[0]["launch_id"],
+        "AGENT_SWITCHBOARD_SURFACE_ID": str(plan.surface_id),
+        "CLAUDE_CODE_DISABLE_AGENT_VIEW": "1",
+    }
+
+    retry = launch.prepare_open(
+        CLAUDE_SESSION_KEY,
+        request_id=REQUEST_ID,
+        context=ATTACH_CONTEXT,
+    )
+    assert retry.surface_id == plan.surface_id
+    assert len(tmux.create_calls) == 1
+
+
+def test_disabled_claude_blocks_resume_but_can_adopt_live_tmux(
+    registry: Registry, tmp_path: Path
+) -> None:
+    parked_tmux = FakeTmux()
+    add_session(
+        registry,
+        tmp_path,
+        session_key=CLAUDE_SESSION_KEY,
+        provider="claude",
+    )
+    disabled = coordinator(registry, parked_tmux, claude_executable=None)
+
+    blocked = disabled.prepare_open(
+        CLAUDE_SESSION_KEY,
+        request_id=REQUEST_ID,
+        context=DMS_CONTEXT,
+    )
+    assert blocked.kind is PresentationPlanKind.BLOCKED
+    assert blocked.error is not None and blocked.error.code == "provider_unavailable"
+    assert registry.list_launches() == []
+
+    registry.connection.execute("DELETE FROM sessions")
+    live_tmux = FakeTmux()
+    live_tmux.attached = True
+    live_tmux.client_ids = ("/dev/pts/8",)
+    add_session(
+        registry,
+        tmp_path,
+        session_key=CLAUDE_SESSION_KEY,
+        provider="claude",
+        runtime_presence="live",
+        tmux=live_tmux,
+    )
+    focused = coordinator(registry, live_tmux, claude_executable=None).prepare_open(
+        CLAUDE_SESSION_KEY,
+        request_id=stable_uuid("disabled-claude-live"),
+        context=DMS_CONTEXT,
+    )
+    assert focused.kind is PresentationPlanKind.FOCUS
+    assert live_tmux.metadata.provider == "claude"
+
+
 def test_request_conflict_is_a_blocked_plan(registry: Registry, tmp_path: Path) -> None:
     tmux = FakeTmux()
     add_session(registry, tmp_path)
@@ -885,6 +975,40 @@ def test_bootstrap_starts_exact_resume_only_after_attachment(
     assert started["expires_at"] == 300_100
 
 
+def test_bootstrap_starts_exact_claude_resume_after_attachment(
+    registry: Registry, tmp_path: Path
+) -> None:
+    tmux = FakeTmux()
+    add_session(
+        registry,
+        tmp_path,
+        session_key=CLAUDE_SESSION_KEY,
+        provider="claude",
+    )
+    launch = coordinator(registry, tmux)
+    launch.prepare_open(
+        CLAUDE_SESSION_KEY, request_id=REQUEST_ID, context=ATTACH_CONTEXT
+    )
+    launch_id = str(registry.list_launches()[0]["launch_id"])
+    tmux.attached = True
+    captured: list[object] = []
+
+    def capture(executable: str, argv: Sequence[str]) -> None:
+        captured.extend((executable, tuple(argv)))
+        raise ExecCaptured
+
+    with pytest.raises(ExecCaptured):
+        launch.bootstrap(launch_id, exec_provider=capture)  # type: ignore[arg-type]
+
+    assert captured == [
+        "/opt/claude",
+        ("/opt/claude", "--resume", SESSION_ID),
+    ]
+    started = registry.get_launch(launch_id)
+    assert started["state"] == "provider_started"
+    assert started["expires_at"] == 300_100
+
+
 def test_bootstrap_final_reconciliation_refuses_a_duplicate_runtime(
     registry: Registry, tmp_path: Path
 ) -> None:
@@ -912,15 +1036,19 @@ def test_bootstrap_final_reconciliation_refuses_a_duplicate_runtime(
     assert failed["failure_code"] == "duplicate_runtime_detected"
 
 
+@pytest.mark.parametrize(
+    ("session_key", "provider"),
+    ((SESSION_KEY, "codex"), (CLAUDE_SESSION_KEY, "claude")),
+)
 def test_surface_actions_revalidate_stored_identity_and_pending_lease(
-    registry: Registry, tmp_path: Path
+    registry: Registry, tmp_path: Path, session_key: str, provider: str
 ) -> None:
     tmux = FakeTmux()
-    add_session(registry, tmp_path)
+    add_session(registry, tmp_path, session_key=session_key, provider=provider)
     now = time.time_ns() // 1_000_000
     launch = coordinator(registry, tmux, clock=now)
     plan = launch.prepare_open(
-        SESSION_KEY, request_id=REQUEST_ID, context=ATTACH_CONTEXT
+        session_key, request_id=REQUEST_ID, context=ATTACH_CONTEXT
     )
     assert plan.surface_id is not None
 

@@ -153,6 +153,13 @@ def _configured_codex_executable(config: SwitchboardConfig) -> str | None:
     return None
 
 
+def _configured_claude_executable(config: SwitchboardConfig) -> str | None:
+    for provider in config.providers:
+        if provider.provider is ProviderId.CLAUDE:
+            return (provider.executable or "claude") if provider.enabled else None
+    return None
+
+
 def _coordinator(
     registry: Registry,
     *,
@@ -165,6 +172,7 @@ def _coordinator(
         tmux=TmuxController(),
         swbctl_executable=resolve_swbctl_executable(),
         codex_executable=_configured_codex_executable(config),
+        claude_executable=_configured_claude_executable(config),
         projects=config.projects,
         locations=config.locations,
         naming_prefix=config.tmux.naming_prefix,
