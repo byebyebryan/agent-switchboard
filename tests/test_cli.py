@@ -242,7 +242,7 @@ def test_prepare_new_emits_one_presentation_envelope_and_context_flags(
                 "--location",
                 LOCATION_ID,
                 "--provider",
-                "codex",
+                "claude",
                 "--request-id",
                 request_id,
                 "--can-focus-desktop",
@@ -258,7 +258,7 @@ def test_prepare_new_emits_one_presentation_envelope_and_context_flags(
     assert parsed.kind is PresentationPlanKind.BLOCKED
     assert observed[0].project == PROJECT_ID
     assert observed[0].location == LOCATION_ID
-    assert observed[0].provider == "codex"
+    assert observed[0].provider == "claude"
     assert observed[0].request_id == request_id
     assert observed[0].can_focus_desktop
     assert observed[0].can_launch_terminal

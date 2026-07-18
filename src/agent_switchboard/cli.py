@@ -118,7 +118,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     prepare_new.add_argument("--project", required=True)
     prepare_new.add_argument("--location")
-    prepare_new.add_argument("--provider", choices=("codex",))
+    prepare_new.add_argument("--provider", choices=("codex", "claude"))
     prepare_new.add_argument("--request-id", required=True)
     prepare_new.add_argument("--has-current-terminal", action="store_true")
     prepare_new.add_argument("--current-tmux-client")

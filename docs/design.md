@@ -740,12 +740,13 @@ history remains resumable.
 - A live process outside a managed surface is attached only when a trustworthy
   existing tmux locator is available. Otherwise the frontend reports that it is
   live but unroutable and does not start a duplicate runtime.
-- A parked session creates a managed surface running `codex resume <uuid>`.
-- A new session creates a managed surface running `codex` in the selected
-  working directory.
+- A parked session creates a managed surface running the provider's exact
+  native resume command.
+- A new session creates a managed surface running plain `codex` or `claude` in
+  the selected working directory.
 
-tmux is the persistence backend for a live Codex CLI process in the default
-transport.
+tmux is the persistence backend for live Codex and Claude CLI processes in the
+default transport.
 
 ## Claude Provider
 
@@ -1890,6 +1891,12 @@ acceptance evidence are recorded in
 - Add graceful managed-runtime stop without deleting Claude history.
 - Extend DMS parity to Claude session and history actions only after Phase 2B
   hook capability and runtime identity are available.
+
+The known-resume and new-session portions are implemented in core and DMS. Both
+provider/bridge paths have live start, bind, reopen, and cleanup evidence.
+Native history, graceful stop, and the remaining compositor focus check stay
+open. Exact evidence is recorded in
+[`docs/phase-3c-plan.md`](phase-3c-plan.md).
 
 The existing DMS helper remains the Claude and remote fallback until these
 paths and, later, Phase 5 pass equivalent live tests.

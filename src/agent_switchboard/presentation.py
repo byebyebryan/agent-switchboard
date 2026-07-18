@@ -48,6 +48,9 @@ PREPARE_CLAUDE_CAPABILITY_HASH = hashlib.sha256(
 PREPARE_NEW_CAPABILITY_HASH = hashlib.sha256(
     b"agent-switchboard:phase-3b:local-codex-new-session"
 ).hexdigest()
+PREPARE_NEW_CLAUDE_CAPABILITY_HASH = hashlib.sha256(
+    b"agent-switchboard:phase-3c:local-claude-new-session"
+).hexdigest()
 PREPARE_SURFACE_WAIT_SECONDS = 2.0
 BOOTSTRAP_START_WAIT_SECONDS = 5.0
 PROVIDER_BIND_GRACE_SECONDS = 300
@@ -83,6 +86,10 @@ def _synchronize_bound_new_metadata(
     metadata = observed.metadata
     if metadata.session_key == expected_session_key:
         return observed
+    try:
+        expected_provider = SessionKey.parse(expected_session_key).provider.value
+    except ValidationError:
+        return observed
     launch_id = surface.get("launch_id")
     if metadata.session_key is not None or not isinstance(launch_id, str):
         return observed
@@ -92,10 +99,12 @@ def _synchronize_bound_new_metadata(
         or launch["action"] != "new"
         or launch["state"] != "bound"
         or launch["target_session_key"] != expected_session_key
+        or launch["provider"] != expected_provider
         or surface.get("current_session_key") != expected_session_key
+        or surface.get("provider") != expected_provider
         or surface.get("binding_confidence") != "confirmed"
         or metadata.surface_id != surface.get("surface_id")
-        or metadata.provider != "codex"
+        or metadata.provider != expected_provider
         or metadata.launch_id != launch_id
         or metadata.role != "session"
     ):
@@ -104,7 +113,7 @@ def _synchronize_bound_new_metadata(
         observed.locator,
         surface_id=str(surface["surface_id"]),
         session_key=expected_session_key,
-        provider="codex",
+        provider=expected_provider,
         launch_id=launch_id,
         role="session",
     )
@@ -242,18 +251,13 @@ class LaunchCoordinator:
                 "The selected project does not resolve a provider.",
                 now,
             )
-        if resolved_provider is not ProviderId.CODEX:
-            return self._blocked_new(
-                "provider_new_not_supported",
-                "This phase can start only new local Codex sessions.",
-                now,
-                provider=resolved_provider,
-            )
-        if self.codex_executable is None:
+        if self._provider_executable(resolved_provider) is None:
             return self._blocked_new(
                 "provider_unavailable",
-                "Codex is disabled in the current host configuration.",
+                f"{self._provider_label(resolved_provider)} is disabled in the "
+                "current host configuration.",
                 now,
+                provider=resolved_provider,
             )
         transport = location.transport_override or project.default_transport
         if transport is not Transport.TMUX:
@@ -273,6 +277,7 @@ class LaunchCoordinator:
         return self._prepare_new(
             project,
             location,
+            provider=resolved_provider,
             request_id=request_id,
             context=context,
             now=now,
@@ -655,6 +660,7 @@ class LaunchCoordinator:
         project: Project,
         location: ProjectLocation,
         *,
+        provider: ProviderId,
         request_id: str,
         context: PresentationContext,
         now: int,
@@ -663,7 +669,7 @@ class LaunchCoordinator:
         lease_owner = self._lease_owner(launch_id)
         request = {
             "host_id": str(self.host_id),
-            "provider": "codex",
+            "provider": provider.value,
             "action": "new",
             "project_id": str(project.project_id),
             "location_id": str(location.location_id),
@@ -678,7 +684,11 @@ class LaunchCoordinator:
                 request_id=request_id,
                 launch_id=launch_id,
                 lease_owner=lease_owner,
-                capability_hash=PREPARE_NEW_CAPABILITY_HASH,
+                capability_hash=(
+                    PREPARE_NEW_CAPABILITY_HASH
+                    if provider is ProviderId.CODEX
+                    else PREPARE_NEW_CLAUDE_CAPABILITY_HASH
+                ),
                 expires_at=now + self.launch_timeout_seconds * 1_000,
                 created_at=now,
             )
@@ -694,19 +704,22 @@ class LaunchCoordinator:
 
         surface_id = str(uuid.uuid4())
         session_name = f"{self.naming_prefix}-{surface_id[:12]}"
+        environment = {
+            "AGENT_SWITCHBOARD_LAUNCH_ID": launch_id,
+            "AGENT_SWITCHBOARD_SURFACE_ID": surface_id,
+        }
+        if provider is ProviderId.CLAUDE:
+            environment["CLAUDE_CODE_DISABLE_AGENT_VIEW"] = "1"
         observed: TmuxSurfaceObservation | None = None
         try:
             observed = self.tmux.create_surface(
                 name=session_name,
                 cwd=location.path,
                 command=(self.swbctl_executable, "bootstrap", launch_id),
-                environment={
-                    "AGENT_SWITCHBOARD_LAUNCH_ID": launch_id,
-                    "AGENT_SWITCHBOARD_SURFACE_ID": surface_id,
-                },
+                environment=environment,
                 surface_id=surface_id,
                 session_key=None,
-                provider="codex",
+                provider=provider.value,
                 launch_id=launch_id,
                 role="session",
             )
@@ -715,7 +728,7 @@ class LaunchCoordinator:
                 {
                     "surface_id": surface_id,
                     "host_id": str(self.host_id),
-                    "provider": "codex",
+                    "provider": provider.value,
                     "transport": "tmux",
                     "transport_locator": observed.locator.to_storage(),
                     "workspace_id": observed.locator.session,
@@ -1053,11 +1066,10 @@ class LaunchCoordinator:
             raise PresentationError(
                 "bootstrap launch has an invalid provider"
             ) from error
-        if (
-            launch["host_id"] != str(self.host_id)
-            or launch["action"] not in {"new", "resume"}
-            or (provider is ProviderId.CLAUDE and launch["action"] != "resume")
-        ):
+        if launch["host_id"] != str(self.host_id) or launch["action"] not in {
+            "new",
+            "resume",
+        }:
             raise PresentationError("bootstrap launch is not a supported local session")
         if launch["state"] != "waiting_for_client":
             return 0 if launch["state"] == "bound" else 1
@@ -1260,7 +1272,6 @@ def actionable_surface_locator(
             or launch["host_id"] != str(parsed_host)
             or launch["provider"] != provider.value
             or launch["action"] not in {"new", "resume"}
-            or (provider is ProviderId.CLAUDE and launch["action"] != "resume")
             or launch["state"]
             not in {"waiting_for_client", "provider_started", "bound"}
         ):
@@ -1349,6 +1360,7 @@ __all__ = [
     "PREPARE_CAPABILITY_HASH",
     "PREPARE_CLAUDE_CAPABILITY_HASH",
     "PREPARE_NEW_CAPABILITY_HASH",
+    "PREPARE_NEW_CLAUDE_CAPABILITY_HASH",
     "PREPARE_SURFACE_WAIT_SECONDS",
     "PROVIDER_BIND_GRACE_SECONDS",
     "LaunchCoordinator",

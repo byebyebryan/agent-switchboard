@@ -2,8 +2,8 @@
 
 Date: 2026-07-18
 
-Status: first known-session resume increment implemented and provider/bridge
-live acceptance complete; live compositor focus/dedup acceptance remains
+Status: known-session resume and new-session increments implemented with
+provider/bridge live acceptance; live compositor focus/dedup acceptance remains
 
 ## Decision and boundary
 
@@ -133,14 +133,28 @@ The legacy `agentSessions` plugin remains installed as the remote and untouched
 Claude-history fallback. Phase 3C does not disable or modify it during this
 increment.
 
+## Second increment: new Claude session
+
+The provider-neutral `prepare-new` path now accepts explicit or config-resolved
+Claude/tmux targets. It reserves the same unbound waiting surface as Codex,
+forces `CLAUDE_CODE_DISABLE_AGENT_VIEW=1`, and execs plain `claude` only after a
+client attaches and the target revalidates. The first matching `SessionStart`
+hook binds the provider-assigned UUID, launch, project, location, and surface;
+later focus or attachment promotes that confirmed UUID into tmux metadata.
+
+The DMS private model keeps provider identity on every launch target and emits
+one explicit Codex and one explicit Claude action per declared local tmux
+location. Selection passes only the stable project ID, location ID, and provider
+enum through the public `prepare-new` boundary. The provider command, cwd, tmux
+locator, launch identity, and desktop token remain core-authored or validated.
+
+Automated acceptance covers explicit Claude selection over a Codex project default,
+disabled-provider blocking, exact plain argv, forced environment, attach and
+lease revalidation, provider-attributed request identity, hook binding, DMS
+projection, provider-specific search/display, and shell-free action plumbing.
+Live start/bind/reopen evidence is retained below.
+
 ## Later Phase 3C increments
-
-### New Claude session
-
-Extend provider-neutral `prepare-new` resolution to Claude/tmux locations and
-exec plain `claude` with the disabled-Agent-View environment. The first
-`SessionStart` hook binds the new UUID to the waiting surface. DMS then projects
-Claude launch targets using the same stable project/location IDs.
 
 ### Native history picker
 
@@ -161,7 +175,7 @@ terminate only the launch-owned process group and surface. It never calls
 
 Core acceptance requires:
 
-- exact Codex and Claude contract tests plus the zero-cost live Claude smoke;
+- exact Codex and Claude contract tests plus the fail-closed live Claude smoke;
 - parked Claude resume argv and launch-environment tests;
 - existing-surface, live adoption, disabled-provider, duplicate-runtime,
   idempotency, request-conflict, lease-expiry, and attach revalidation tests for
@@ -185,10 +199,11 @@ View daemon absence, and restoration of the user's pre-test desktop state.
 
 ## Implementation checkpoint
 
-The 2026-07-18 checkpoint passes 469 core tests, Ruff format/lint, compilation,
-whitespace checks, and reproducible wheel/sdist verification. The DMS adapter
-passes 116 Python tests, 21 deterministic JavaScript behavior groups, QML
-formatting, Ruff, Pyright, and whitespace checks.
+The first 2026-07-18 checkpoint passed 469 core tests. The new-session increment
+passes 473 core tests, Ruff format/lint, compilation, whitespace checks, and
+reproducible wheel/sdist verification. The DMS adapter passes 116 Python tests,
+21 deterministic JavaScript behavior groups, QML formatting, Ruff, Pyright,
+and whitespace checks.
 
 The final installed doctor sample passed five of eight immediate repetitions.
 The three failures were isolated warm-p95 timing misses (`105.1`, `105.9`, and
@@ -222,12 +237,35 @@ desktop-helper launch, and core same-surface dedup therefore passed, but live
 niri focus and same-window dedup remain an explicit acceptance item rather than
 a claimed result.
 
+The installed new-session increment then passed an isolated, prompt-free live
+exercise:
+
+- core reserved one unbound Claude surface and did not start the provider until
+  a real tmux client attached;
+- the resulting process executed plain `claude`, inherited
+  `CLAUDE_CODE_DISABLE_AGENT_VIEW=1`, and emitted a provider-assigned UUID
+  through the installed `SessionStart` hook;
+- that UUID bound to the expected launch, project, location, and surface with
+  confirmed live runtime evidence;
+- reopening the stable session key returned the existing surface and promoted
+  the confirmed UUID into its tmux metadata without starting a second process;
+- the DMS bridge emitted model v2 with the live confirmed Claude row, both
+  provider launch targets, and no warnings; and
+- `/exit` stopped only the test-owned Claude process, full reconciliation
+  reported it stopped and resumable, the isolated tmux server exited, and the
+  empty test transcript was moved to the desktop trash.
+
+The pre-existing active Claude session remained alive throughout. No prompt was
+submitted and no model turn was requested. The new-session exercise did not
+open a Ghostty window, so it adds provider/bridge and same-surface dedup evidence
+without changing the remaining live niri focus/same-window acceptance item.
+
 ## Stop conditions
 
 Stop rather than weaken the boundary if any of the following occurs:
 
-- Claude `2.1.214` does not bind the requested UUID through the documented
-  `SessionStart` hook;
+- Claude `2.1.214` does not bind a resumed requested UUID or a new
+  provider-assigned UUID through the documented `SessionStart` hook;
 - managed launch can enter Agent View despite the forced environment;
 - a live or pending duplicate Claude runtime can be started;
 - DMS needs a provider command, private database read, transcript path, raw cwd,

@@ -20,6 +20,11 @@ SESSION_ID = "22222222-2222-4222-8222-222222222222"
 SESSION_KEY = f"{HOST_ID}:claude:{SESSION_ID}"
 PROMPT_ID = "33333333-3333-4333-8333-333333333333"
 SECOND_ID = "44444444-4444-4444-8444-444444444444"
+PROJECT_ID = "55555555-5555-4555-8555-555555555555"
+LOCATION_ID = "66666666-6666-4666-8666-666666666666"
+LAUNCH_ID = "77777777-7777-4777-8777-777777777777"
+SURFACE_ID = "88888888-8888-4888-8888-888888888888"
+REQUEST_ID = "99999999-9999-4999-8999-999999999999"
 
 
 def payload(event: str, **extra: object) -> dict[str, object]:
@@ -120,6 +125,98 @@ def test_claude_normalization_uses_prompt_identity_and_drops_private_fields() ->
             entry_ns=3_000_000_000,
             prompt_id="not-a-canonical-prompt-id",
         )
+
+
+def test_new_claude_session_start_binds_launch_project_and_surface(
+    tmp_path: Path,
+) -> None:
+    environment = {
+        "AGENT_SWITCHBOARD_LAUNCH_ID": LAUNCH_ID,
+        "AGENT_SWITCHBOARD_SURFACE_ID": SURFACE_ID,
+    }
+    event = normalized(
+        "SessionStart",
+        entry_ns=200_000_000,
+        environment=environment,
+        source="startup",
+    )
+    with Registry(tmp_path / "registry.db") as registry:
+        registry.upsert_host(HOST_ID, "starship", is_local=True, observed_at=10)
+        registry.materialize_projects(
+            HOST_ID,
+            [
+                {
+                    "project_id": PROJECT_ID,
+                    "name": "Switchboard",
+                    "default_provider": "codex",
+                    "default_transport": "tmux",
+                    "locations": [
+                        {
+                            "location_id": LOCATION_ID,
+                            "path": "/work/switchboard",
+                            "is_default": True,
+                        }
+                    ],
+                }
+            ],
+            observed_at=20,
+        )
+        registry.reserve_launch(
+            {
+                "host_id": HOST_ID,
+                "provider": "claude",
+                "action": "new",
+                "project_id": PROJECT_ID,
+                "location_id": LOCATION_ID,
+                "cwd": "/work/switchboard",
+                "source_handoff_id": None,
+                "target_session_key": None,
+                "transport": "tmux",
+            },
+            request_id=REQUEST_ID,
+            launch_id=LAUNCH_ID,
+            lease_owner=f"bootstrap:{LAUNCH_ID}",
+            capability_hash="b" * 64,
+            expires_at=10_000,
+            created_at=100,
+        )
+        registry.activate_launch_surface(
+            LAUNCH_ID,
+            {
+                "surface_id": SURFACE_ID,
+                "host_id": HOST_ID,
+                "provider": "claude",
+                "transport": "tmux",
+                "transport_locator": "tmux:test:0.0",
+                "workspace_id": "test",
+                "role": "session",
+                "launch_id": LAUNCH_ID,
+                "created_at": 110,
+                "client_attached": True,
+            },
+            lease_owner=f"bootstrap:{LAUNCH_ID}",
+            observed_at=110,
+        )
+        registry.transition_launch(
+            LAUNCH_ID,
+            "provider_started",
+            lease_owner=f"bootstrap:{LAUNCH_ID}",
+            observed_at=120,
+        )
+
+        result = registry.ingest_hook_event(
+            event.storage_mapping(HostId(HOST_ID)), host_display_name="starship"
+        )
+
+        assert result.kind == "applied"
+        assert result.launch is not None and result.launch["state"] == "bound"
+        assert result.launch["target_session_key"] == SESSION_KEY
+        assert result.session["project_id"] == PROJECT_ID
+        assert result.session["location_id"] == LOCATION_ID
+        assert result.session["surface_id"] == SURFACE_ID
+        assert result.surface is not None
+        assert result.surface["provider"] == "claude"
+        assert result.surface["current_session_key"] == SESSION_KEY
 
 
 def test_claude_process_identity_requires_exact_comm_match(

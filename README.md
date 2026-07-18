@@ -12,7 +12,7 @@ status metadata, then hands the user back to the unmodified provider UI.
 
 The current checkout contains the Phase 1 core, the local Codex and Claude
 provider foundations from Phase 2, Phase 3A existing-session presentation, and
-the Phase 3B core path for new project-aware Codex sessions:
+the managed-tmux paths for new and existing Codex and Claude sessions:
 
 - Python package and finalized `swbctl` executable name
 - stable host identity and strict TOML configuration
@@ -44,19 +44,19 @@ the Phase 3B core path for new project-aware Codex sessions:
   with forced disabled Agent View and exact `claude --resume` execution
 - exact process/session/tmux correlation that can atomically finish a pending
   resume when Codex omits the expected start hook
-- atomic project/location resolution and new-Codex preparation with an unbound
-  waiting surface, attach-before-start bootstrap, exact hook/live identity
-  binding, and same-request idempotency
+- atomic project/location/provider resolution and new-session preparation for
+  Codex or Claude with an unbound waiting surface, attach-before-start
+  bootstrap, exact hook/live identity binding, and same-request idempotency
 - versioned focus, switch, attach, and blocked presentation plans consumed by
   the separate DMS integration
 - unit, migration, concurrency, provider, protocol, and packaging tests
 
 Phase 3B implementation and live acceptance are complete in the core and
 separate DMS adapter. Phase 2B implementation, Agent View cutover, and live
-acceptance are also complete. The first Phase 3C increment now reuses the Codex
-managed-tmux lifecycle for known Claude sessions and projects them through the
-separate DMS adapter. Its contract, verification, and remaining live-compositor
-caveat are recorded in [`docs/phase-3c-plan.md`](docs/phase-3c-plan.md).
+acceptance are also complete. Phase 3C now reuses the Codex managed-tmux
+lifecycle for known and new Claude sessions and projects both paths through the
+separate DMS adapter. Its contract, verification, and remaining live-acceptance
+caveats are recorded in [`docs/phase-3c-plan.md`](docs/phase-3c-plan.md).
 The searchable TUI remains Phase 4 and remote SSH transport remains Phase 5. See
 [the design](docs/design.md), the
 [Phase 1 validation record](docs/phase-1-validation.md), and the
@@ -84,7 +84,8 @@ swbctl doctor
 swbctl prepare-open <session-key> --request-id <uuid> \
   --can-focus-desktop --can-launch-terminal --json
 swbctl prepare-new --project <project-id> --location <location-id> \
-  --request-id <uuid> --can-focus-desktop --can-launch-terminal --json
+  --provider codex|claude --request-id <uuid> \
+  --can-focus-desktop --can-launch-terminal --json
 swbctl select-surface <surface-id> --client <tmux-client-id>
 swbctl attach-surface <surface-id>
 ```
@@ -136,13 +137,14 @@ surface IDs. `select-surface` and `attach-surface` revalidate registry and tmux
 identity instead of accepting raw frontend tmux targets.
 
 `prepare-new` loads the current validated host configuration, resolves the
-selected project and local location, and creates an unbound leased tmux surface.
-Codex starts without shell interpolation only after a client attaches. The
-bootstrap revalidates the project, location, working directory, transport, and
-surface immediately before `exec`, then renews a bounded five-minute identity
-binding grace; the first exact lifecycle hook or complete live tmux/process
-correlation atomically assigns the provider UUID and confirms the
-session/surface binding.
+selected project, local location, and Codex or Claude provider, then creates an
+unbound leased tmux surface. The provider starts without shell interpolation
+only after a client attaches. Claude launches additionally force
+`CLAUDE_CODE_DISABLE_AGENT_VIEW=1`. The bootstrap revalidates the project,
+location, working directory, transport, and surface immediately before `exec`,
+then renews a bounded five-minute identity binding grace; the first exact
+lifecycle hook or complete live tmux/process correlation atomically assigns the
+provider UUID and confirms the session/surface binding.
 
 Snapshot assembly reads a bounded deterministic session candidate set and
 applies an actual UTF-8 byte budget. If sessions are omitted, the registry is
