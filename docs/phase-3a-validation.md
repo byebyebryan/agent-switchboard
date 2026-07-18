@@ -92,8 +92,8 @@ depends on that single event when exact live evidence is available.
 
 ## Remaining implementation scope
 
-- Phase 2B Claude discovery, hooks, supervisor/process liveness, and normalized
-  runtime truth.
-- Phase 3C Claude manager/session workspace and surface policy.
+- Phase 2B Claude hooks, Agent-View-disabled capability checks, process/tmux
+  liveness, and normalized foreground runtime truth.
+- Phase 3C Claude new/resume/native-history tmux and DMS presentation policy.
 - Remote snapshot and action transport.
 - Searchable TUI, curation, handoffs, and current-session agent tools.

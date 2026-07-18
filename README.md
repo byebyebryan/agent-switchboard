@@ -44,15 +44,18 @@ new project-aware Codex sessions:
 - unit, migration, concurrency, provider, protocol, and packaging tests
 
 Phase 3B implementation and live acceptance are complete in the core and
-separate DMS adapter. Phase 2B now adds Claude discovery, hooks,
-supervisor/process liveness, and normalized runtime truth, followed by Phase 3C
-Claude workspace/surface parity.
+separate DMS adapter. Phase 2B planning and contract refresh are complete;
+implementation next adds Claude hooks, Agent-View-disabled capability checks,
+process/tmux liveness, and normalized foreground runtime truth. Phase 3C then
+reuses the Codex managed-tmux lifecycle for Claude and adds DMS session/history
+actions.
 The searchable TUI remains Phase 4 and remote SSH transport remains Phase 5. See
 [the design](docs/design.md), the
 [Phase 1 validation record](docs/phase-1-validation.md), and the
-[Phase 2 validation record](docs/phase-2-validation.md), and the
+[Phase 2 validation record](docs/phase-2-validation.md), the
+[Phase 2B plan](docs/phase-2b-plan.md), and the
 [Phase 3A validation record](docs/phase-3a-validation.md) for the implemented
-boundary and evidence. The accepted next-batch contract is in the
+boundary and evidence. The completed Codex vertical-slice contract is in the
 [Phase 3B plan](docs/phase-3b-plan.md).
 
 ## Local commands

@@ -48,8 +48,9 @@ have different lifecycle models:
 
 - Codex conversations are durable, but a live terminal process needs an
   external persistence mechanism such as tmux.
-- Claude Code can run background conversations under its own per-user
-  supervisor and can attach a terminal to them later.
+- Claude Code offers a per-user Agent View supervisor, but Switchboard disables
+  that competing full-session lifecycle and keeps Claude CLI processes alive
+  through tmux, the same as Codex.
 - Each provider has its own history and resume UI.
 - Neither provider gives a single view across providers, hosts, tmux sessions,
   and desktop windows.
@@ -82,7 +83,9 @@ conversation. One manager should answer:
   separately.
 - Open an exact session without forcing the user through another picker when
   its identity is already known.
-- Preserve provider-native history, resume, and background behavior.
+- Preserve provider-native history, resume, subagent, background-task, and
+  scheduled-task behavior inside each provider session. Full-session
+  persistence and attachment are Switchboard/tmux responsibilities.
 - Preserve the unmodified Codex or Claude Code terminal UI after selection;
   Switchboard routes to the session and then leaves the interaction path.
 - Serve as the expected entry point for newly launched managed sessions so each
@@ -92,6 +95,8 @@ conversation. One manager should answer:
 - Support local terminal, SSH, tmux, DMS, and niri workflows through the same
   core interfaces.
 - Continue working when the TUI or DMS is closed.
+- Stop a managed live runtime without deleting its provider-owned resumable
+  history.
 - Recover from missed hook events by reconciling provider and process state.
 - Avoid a mandatory daemon in the first implementation.
 
@@ -103,7 +108,7 @@ conversation. One manager should answer:
 - Require a persistent wrapper process around Codex or Claude Code.
 - Retrofit fully routable surface identity into every live terminal that was
   started outside Switchboard.
-- Replace Claude Code Agent View lifecycle controls.
+- Reimplement provider-internal task, subagent, or schedule management.
 - Maintain tasks, backlogs, assignments, milestones, or project plans.
 - Orchestrate multiple agents, assign work, or dispatch prompts automatically.
 - Create branches, worktrees, commits, or merges on behalf of a project.
@@ -112,7 +117,8 @@ conversation. One manager should answer:
 - Provide a standalone desktop, web, or mobile agent client.
 - Synchronize transcripts or credentials between machines.
 - Provide cloud execution or a web service.
-- Stop, delete, archive, or mutate provider sessions in the first release.
+- Delete, archive, rewrite, or otherwise mutate provider-owned durable session
+  history in the first release.
 
 ## Review Resolutions
 
@@ -126,9 +132,10 @@ The pre-implementation design review produced the following binding changes:
   each host contributes its own configured locations.
 - Host reachability, runtime presence, provider resumability, activity/reason,
   and terminal attachment remain separate state axes.
-- Claude uses one host tmux workspace with a manager window and exact session
-  attachment windows; unobservable Agent View switches degrade surface binding,
-  not session truth.
+- Claude Agent View is disabled. Claude and Codex use the same managed tmux
+  surface lifecycle; provider hooks bind the durable provider UUID without
+  making provider-internal subagents or scheduled work separate Switchboard
+  sessions.
 - Handoffs are immutable records, and continuation references the exact handoff
   used to start the next session.
 - Provider preview/experimental contracts are capability-gated and supported
@@ -255,17 +262,13 @@ than silently showing incorrect data.
   session ID exists and can be bound to them.
 
 **Runtime**
-: A live provider process or provider-supervised background job associated with
-  a session.
+: A live provider process associated with a session. Provider-internal
+  subagents, shell jobs, and scheduled tasks remain children of that session
+  rather than independent Switchboard runtimes.
 
 **Surface**
 : A terminal endpoint through which a user can interact with a runtime. The
   first implementation uses a tmux session/window/pane target.
-
-**Provider workspace**
-: An optional provider-specific tmux workspace that can contain manager and
-  session surfaces. Claude uses one workspace per host so Agent View and exact
-  attachment windows can share one desktop terminal workflow.
 
 **Attachment**
 : The current association between a provider session and a terminal surface.
@@ -287,7 +290,7 @@ than silently showing incorrect data.
                        Provider-native state
                  +-----------------------------+
                  | Codex app-server / processes|
-                 | Claude supervisor / CLI     |
+                 | Claude hooks / CLI processes|
                  +--------------+--------------+
                                 |
                          provider adapters
@@ -313,8 +316,8 @@ The initial implementation is process-based rather than service-based:
   snapshot over SSH.
 
 When Switchboard frontends are closed, no host-wide Switchboard controller or
-wrapper remains resident. The provider runtime, its native supervisor where
-applicable, and tmux own the normal long-lived path. Hook handlers, remote
+wrapper remains resident. Provider runtimes and tmux own the normal long-lived
+path. Hook handlers, remote
 snapshots, and command actions are short-lived. If explicitly enabled, a stdio
 agent-tool process may live only for the lifetime of the provider session that
 launched it.
@@ -389,9 +392,9 @@ project only when its canonical cwd has one unambiguous configured location:
 4. If equally specific matches disagree, leave the session unassigned and
    report the ambiguity.
 
-This permits Claude Agent View dispatches and ordinary provider launches inside
-known repositories to join the right project without manufacturing projects or
-using a Git remote as identity. The assignment records
+This permits ordinary provider launches observed through hooks inside known
+repositories to join the right project without manufacturing projects or using
+a Git remote as identity. The assignment records
 `metadata_source=location_match` and remains user-editable.
 
 A project can contain multiple locations on one host, including worktrees. A
@@ -463,9 +466,9 @@ reserved -> surface_ready -> waiting_for_client -> provider_started -> bound
     +-------------+------------------+--------------------+-> failed | expired
 ```
 
-`manage` is used for a provider manager such as `claude agents`. It creates a
-`provider_manager` surface with no target session and reaches `manager_ready`
-through process reconciliation rather than a session-binding hook.
+`manage` and `provider_manager` remain generic reserved contracts for a future
+provider that requires a native manager. Claude does not use them in the
+Agent-View-disabled profile.
 
 Intents use bounded leases. A failed terminal launch, provider startup, or hook
 binding does not leave an indefinite reservation. Expired intents and empty
@@ -551,9 +554,9 @@ RuntimeLocator
   observed_at
 ```
 
-For Claude background sessions, `provider_runtime_id` is the short ID accepted
-by `claude attach`. For Codex, the durable session UUID plus a tmux surface is
-sufficient.
+`provider_runtime_id` is reserved for a provider that exposes a runtime handle
+distinct from its durable session ID. Codex and Agent-View-disabled Claude use
+the durable provider UUID plus a tmux surface.
 
 ### Surface
 
@@ -573,14 +576,14 @@ Surface
   client_attached
 ```
 
-`current_session_key` is mutable and nullable. A manager surface has no current
-session. If a Claude terminal switches from session A to B, the surface stays
-the same while its session association changes. A binding learned only from an
-old hook is not sufficient to focus an exact session; opening requires current
-provider attachment evidence, process correlation, or a fresh managed attach.
-`provider` is explicit because a waiting surface has no provider session ID yet
-and a `provider_manager` surface never binds a session from which provider
-identity could be derived.
+`current_session_key` is mutable and nullable. A generic manager surface has no
+current session. If an in-terminal native resume switches Claude from session A
+to B, the surface stays the same while its session association changes. A
+binding learned only from an old hook is not sufficient to focus an exact
+session; opening requires current process/tmux evidence. `provider` is explicit
+because a waiting surface has no provider session ID yet and the reserved
+`provider_manager` role never binds a session from which provider identity
+could be derived.
 
 ## State Model
 
@@ -653,9 +656,9 @@ offline host
 
 The offline label includes snapshot age and does not erase the last-known
 status. `unavailable` means `stopped + missing`. Attachment is displayed
-separately. Examples include `working, detached` for a Claude background agent,
-`completed, detached` for a supervisor-stopped result, and `ready, attached` for
-Codex waiting in Ghostty.
+separately. Examples include `working, detached` for a live managed process
+whose tmux client disconnected, `parked` for a resumable session whose provider
+process exited, and `ready, attached` for a CLI waiting in Ghostty.
 
 ### Hook-driven transitions
 
@@ -672,10 +675,10 @@ Stop               -> runtime_presence=live, activity=ready,
 SessionEnd         -> provisional runtime_presence=stopped
 ```
 
-Provider-native state and liveness reconciliation may override provisional hook
-state. In particular, a Claude session can detach from a terminal while
-remaining live under the supervisor, and a completed Claude session may remain
-`completed` after its worker process stops.
+Process and tmux liveness reconciliation may override provisional hook state.
+For Claude, `Stop` describes the foreground turn only; it does not prove that
+provider-internal subagents, background commands, or scheduled tasks finished.
+Detaching a tmux client does not stop the provider process.
 
 ## Provider Adapter Contract
 
@@ -704,9 +707,10 @@ frontends instead of fabricating support.
 
 The initial fixture baseline is the locally verified Codex `0.144.4` and Claude
 Code `2.1.210`, but these are not permanent pins. Codex app-server schemas are
-generated from each supported CLI version and contract-tested. Claude Agent
-View and supervisor discovery are capability-gated because administrators can
-disable them and their preview interface may change.
+generated from each supported CLI version and contract-tested. Claude's
+documented hooks and native resume entry points are version-gated. Agent View
+and its supervisor are an explicitly disabled, incompatible runtime mode for
+managed Claude presentation rather than a discovery dependency.
 
 ## Codex Provider
 
@@ -745,77 +749,93 @@ transport.
 
 ## Claude Provider
 
+### Operational profile
+
+Managed Claude sessions use Claude Code with Agent View disabled:
+
+```json
+{
+  "disableAgentView": true
+}
+```
+
+The durable user setting makes normal interactive launches follow the same
+profile. Switchboard-managed launches additionally set
+`CLAUDE_CODE_DISABLE_AGENT_VIEW=1` so a project-local override cannot move the
+runtime out of its tmux surface. This disables `claude agents`, `--bg`,
+`/background`, Left-arrow detachment into Agent View, and the on-demand Claude
+supervisor. It does not disable subagents, background shell tasks, or `/loop`
+jobs inside the current Claude process.
+
+Switchboard does not silently change the user setting or stop existing Claude
+background workers. Setup and `doctor` report an enabled Agent View or a live
+legacy supervisor as a migration requirement. Stopping legacy workers is an
+explicit user action because it can interrupt work. Managed Claude launch and
+resume remain unavailable until the launch environment can enforce the
+disabled profile.
+
 ### Discovery
 
-- Use `claude agents --all --json` for supervisor-managed sessions, runtime IDs,
-  names, working directories, PIDs, and background state.
-- Use hooks to register interactive sessions and session switches.
-- Merge supervisor and hook records by durable Claude session UUID.
-- Treat supervisor state as authoritative for background activity and liveness.
+- Use Claude lifecycle hooks to register sessions and bind durable Claude UUIDs
+  to Switchboard launch intents and surfaces.
+- Use bounded same-user process and tmux reconciliation for runtime presence,
+  process birth, and exact surface liveness.
+- Retain every hook-observed or Switchboard-launched session after its process
+  exits so its native UUID remains resumable.
+- Do not invoke `claude agents --all --json`; the command is unavailable in the
+  required operational profile and describes a supervisor Switchboard does not
+  use.
 
 Claude does not currently expose every ordinary historical `/resume` entry
-through a documented structured listing command. Therefore:
-
-- Supervisor-managed sessions can be imported immediately.
-- Every interactive session encountered after hook installation is retained in
-  the Switchboard registry and remains visible when parked.
-- Untouched legacy history remains available through a provider-native
-  `Open Claude history` action.
-- Switchboard will not parse private transcript contents to manufacture a full
-  history list. A documented provider API can replace this limitation later.
+through a documented structured listing command. Therefore untouched legacy
+history remains available through a provider-native `Open Claude history`
+action that runs `claude --resume` in an unbound managed tmux surface. Its
+`SessionStart` hook binds the selected provider UUID after the user chooses a
+conversation. Switchboard does not parse private transcripts, prompt history,
+or picker message content to manufacture a complete history list.
 
 ### Status
 
-Claude supervisor observations map as follows:
+Runtime presence and foreground turn state are deliberately separate:
 
 ```text
-working/busy             -> live, working
-blocked                  -> live, needs_input, reason=unknown
-done with a live PID     -> live, completed
-done without a live PID  -> stopped, completed, resumable
-known resumable session  -> stopped, unknown activity, resumable
+live validated process       -> runtime_presence=live
+UserPromptSubmit/PostToolUse -> activity=working
+PermissionRequest            -> activity=needs_input, reason=permission
+Stop                         -> activity=ready, reason=foreground_turn_complete
+SessionEnd plus dead process -> runtime_presence=stopped, resumable=true
 ```
 
-Hooks cover interactive sessions and provide faster transitions than polling.
-A permission or question hook may enrich a blocked observation with a specific
-reason, but supervisor JSON alone does not expose that distinction.
+`Stop` means that the foreground Claude turn reached its stop point. It does
+not prove that subagents, background shell commands, or scheduled tasks inside
+the session have finished. Switchboard does not summarize those children as
+separate sessions or manufacture a whole-session `completed` state from them;
+Claude's `/tasks` and in-session UI remain authoritative for that detail.
+Process/tmux reconciliation repairs missed lifecycle hooks and is authoritative
+for whether the interactive runtime still exists.
 
-### Workspace and opening
+### Surfaces, opening, and stopping
 
-The first release preserves the existing one-workspace-per-host Claude
-workflow. The default tmux layout is:
+Claude uses the same one-managed-surface-per-runtime tmux lifecycle as Codex:
 
 ```text
-claude workspace: as-claude-<host-id-prefix>
-  manager window: claude agents
-  attach windows: claude attach <short-runtime-id>
-  resume windows: claude --resume <provider-session-id>
+new session:     claude
+known parked:    claude --resume <provider-session-id>
+history picker:  claude --resume
 ```
 
-The workspace is a transport container, not a provider runtime. Agent View and
-background workers remain owned by Claude's supervisor. Exact attachment
-windows are created only when the selected session is not already confirmed in
-a managed surface. They let one Ghostty/tmux workspace contain several exact
-session views without opening a separate desktop terminal for every
-conversation.
+Each command starts inside a launch-owned waiting tmux surface. The launch
+environment carries the Switchboard launch and surface identifiers, the first
+matching hook binds the durable Claude UUID, and later opens focus or attach
+that exact surface. tmux, not a Claude daemon, keeps the live CLI process
+running when DMS, Ghostty, SSH, or another frontend disconnects.
 
-- An interactive session is focused only when current supervisor attachment
-  evidence or process correlation confirms its surface.
-- A background session with a short runtime ID uses `claude attach <id>`.
-- A parked known session uses `claude --resume <uuid>`.
-- A new interactive session runs `claude` in the selected working directory.
-- `Open Claude workspace` selects or creates the manager window.
-
-Claude's supervisor is the persistence backend for background sessions. A tmux
-surface containing `claude attach` is only a terminal view. Switchboard does
-not create tmux workspaces or windows merely to keep Claude background work
-alive.
-
-On Claude Code 2.1.210, pressing Left from an interactive TUI leaves that
-process as the Agent View manager and creates a separate background runtime
-with its own provider session UUID and short runtime ID. The manager's
-interactive supervisor row is not the background session shown as current and
-must never inherit its binding.
+Stopping a managed Claude runtime means requesting orderly exit from the exact
+validated surface and, after a bounded grace period, terminating only the
+launch-owned process group and tmux surface. It preserves Claude's transcript
+and resumable UUID and never invokes `claude rm` or deletes provider history.
+Unknown or unmanaged live processes remain visible but are never killed by
+Switchboard.
 
 ### In-terminal session switching
 
@@ -825,18 +845,15 @@ sequence:
 1. Claude emits `SessionEnd` for A with the resume/switch reason.
 2. Claude emits `SessionStart` for B.
 3. The hook inherits the stable Switchboard surface identifier.
-4. The registry removes A's surface association and updates A from supervisor
-   evidence rather than assuming it stopped.
+4. The registry removes A's surface association and parks it unless separate
+   process evidence proves another runtime.
 5. The registry associates the existing surface with B.
 
-Agent View detach/attach does not emit that sequence in the tested version. A
-provider-manager surface has no session binding. An exact attachment is
-confirmed while a managed pane's argv contains `claude attach <short-id>` and
-that short ID matches live supervisor evidence. The attach command itself did
-not emit a lifecycle hook. Reconciliation otherwise clears the binding or
-marks it unknown. An unconfirmed old binding is never used to focus an exact
-session. The TUI and DMS continue to show separate rows for provider sessions
-plus one explicit workspace action.
+Agent View detach/attach is outside the supported profile. If the configuration
+check or process evidence shows that a runtime escaped to the Claude supervisor,
+Switchboard clears the surface binding, reports `agent_view_enabled`, and does
+not launch a duplicate. There is no provider-manager surface or Claude-specific
+workspace action.
 
 ## Event Ingestion
 
@@ -867,10 +884,12 @@ definition per provider. `doctor` detects duplicate Switchboard definitions,
 stale trusted hashes, a missing absolute executable, and hook latency above the
 configured budget.
 
-Claude Agent View workers spawned from a manager did not inherit a one-off
-`--settings` file in the 2.1.210 spike. User-level hook installation is
-therefore required for background-worker coverage; launch-only additional
-settings are not a supported substitute.
+The 2.1.210 Agent View spike showed that supervisor workers did not inherit a
+one-off `--settings` file. That evidence is retained to explain why Agent View
+is not an integration boundary. The supported profile has no supervisor
+workers, but user-level hook installation is still required so manually opened
+sessions and the native history picker receive the same lifecycle coverage as
+Switchboard launches.
 
 Event writes include an observation timestamp, provider turn/session
 identifier where available, source priority, and an idempotency key derived
@@ -967,14 +986,12 @@ tolerate user-created windows, panes, and layouts.
 
 The surface starts a short-lived `swbctl bootstrap <launch-id>` process. The
 bootstrap waits until the target surface has a real viewing client so terminal
-capability and color probes observe the actual terminal. For a one-window Codex
-tmux session, `session_attached > 0` is sufficient. For a Claude workspace, at
-least one attached client must currently select the target window; a client
-viewing another workspace window does not release the bootstrap. The bootstrap
-then performs one final target-session liveness check and replaces itself with
-the adapter's native `codex` or `claude` argv. tmux persists the provider
-process and terminal state; Switchboard does not keep a wrapper alive after
-startup.
+capability and color probes observe the actual terminal. For the default
+one-window Codex or Claude tmux session, `session_attached > 0` is sufficient.
+The bootstrap then performs one final target-session liveness check and replaces
+itself with the adapter's native `codex` or `claude` argv. tmux persists the
+provider process and terminal state; Switchboard does not keep a wrapper alive
+after startup.
 
 If no client attaches within the configured launch timeout, the bootstrap marks
 the intent expired and exits. Reconciliation removes the empty surface. This
@@ -982,9 +999,10 @@ preserves the proven DMS attach-before-provider behavior without creating a
 persistent wrapper.
 
 The default policy is at most one confirmed managed session surface per logical
-session on one host. A Claude manager surface is exempt because it is not bound
-to a provider session. The surface identity remains stable if an observable
-in-terminal provider action changes the conversation associated with it.
+session on one host. The reserved generic manager role is exempt because it is
+not bound to a provider session; Claude does not create one. The surface
+identity remains stable if an observable in-terminal provider action changes
+the conversation associated with it.
 SQLite enforces uniqueness for confirmed managed bindings. An unknown binding
 does not reserve a session, and reconciliation unbinds rather than guesses when
 two observations cannot be ordered safely.
@@ -999,12 +1017,11 @@ When opening a tmux surface:
 - From a desktop frontend, focus an existing terminal client when possible;
   otherwise launch a terminal that attaches to the target.
 
-The normal Claude workspace policy expects zero or one managed desktop client.
-With exactly one attached client, the core may switch that client to the target
-window and DMS then focuses the workspace's niri window. With multiple clients,
-Switchboard switches only a client that the integration can identify
-unambiguously; otherwise it leaves existing clients untouched and launches a
-new exact attachment. It never changes every attached client as a shortcut.
+Claude and Codex use the same attachment policy. With an identified current
+client, the core may switch that client to the exact target surface. With no
+identified client, an integration may focus an existing terminal that is
+already attached or launch one new exact attachment. Switchboard never changes
+every attached client as a shortcut.
 
 The core does not assume Ghostty or niri. Desktop-specific focus and launch
 behavior belongs to an integration adapter.
@@ -1034,11 +1051,14 @@ prepare_launch(LaunchRequest, PresentationContext, request_id)
   -> PresentationPlan
 ```
 
-`LaunchRequest` selects `open`, `new`, or `manage`. An open request contains a
-target session key. A new request contains provider, project, concrete
-location, and an optional source handoff. A manage request selects a supported
-provider workspace action and has no target session. All use the same intent,
-lease, surface, bootstrap, and presentation machinery.
+`LaunchRequest` selects `open`, `new`, `history`, or the reserved generic
+`manage` action. An open request contains a target session key. A new request
+contains provider, project, concrete location, and an optional source handoff.
+A Claude history request starts the provider-native resume picker with no target
+session and becomes bound only after its `SessionStart` hook identifies the
+user's selection. A manage request selects a future provider workspace action
+and has no target session. All use the same intent, lease, surface, bootstrap,
+and presentation machinery.
 
 `PresentationContext` describes only what the caller can do with the prepared
 surface:
@@ -1361,10 +1381,11 @@ unassigned group retains ad-hoc and legacy sessions.
 - Refresh/reconcile.
 - Open the provider-native history picker when Switchboard cannot enumerate old
   provider history.
-- Open the host's Claude workspace/Agent View independently of any session row.
+- Stop a managed runtime while preserving provider-owned resumable history.
 - Inspect an error or degraded capability.
 
-Destructive actions are excluded from the first release.
+Provider-history deletion and other destructive durable-session actions are
+excluded from the first release.
 
 ### tmux entry points
 
@@ -1764,10 +1785,12 @@ Migration should preserve those behaviors while moving ownership in stages.
   landscape document.
 - Record results and retained contract fixtures in
   `docs/phase-0-validation.md` and `spikes/fixtures/`.
-- Capture versioned Codex app-server, Codex hook, Claude supervisor, and Claude
-  hook fixtures from the tested local versions.
-- Verify Claude Agent View detach/attach observability and document the exact
-  degraded behavior when no binding signal exists.
+- Capture versioned Codex app-server, Codex hook, and Claude hook fixtures from
+  the tested local versions. Retain the Claude supervisor fixtures as rejected
+  design evidence, not a production adapter contract.
+- Verify that disabling Claude Agent View preserves native resume, subagents,
+  background tasks, and session-scoped schedules while removing its competing
+  full-session supervisor path.
 - Verify attach-before-provider startup, concurrent open reservations, and
   niri/Ghostty focus on an isolated tmux socket.
 - Scaffold the Python package, formatting, tests, CI, explicit license status,
@@ -1790,7 +1813,7 @@ artifact evidence are recorded in
 ### Phase 2: Provider discovery, hooks, and reconciliation (partial)
 
 - Port Codex app-server discovery and metadata normalization.
-- Add capability-gated Claude supervisor discovery.
+- Add Claude hook discovery and process/tmux reconciliation without Agent View.
 - Add Codex and Claude hook ingestion with launch binding and idempotency.
 - Implement normalized state transitions and liveness reconciliation.
 - Retain observed sessions after runtimes stop and preserve resumability and
@@ -1818,19 +1841,20 @@ For execution tracking, the completed local Codex slice is **Phase 2A**.
 
 - refresh the retained Claude contract fixtures against the current supported
   CLI on `snap.lan`;
-- implement capability-gated supervisor discovery and provider normalization;
+- require and diagnose the Agent-View-disabled operational profile;
 - add identifiable Claude hook management and atomic lifecycle ingestion;
-- reconcile supervisor rows, native processes, manager state, and retained
-  resumability without treating a manager as a bound session surface; and
-- validate degraded Agent View behavior plus canonical Snapshot v1 output.
+- reconcile native processes, tmux surfaces, and retained resumability without
+  treating foreground turn completion as child-task completion; and
+- validate native resume fallback plus canonical Snapshot v1 output.
 
 Phase 2B ends at trustworthy Claude runtime truth. It does not add Claude DMS
-actions, workspaces, or tmux presentation policy.
+actions or tmux presentation policy.
 
-Execution now proceeds through Phase 3B before Phase 2B so the already proven
-Codex read, runtime, existing-session, tmux, and DMS paths become one complete
-new-and-existing-session vertical slice. This ordering does not weaken the
-provider-neutral contracts or permit Claude presentation before Phase 2B.
+The 2026-07-16 Claude contract refresh, exact implementation boundary, state
+mapping, delivery slices, DMS compatibility rule, and acceptance gates are
+recorded in [`docs/phase-2b-plan.md`](phase-2b-plan.md). With Phase 3B now
+complete, execution returns to Phase 2B. Claude presentation remains gated on
+that provider foundation.
 
 ### Phase 3: Atomic launch, tmux, and DMS parity
 
@@ -1857,14 +1881,15 @@ command contract, resolution rules, failure behavior, DMS boundary, and
 acceptance evidence are recorded in
 [`docs/phase-3b-plan.md`](phase-3b-plan.md).
 
-#### Phase 3C: Claude workspace and surface parity
+#### Phase 3C: Claude tmux and DMS parity
 
-- Implement `prepare-workspace` and the one-workspace-per-host Claude tmux
-  policy.
-- Model manager and exact-attach session windows without presenting manager
-  state as evidence of a session binding.
-- Extend DMS parity to Claude workspace and session actions only after Phase
-  2B capabilities and runtime identity are available.
+- Reuse the Codex one-managed-surface lifecycle for Claude new and known-resume
+  actions, with Agent View disabled in every managed launch.
+- Add the unbound provider-native history-picker action and bind its surface
+  only after the selected session's hook identifies the durable UUID.
+- Add graceful managed-runtime stop without deleting Claude history.
+- Extend DMS parity to Claude session and history actions only after Phase 2B
+  hook capability and runtime identity are available.
 
 The existing DMS helper remains the Claude and remote fallback until these
 paths and, later, Phase 5 pass equivalent live tests.
@@ -1920,11 +1945,12 @@ until its replacement passes equivalent discovery and open-path tests.
 
 ### Provider contract tests
 
-Use captured, redacted fixtures for Codex app-server/hooks and Claude
-supervisor/hooks. Fixtures must record the provider version and schema
-fingerprint and cover missing fields, incompatible versions, disabled Agent
-View, completed sessions with and without PIDs, background work, interactive
-sessions, and provider errors.
+Use captured, redacted fixtures for Codex app-server/hooks and Claude hooks.
+Fixtures must record the provider version and schema fingerprint and cover
+missing fields, incompatible versions, enabled-versus-disabled Agent View,
+foreground turn transitions, runtime exit, resume switching, and provider
+errors. Historical supervisor fixtures remain evidence for rejecting that
+integration boundary, not success cases for production discovery.
 
 ### tmux integration tests
 
@@ -1932,17 +1958,16 @@ Use an isolated tmux server/socket to verify:
 
 - surface creation and metadata
 - provider does not start before a real client views the target surface,
-  including a non-selected window in an already attached Claude workspace
+  for both Codex and Claude
 - bootstrap replaces itself with the provider and expires cleanly without a
   client
 - attach and switch behavior
 - stale or mismatched client IDs cannot switch another tmux client
 - pane discovery in user-modified layouts
-- one Claude workspace with manager and exact-attach windows
-- manager launch reaches `manager_ready` without manufacturing a provider
-  session binding
-- confirmed session rebinding from Claude A to B and clearing an unconfirmed
-  manager binding
+- independent Claude surfaces use the same identity metadata and attachment
+  rules as Codex surfaces
+- a Claude history-picker surface remains unbound until `SessionStart`
+- confirmed session rebinding from Claude A to B after native `/resume`
 - stale surface cleanup
 - concurrent prepare calls across processes create exactly one surface
 
@@ -1955,10 +1980,14 @@ Use an isolated tmux server/socket to verify:
   handoff.
 - Wrap a session through the current-session agent tool and reopen it.
 - Continue operating when the optional memory adapter is unavailable.
-- Start, background, attach, and reopen a Claude session.
-- Open several Claude sessions as windows in one workspace.
-- Switch Claude conversations through `/resume` and Agent View and verify that
-  only confirmed surface bindings are focused.
+- Start, tmux-detach, attach, park, and reopen a Claude session.
+- Open several Claude sessions as independent managed tmux surfaces.
+- Switch Claude conversations through `/resume` and verify that only the
+  hook-confirmed surface binding is focused.
+- Open native Claude history in an unbound surface, select a conversation, and
+  bind the resulting UUID without reading transcript content.
+- Stop one managed Claude runtime while preserving native resume, and refuse to
+  stop an unmanaged process.
 - Miss a hook event and repair state through reconciliation.
 - Verify remote hooks never perform network operations.
 - Confirm a remote snapshot never recursively queries other hosts.
@@ -1995,23 +2024,21 @@ The first release does not attempt to retrofit stable identity into arbitrary
 bare Ghostty windows or other terminals. Improving that case is optional future
 work, not an acceptance criterion for the core workflow.
 
-### Native Claude Agent View switching
+### Claude Agent View migration
 
-Claude's supervisor is authoritative for session activity, but the tested
-Agent View detach/attach transition emitted no corresponding hook. Switchboard
-therefore confirms a background surface only by correlating a managed pane
-running `claude attach <short-id>` with the supervisor row for that short ID.
-A manager pane is always unbound. After any transition that loses this process
-correlation, the session list remains correct but the surface becomes
-`binding_confidence=unknown`. Opening that session creates or selects a fresh
-exact-attach window instead of focusing a possibly stale binding. This is an
-explicit degraded routing case, not a reason to parse terminal output or
-private transcript files.
+Agent View and its supervisor may already have live workers when Switchboard is
+installed. Switchboard reports those workers and blocks managed Claude launch;
+it does not stop, import, or adopt them automatically. The user finishes or
+stops that work, disables Agent View, and then retries. If later evidence shows
+a managed runtime escaped into the supervisor, Switchboard clears the exact
+surface binding and refuses to launch a duplicate. This is an explicit
+configuration conflict, not a reason to parse terminal output or private
+transcript files.
 
 ### Provider contract evolution
 
-Codex app-server schemas are version-specific and Claude Agent View is a
-preview capability. Unsupported versions retain registry-known sessions and
+Codex app-server schemas and Claude hook/native-resume behavior are
+version-specific. Unsupported versions retain registry-known sessions and
 provider-native history actions, but structured discovery/status features may
 be marked unavailable. Shipping a new supported version requires fixture and
 contract-test coverage; unknown fields alone do not require a release.
@@ -2139,8 +2166,8 @@ The following decisions form the implementation baseline:
 - Projects have globally stable configured IDs and merge host-local locations
   through snapshots.
 - Codex uses tmux for runtime persistence.
-- Claude uses its supervisor for runtime persistence and one host tmux workspace
-  for manager and exact-attachment surfaces.
+- Claude and Codex both use one managed tmux surface per live runtime; Claude
+  Agent View and its supervisor are disabled.
 - Host reachability, runtime presence, resumability, activity/reason, and
   attachment are separate state axes.
 - Handoffs are immutable records and continuation references an exact handoff.

@@ -35,6 +35,7 @@ def test_static_pep_621_metadata_and_stdlib_runtime() -> None:
         "docs/design.md",
         "docs/phase-1-validation.md",
         "docs/phase-2-validation.md",
+        "docs/phase-2b-plan.md",
         "docs/phase-3a-validation.md",
         "docs/phase-3b-plan.md",
     ]
@@ -46,6 +47,7 @@ def test_readme_states_phase_and_license() -> None:
     assert "Phase 3A existing-session presentation" in readme
     assert "Phase 2" in readme
     assert "docs/phase-2-validation.md" in readme
+    assert "docs/phase-2b-plan.md" in readme
     assert "docs/phase-3a-validation.md" in readme
     assert "docs/phase-3b-plan.md" in readme
     assert "MIT License" in readme
@@ -85,6 +87,7 @@ def test_ci_smokes_wheel_and_source_distribution_installations() -> None:
     assert "Path(sys.argv[1]).read_bytes()" in workflow
     assert "SnapshotEnvelope.from_json" in workflow
     assert '"docs/phase-2-validation.md"' in verifier
+    assert '"docs/phase-2b-plan.md"' in verifier
     assert '"docs/phase-3a-validation.md"' in verifier
     assert '"docs/phase-3b-plan.md"' in verifier
     assert '"agent_switchboard/migrations/v0003_name_provenance_runtime_index.py"' in (

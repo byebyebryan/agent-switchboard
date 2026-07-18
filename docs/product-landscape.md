@@ -491,8 +491,10 @@ building a competing session database.
     can merge locations and sessions without path or Git-remote heuristics.
 15. Keep host reachability outside session runtime state, and preserve completed
     attention independently of whether a provider worker still has a PID.
-16. Treat Claude Agent View as a provider manager surface, not as proof that one
-    specific conversation occupies the terminal.
+16. Disable Claude Agent View for managed operation and use the same tmux
+    persistence/attachment boundary as Codex. Keep Claude subagents,
+    background tasks, and schedules inside the provider session rather than
+    turning them into Switchboard sessions.
 
 ## Pre-implementation Validation
 
@@ -506,16 +508,18 @@ actual dependencies.
 
 ### Claude lifecycle spike
 
-- Capture and validate `claude agents --all --json` for working, needs-input,
-  completed-with-PID, completed-without-PID, attached, and stopped sessions.
-- Observe hooks and supervisor JSON while starting, backgrounding, attaching,
-  detaching into Agent View, switching through `/resume`, and attaching another
-  session from Agent View.
-- Determine exactly which transitions can confirm a terminal surface binding
-  and which must degrade to an unknown binding.
-- Verify one tmux workspace containing an Agent View manager window and several
-  exact `claude attach` windows without creating extra desktop terminals.
-- Repeat with Agent View disabled to prove the provider-native fallback.
+The original Agent View/supervisor spike is complete and retained in the Phase
+0 record. The 2026-07-17 design pivot rejects that integration boundary. The
+remaining validation is:
+
+- prove native `claude --resume` and lifecycle hooks work with Agent View
+  disabled;
+- distinguish foreground hook state from provider-internal subagents,
+  background commands, and scheduled tasks;
+- correlate hook identity with an exact managed tmux process/surface and repair
+  missed events through bounded liveness checks; and
+- stop a managed runtime without deleting provider-owned resumable history,
+  while refusing to stop an unmanaged process.
 
 ### Codex lifecycle spike
 

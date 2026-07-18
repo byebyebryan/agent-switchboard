@@ -171,8 +171,8 @@ would make the source archive digest self-referential and stale on every edit.
 
 ## Remaining implementation scope
 
-- Claude supervisor discovery with capability-gated fallback, hook ingestion,
-  process/supervisor liveness, and normalized runtime transitions.
+- Claude hook ingestion, Agent-View-disabled capability checks, process/tmux
+  liveness, and normalized foreground runtime transitions.
 - Project-aware new-session preparation after the Claude provider foundation.
 - Pull-based remote snapshots, caching, and remote actions.
 - Searchable TUI, curation/handoffs, context retrieval, and session-scoped
@@ -181,3 +181,6 @@ would make the source archive digest self-referential and stale on every edit.
 Existing local Codex resume preparation, tmux surface actions, and DMS
 niri/Ghostty parity were completed later in Phase 3A; see
 [`docs/phase-3a-validation.md`](phase-3a-validation.md).
+
+The refreshed Claude evidence and focused implementation boundary are recorded
+in [`docs/phase-2b-plan.md`](phase-2b-plan.md).

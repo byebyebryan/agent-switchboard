@@ -9,6 +9,12 @@ provider transcript parser. The launch reservation, client-gated tmux
 bootstrap, Codex discovery/hooks, and Claude supervisor/native-TUI contracts
 all have working evidence.
 
+The 2026-07-17 design pivot supersedes the Claude supervisor integration
+conclusion while retaining its observations as evidence. Production Claude
+uses `disableAgentView=true`, hooks, native resume, and the same managed tmux
+surface lifecycle as Codex. The supervisor fixtures remain useful rejection
+and compatibility inputs; they are not the Phase 2B discovery contract.
+
 Phase 1 and the read-only portion of Phase 2 can proceed. Frontend migration
 remains gated on exercising the implemented `swbctl` structured
 prepare/select/attach path end to end; that command does not exist yet. This is
@@ -97,11 +103,48 @@ design should claim one atomic transaction spans SQLite and tmux.
 - The local Claude organization login is disabled, so model-backed Claude
   lifecycle tests ran on `snap.lan`. No host service was installed.
 
-These observations require a distinct manager-surface role. A manager is never
-bound to the background session shown as current. Exact background focus is
-allowed only when a managed pane argv contains `claude attach <short-id>`
-matching live supervisor evidence; otherwise binding confidence is unknown and
-a fresh exact attach view is created.
+These observations originally motivated a distinct manager-surface role. The
+2026-07-17 pivot rejects that product path: the generic role remains in the
+provider-neutral schema, but Claude does not create a manager or exact-attach
+surface in the supported Agent-View-disabled profile.
+
+### Claude Phase 2B evidence refresh
+
+The retained Claude contract was refreshed on `snap.lan` on 2026-07-16 before
+Phase 2B planning. The host was already the active machine rather than an SSH
+target for this run: hostname `80H1VV3`, Python 3.14.6, tmux 3.7b, and Claude
+Code 2.1.210. Agent View was enabled.
+
+- A sanitized `claude agents --all --json` sample returned 11 rows. In addition
+  to the original fixture, the same provider version produced
+  `background:working:busy`, `background:done:idle` with a live PID, and an
+  `interactive` row with neither `id` nor `status`. The original and dated
+  fixtures are both retained because neither observation alone spans the valid
+  optional-field combinations.
+- Every observed `sessionId` was a canonical UUID, every observed short runtime
+  ID was eight characters, and `startedAt` was a plausible 13-digit Unix
+  millisecond timestamp. These fields are retained only as evidence about the
+  rejected supervisor adapter.
+- Live background row PIDs resolved to Claude `bg-spare` processes. Their argv
+  contained neither the durable session UUID nor the short runtime ID. A
+  supervisor row may therefore associate its reported PID with that row, but
+  process argv cannot independently bind a background worker to a session.
+- With `CLAUDE_CODE_DISABLE_AGENT_VIEW=1`, the JSON command exited 1 with no
+  stdout and the documented disabled-Agent-View diagnostic. Native resume and
+  hook capabilities remained available and now form the production boundary.
+- A bounded non-persistent turn rejected by Claude's budget gate emitted
+  `SessionStart`, `UserPromptSubmit`, and `SessionEnd(reason=other)`. A second
+  probe blocked `UserPromptSubmit` in the hook before any model request; it
+  completed in 42 ms with zero turns and zero reported cost and proved that
+  `prompt_id` is a canonical UUID on the prompt and resulting `SessionEnd`.
+  `SessionStart` correctly had no prompt ID.
+- The first probe also showed that `--max-budget-usd 0.05` is not a reliable
+  preflight spend ceiling for this validation shape: Claude reported a
+  $2.28836 cache-creation cost before returning `error_max_budget_usd`. No
+  further model-backed probes were run.
+
+The focused implementation boundary and acceptance gates derived from this
+refresh are recorded in [`docs/phase-2b-plan.md`](phase-2b-plan.md).
 
 ### Existing desktop and SSH integration
 
@@ -122,5 +165,5 @@ a fresh exact attach view is created.
 2. Exercise `swbctl` remote prepare/select/attach and structured error
    responses before launching Ghostty.
 3. Serialize the niri focus test so user input cannot race the assertion.
-4. Treat unknown provider versions and disabled Agent View as explicit
-   capabilities while retaining registry-known sessions.
+4. Treat unknown provider versions and enabled Agent View as explicit
+   capability/configuration conflicts while retaining registry-known sessions.
