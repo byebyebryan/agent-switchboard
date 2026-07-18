@@ -187,7 +187,7 @@ def test_claude_doctor_checks_profile_handlers_latency_and_legacy_runtime(
     )
 
     assert healthy.healthy
-    assert healthy.provider_version == "2.1.210"
+    assert healthy.provider_version == "2.1.214"
     assert healthy.cold_latency_ms is not None
 
     agent = proc_root / "42"

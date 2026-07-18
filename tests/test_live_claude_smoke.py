@@ -63,7 +63,7 @@ def _run(tmp_path: Path, plan: dict[str, object]) -> subprocess.CompletedProcess
     )
 
 
-def test_live_claude_smoke_prints_only_sanitized_zero_cost_summary(
+def test_live_claude_smoke_prints_only_sanitized_no_model_summary(
     tmp_path: Path,
 ) -> None:
     secret = "SECRET-CLAUDE-SMOKE-OUTPUT"
@@ -88,7 +88,7 @@ def test_live_claude_smoke_prints_only_sanitized_zero_cost_summary(
         "reportedTurns",
         "sessionCount",
     }
-    assert summary["providerVersion"] == "2.1.210"
+    assert summary["providerVersion"] == "2.1.214"
     assert summary["features"] == ["hooks", "native_resume", "tmux_runtime"]
     assert summary["eventCounts"] == {
         "SessionEnd": 1,

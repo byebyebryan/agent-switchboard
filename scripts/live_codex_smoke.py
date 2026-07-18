@@ -19,7 +19,7 @@ from agent_switchboard.snapshot import build_host_snapshot_json
 from agent_switchboard.storage import Registry
 
 DEFAULT_CODEX_EXECUTABLE = "codex"
-DEFAULT_EXPECTED_VERSION = "0.144.4"
+DEFAULT_EXPECTED_VERSION = "0.144.6"
 DEFAULT_EXPECTED_FINGERPRINT = (
     "5d8251e1e2f713a3c567c927386f84f2f94692d4721b90d8ff36d0ff92877621"
 )

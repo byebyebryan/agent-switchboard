@@ -581,7 +581,7 @@ def test_provider_hooks_list_contract_and_feature_attribution(
         cwds=(tmp_path,)
     )
     assert result.available
-    assert result.provider_version == "0.144.4"
+    assert result.provider_version == "0.144.6"
     assert result.issues == ()
     assert result.entries[0].hooks[0].event_name == "sessionStart"
     assert result.entries[0].warnings == ("source warning",)

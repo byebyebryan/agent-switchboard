@@ -459,7 +459,8 @@ The effective no-model hook check was:
 
 It used temporary Claude settings and XDG roots, emitted exactly one each of
 `SessionStart`, `UserPromptSubmit`, and `SessionEnd` into an isolated registry,
-reported one session, zero model turns, and zero cost, and printed no provider
+reported one session, zero model turns, and provider-reported
+`total_cost_usd=0`, and printed no provider
 identity or private payload. A separate disposable tmux server proved that a
 hook-observed Claude process with no attached client remained `live` and
 `detached`; `/exit` then reconciled it to `stopped` and `resumable`. With

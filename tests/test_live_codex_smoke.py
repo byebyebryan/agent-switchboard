@@ -109,7 +109,7 @@ def test_live_smoke_prints_only_sanitized_summary_and_uses_isolated_state(
         "schemaFingerprint",
         "sessionCount",
     }
-    assert summary["providerVersion"] == "0.144.4"
+    assert summary["providerVersion"] == "0.144.6"
     assert summary["schemaFingerprint"] == FINGERPRINT
     assert summary["features"] == ["app_server_thread_list", "schema_fingerprint"]
     assert summary["sessionCount"] == 1

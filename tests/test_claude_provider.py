@@ -48,7 +48,7 @@ def test_supported_disabled_profile_reports_only_bounded_features(
     result = provider.inspect_capability(settings(tmp_path / "settings.json"))
 
     assert result.available
-    assert result.provider_version == "2.1.210"
+    assert result.provider_version == "2.1.214"
     assert result.features == CLAUDE_FEATURES
     assert result.degraded_reasons == ()
     assert json.loads(log.read_text(encoding="utf-8"))["argv"] == ["--version"]

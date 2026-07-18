@@ -34,6 +34,14 @@ EXPECTED_EVENTS = ("SessionStart", "UserPromptSubmit", "SessionEnd")
 MAX_PROVIDER_OUTPUT_BYTES = 1024 * 1024
 MAX_PROVIDER_ERROR_BYTES = 1024 * 1024
 MAX_BLOCK_INPUT_BYTES = 1024 * 1024
+_BLOCK_HOOK_CODE = (
+    "import sys\n"
+    f"payload = sys.stdin.buffer.read({MAX_BLOCK_INPUT_BYTES + 1})\n"
+    f"if len(payload) > {MAX_BLOCK_INPUT_BYTES}:\n"
+    "    raise SystemExit(2)\n"
+    'print("{\\"decision\\":\\"block\\",\\"reason\\":'
+    '\\"Switchboard no-model lifecycle probe.\\"}")\n'
+)
 
 
 class _SmokeFailure(RuntimeError):
@@ -168,32 +176,19 @@ def _run_bounded(
         process.stderr.close()
 
 
-def _blocking_hook() -> int:
-    stream = getattr(sys.stdin, "buffer", sys.stdin)
-    try:
-        payload = stream.read(MAX_BLOCK_INPUT_BYTES + 1)
-    except OSError:
-        return 2
-    if len(payload) > MAX_BLOCK_INPUT_BYTES:
-        return 2
-    # Exit 2 is Claude's blocking-hook result. The payload is deliberately
-    # discarded without parsing, logging, hashing, or echoing it.
-    return 2
-
-
 def _settings_document(swbctl: Path) -> dict[str, object]:
     groups = canonical_claude_hook_groups(swbctl, timeout_seconds=2)
     hooks = {event: [group] for event, group in groups.items()}
-    prompt_group = hooks["UserPromptSubmit"][0]
-    assert isinstance(prompt_group, dict)
-    prompt_handlers = prompt_group["hooks"]
-    assert isinstance(prompt_handlers, list)
-    prompt_handlers.append(
+    hooks["UserPromptSubmit"].append(
         {
-            "type": "command",
-            "command": str(Path(sys.executable).absolute()),
-            "args": [str(Path(__file__).resolve()), "--block-hook"],
-            "timeout": 2,
+            "hooks": [
+                {
+                    "type": "command",
+                    "command": str(Path(sys.executable).absolute()),
+                    "args": ["-c", _BLOCK_HOOK_CODE],
+                    "timeout": 2,
+                }
+            ]
         }
     )
     return {
@@ -260,8 +255,16 @@ def _run_smoke(
         )
         settings.chmod(0o600)
         environment = os.environ.copy()
+        for key in (
+            "CLAUDE_CODE_USE_BEDROCK",
+            "CLAUDE_CODE_USE_FOUNDRY",
+            "CLAUDE_CODE_USE_VERTEX",
+        ):
+            environment.pop(key, None)
         environment.update(
             {
+                "ANTHROPIC_API_KEY": "switchboard-intentionally-invalid",
+                "ANTHROPIC_BASE_URL": "http://127.0.0.1:9",
                 "CLAUDE_CODE_DISABLE_AGENT_VIEW": "1",
                 "XDG_CONFIG_HOME": str(configuration),
                 "XDG_STATE_HOME": str(state),
@@ -334,8 +337,6 @@ def _run_smoke(
 
 def main(argv: Sequence[str] | None = None) -> int:
     raw_arguments = list(sys.argv[1:] if argv is None else argv)
-    if raw_arguments == ["--block-hook"]:
-        return _blocking_hook()
     arguments = build_parser().parse_args(raw_arguments)
     try:
         claude = _resolved_executable(arguments.claude)

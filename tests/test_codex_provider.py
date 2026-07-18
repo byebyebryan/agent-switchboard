@@ -146,7 +146,7 @@ def test_three_page_scan_uses_exact_contract_and_normalizes_safe_fields(
 
     assert result.complete
     assert result.capability.available
-    assert result.capability.provider_version == "0.144.4"
+    assert result.capability.provider_version == "0.144.6"
     assert result.capability.schema_fingerprint
     assert [str(item.provider_session_id) for item in result.sessions] == [
         first["id"],
@@ -835,7 +835,7 @@ def test_successful_version_and_schema_evidence_survives_discovery_failure(
     result = provider.discover_sessions()
 
     assert not result.complete
-    assert result.capability.provider_version == "0.144.4"
+    assert result.capability.provider_version == "0.144.6"
     assert result.capability.schema_fingerprint == CODEX_0144_SCHEMA_FINGERPRINT
     assert result.capability.features == ("schema_fingerprint",)
     assert result_code(result) == "app_server_rpc_error"

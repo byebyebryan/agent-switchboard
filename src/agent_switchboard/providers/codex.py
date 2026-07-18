@@ -29,8 +29,8 @@ from uuid import UUID
 from agent_switchboard import __version__
 from agent_switchboard.domain import HostId, ProviderId, SessionKey, canonical_path
 
-CODEX_TESTED_CONTRACT_MIN: Final = "0.144.4"
-CODEX_TESTED_CONTRACT_MAX: Final = "0.144.4"
+CODEX_TESTED_CONTRACT_MIN: Final = "0.144.6"
+CODEX_TESTED_CONTRACT_MAX: Final = "0.144.6"
 CODEX_0144_SCHEMA_FINGERPRINT: Final = (
     "5d8251e1e2f713a3c567c927386f84f2f94692d4721b90d8ff36d0ff92877621"
 )

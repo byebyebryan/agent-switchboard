@@ -125,7 +125,7 @@ def main() -> int:
 
     signal.signal(signal.SIGTERM, terminate)
     time.sleep(float(plan.get("sleep", 0)))
-    sys.stdout.write(str(plan.get("stdout", "2.1.210 (Claude Code)\n")))
+    sys.stdout.write(str(plan.get("stdout", "2.1.214 (Claude Code)\n")))
     sys.stdout.flush()
     stderr_bytes = int(plan.get("stderrBytes", 0))
     if stderr_bytes:

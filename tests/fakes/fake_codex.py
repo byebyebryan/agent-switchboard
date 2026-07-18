@@ -133,7 +133,7 @@ def main() -> int:
     if sys.argv[1:] == ["--version"]:
         version = plan.get("version", {})
         time.sleep(float(version.get("sleep", 0)))
-        sys.stdout.write(version.get("stdout", "codex-cli 0.144.4\n"))
+        sys.stdout.write(version.get("stdout", "codex-cli 0.144.6\n"))
         sys.stdout.flush()
         return int(version.get("returncode", 0))
     if len(sys.argv) >= 3 and sys.argv[1:3] == [

@@ -17,8 +17,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
 
-CLAUDE_TESTED_CONTRACT_MIN: Final = "2.1.210"
-CLAUDE_TESTED_CONTRACT_MAX: Final = "2.1.210"
+CLAUDE_TESTED_CONTRACT_MIN: Final = "2.1.214"
+CLAUDE_TESTED_CONTRACT_MAX: Final = "2.1.214"
 CLAUDE_FEATURES: Final = ("hooks", "native_resume", "tmux_runtime")
 MAX_CLAUDE_SETTINGS_BYTES: Final = 8 * 1024 * 1024
 
