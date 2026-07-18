@@ -65,7 +65,15 @@ python3 spikes/claude_agents_probe.py
 interactive lifecycle tests. Its hook script path is intentionally absolute,
 as production hook installation must be. Adjust that path when copying the
 probe to another host. `hook_capture.py` writes only allowlisted event and
-environment fields.
+environment fields. `claude-hooks.block-prompt.settings.json` is the no-model
+variant: its `UserPromptSubmit` handler records the safe lifecycle shape and
+then exits 2, proving prompt identity and effective hook loading before any API
+request. On the recorded 2.1.210 run it completed with zero turns and zero
+reported cost.
+
+The original `agents-probe.json` and dated `agents-probe-2026-07-16.json`
+captures are both retained because the same provider version produced
+different valid optional-field and state/status combinations over time.
 
 Versioned observed contract shapes live under `spikes/fixtures/`. Validation
 conclusions and remaining gates are in `docs/phase-0-validation.md`.

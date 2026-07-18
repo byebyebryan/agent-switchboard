@@ -18,6 +18,7 @@ SAFE_EVENT_FIELDS = {
     "model",
     "notification_type",
     "permission_mode",
+    "prompt_id",
     "reason",
     "session_id",
     "session_title",
@@ -61,11 +62,18 @@ def process_ancestry(pid: int, limit: int = 8) -> list[dict[str, Any]]:
 
 
 def main() -> int:
-    if len(sys.argv) != 3:
-        print("usage: hook_capture.py PROVIDER OUTPUT.jsonl", file=sys.stderr)
+    if len(sys.argv) not in {3, 4}:
+        print(
+            "usage: hook_capture.py PROVIDER OUTPUT.jsonl [block]",
+            file=sys.stderr,
+        )
         return 2
 
-    provider, output_path = sys.argv[1:]
+    provider, output_path = sys.argv[1:3]
+    block = len(sys.argv) == 4
+    if block and sys.argv[3] != "block":
+        print("optional fourth argument must be 'block'", file=sys.stderr)
+        return 2
     try:
         payload = json.load(sys.stdin)
     except json.JSONDecodeError as exc:
@@ -95,7 +103,7 @@ def main() -> int:
         os.write(fd, encoded)
     finally:
         os.close(fd)
-    return 0
+    return 2 if block else 0
 
 
 if __name__ == "__main__":

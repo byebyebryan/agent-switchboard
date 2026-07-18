@@ -27,6 +27,25 @@
       {"event": "PermissionRequest", "toolName": "Bash"},
       {"event": "Notification", "notificationType": "permission_prompt"}
     ],
+    "budgetRejectedTurn": [
+      {"event": "SessionStart", "source": "startup"},
+      {"event": "UserPromptSubmit"},
+      {"event": "SessionEnd", "reason": "other"}
+    ],
+    "hookBlockedPrompt": [
+      {"event": "SessionStart", "source": "startup", "hasPromptId": false},
+      {
+        "event": "UserPromptSubmit",
+        "hasPromptId": true,
+        "promptIdIsCanonicalUuid": true
+      },
+      {
+        "event": "SessionEnd",
+        "reason": "other",
+        "hasPromptId": true,
+        "promptIdIsCanonicalUuid": true
+      }
+    ],
     "agentViewDetach": {
       "additionalHookObserved": false,
       "managerRemainedInteractive": true,

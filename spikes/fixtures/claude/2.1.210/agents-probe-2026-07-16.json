@@ -1,0 +1,118 @@
+{
+  "providerVersion": "2.1.210 (Claude Code)",
+  "rowCount": 11,
+  "stateStatusCombinations": [
+    "background:blocked:idle",
+    "background:done:None",
+    "background:done:idle",
+    "background:working:busy",
+    "interactive:None:None"
+  ],
+  "rowShapes": [
+    {
+      "keys": [
+        "cwd",
+        "id",
+        "kind",
+        "name",
+        "sessionId",
+        "startedAt",
+        "state"
+      ],
+      "kind": "background",
+      "state": "done",
+      "status": null,
+      "hasRuntimeId": true,
+      "hasSessionId": true,
+      "hasPid": false,
+      "hasCwd": true,
+      "hasName": true,
+      "startedAtType": "int"
+    },
+    {
+      "keys": [
+        "cwd",
+        "id",
+        "kind",
+        "name",
+        "pid",
+        "sessionId",
+        "startedAt",
+        "state",
+        "status"
+      ],
+      "kind": "background",
+      "state": "working",
+      "status": "busy",
+      "hasRuntimeId": true,
+      "hasSessionId": true,
+      "hasPid": true,
+      "hasCwd": true,
+      "hasName": true,
+      "startedAtType": "int"
+    },
+    {
+      "keys": [
+        "cwd",
+        "id",
+        "kind",
+        "name",
+        "pid",
+        "sessionId",
+        "startedAt",
+        "state",
+        "status"
+      ],
+      "kind": "background",
+      "state": "done",
+      "status": "idle",
+      "hasRuntimeId": true,
+      "hasSessionId": true,
+      "hasPid": true,
+      "hasCwd": true,
+      "hasName": true,
+      "startedAtType": "int"
+    },
+    {
+      "keys": [
+        "cwd",
+        "kind",
+        "name",
+        "pid",
+        "sessionId",
+        "startedAt"
+      ],
+      "kind": "interactive",
+      "state": null,
+      "status": null,
+      "hasRuntimeId": false,
+      "hasSessionId": true,
+      "hasPid": true,
+      "hasCwd": true,
+      "hasName": true,
+      "startedAtType": "int"
+    },
+    {
+      "keys": [
+        "cwd",
+        "id",
+        "kind",
+        "name",
+        "pid",
+        "sessionId",
+        "startedAt",
+        "state",
+        "status"
+      ],
+      "kind": "background",
+      "state": "blocked",
+      "status": "idle",
+      "hasRuntimeId": true,
+      "hasSessionId": true,
+      "hasPid": true,
+      "hasCwd": true,
+      "hasName": true,
+      "startedAtType": "int"
+    }
+  ]
+}
