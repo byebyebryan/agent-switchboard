@@ -66,8 +66,10 @@ and projects those actions through the separate DMS adapter. Its completed
 contract, provider lifecycle, live compositor focus, and same-window dedup
 acceptance are recorded in
 [`docs/phase-3c-plan.md`](docs/phase-3c-plan.md).
-The terminal-native Phase 4A vertical slice is planned in
-[`docs/phase-4a-plan.md`](docs/phase-4a-plan.md); remote SSH transport remains
+The terminal-native Phase 4A vertical slice has its optional Textual shell,
+terminal-context resolver, and bounded public-command gateway in place;
+searchable session rows and actions continue in the later increments of
+[`docs/phase-4a-plan.md`](docs/phase-4a-plan.md). Remote SSH transport remains
 Phase 5. See
 [the design](docs/design.md), the
 [Phase 1 validation record](docs/phase-1-validation.md), and the

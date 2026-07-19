@@ -2,7 +2,7 @@
 
 Date: 2026-07-19
 
-Status: planned; no Phase 4A implementation yet
+Status: 4A.0 and 4A.1 complete; 4A.2 through 4A.5 planned
 
 ## Decision and sequencing
 
@@ -211,6 +211,28 @@ Phase 4A does not add:
   unrelated live sessions untouched.
 - Remove isolated registry/tmux state and test-owned processes; move any empty
   provider transcript created by the acceptance harness to desktop trash.
+
+## Implementation checkpoint
+
+As of 2026-07-19, the framework and command-boundary foundation is complete:
+
+- `swbctl tui` loads Textual only from the optional `tui` extra, currently
+  bounded to `textual>=8.2.8,<9`; the base install remains dependency-free and
+  reports the exact install command when the extra is absent.
+- A neutral executable resolver gives both hooks and the TUI an absolute
+  `swbctl` path without coupling the frontend to hook configuration.
+- Startup resolves either a plain terminal or the exact inherited tmux client.
+  It does not enumerate, select, or affect any other tmux client.
+- The asynchronous gateway executes fixed public `swbctl` argv without a
+  shell, bounds both output streams and time, kills the whole child process
+  group after timeout, overflow, or cancellation, and accepts only the three
+  existing versioned response envelopes.
+- Snapshot refreshes are coalesced and preserve the last valid snapshot while
+  retaining an explicit frontend error for inspection.
+
+Rows, widgets, user actions, terminal handoff, and installed live acceptance
+remain in 4A.2 through 4A.5. This checkpoint made no provider calls and did not
+attach, start, stop, or focus any session.
 
 ## Acceptance gates
 
