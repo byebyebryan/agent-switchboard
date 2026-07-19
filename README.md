@@ -74,7 +74,8 @@ open known sessions, start configured Codex or Claude sessions, enter Claude's
 native history picker, and request confirmed safe stop through the existing
 versioned core commands. Successful routing selects only the inherited tmux
 client or replaces the restored plain terminal with `attach-surface`; installed
-live acceptance remains in
+no-model acceptance for the provider contracts, plain terminal, dedicated tmux
+manager, popup, and complete action matrix is recorded in
 [`docs/phase-4a-plan.md`](docs/phase-4a-plan.md). Remote SSH transport remains
 Phase 5. See
 [the design](docs/design.md), the

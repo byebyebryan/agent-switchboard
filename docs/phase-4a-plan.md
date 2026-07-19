@@ -2,7 +2,7 @@
 
 Date: 2026-07-19
 
-Status: 4A.0 through 4A.4 complete; 4A.5 planned
+Status: Complete through 4A.5
 
 ## Decision and sequencing
 
@@ -265,8 +265,60 @@ and terminal handoff are complete:
   switching, stale-client rejection, launch expiry, and cleanup on its private
   socket without contacting Codex or Claude.
 
-Installed live acceptance remains in 4A.5. This checkpoint made no provider
-calls and did not attach, start, stop, or focus any real session.
+This implementation checkpoint made no provider calls and did not attach,
+start, stop, or focus any real session.
+
+### Installed live acceptance
+
+The 2026-07-19 installed acceptance built commit `4d37a43` as a wheel and
+installed `agent-switchboard==0.1.0` plus `textual==8.2.8` into a fresh virtual
+environment under an isolated root. `pip check` passed and the installed
+`swbctl --version` returned `0.1.0`.
+
+Real-provider contract smokes ran through that installed environment before
+the frontend exercise:
+
+- Codex `0.144.6` completed bounded app-server discovery with the expected
+  schema fingerprint and feature set. Its sanitized result contained seven
+  provider sessions; no transcript or session content was printed or copied.
+- Claude Code `2.1.214` loaded the installed Switchboard hooks and the structured
+  prompt blocker with Agent View disabled. It emitted exactly one
+  `SessionStart`, `UserPromptSubmit`, and `SessionEnd`, and reported zero model
+  turns and `total_cost_usd=0`. `--no-session-persistence`, a loopback-invalid
+  API endpoint, and temporary XDG roots prevented a provider conversation or
+  retained test transcript.
+
+The installed TUI then ran through real PTYs and private tmux sockets:
+
+- a plain terminal with inherited `TMUX` state explicitly removed rendered and
+  exited cleanly;
+- a dedicated manager session rendered on one attached private client and
+  exited without another client or server; and
+- a popup rendered and exited while its underlying manager client and pane
+  remained attached and unchanged.
+
+The installed action matrix used a strict Snapshot v1, PresentationPlan v1,
+and SessionAction v1 fixture executable at the public `swbctl` boundary. This
+deliberately tests the frontend seam without provider argv or a provider
+process; the underlying real Codex and Claude launch, reopen, history, stop,
+attach-before-start, and dedup lifecycles were already accepted in Phase 3B and
+Phase 3C. The matrix proved:
+
+- two independent reopens each for controlled Codex and Claude rows used fresh
+  request IDs, resolved the same stable surface, and produced no provider
+  process;
+- configured new, Claude history selection, history cancellation, and
+  confirmed safe stop issued only their fixed public commands;
+- every plain-terminal presentation exited before invoking
+  `attach-surface`; and
+- dedicated-manager and popup presentation passed the exact private client TTY
+  to both preparation and `select-surface`, while popup completion retained its
+  manager client.
+
+The acceptance harness sent signals only to its own PTY process groups and
+private tmux servers. The pre-existing Claude processes remained present, no
+private tmux server or test process remained, no transcript needed trashing,
+and the isolated installation, registry, logs, and state root were removed.
 
 ## Acceptance gates
 
