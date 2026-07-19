@@ -99,6 +99,13 @@ swbctl snapshot --reconcile live --json
 swbctl snapshot --reconcile full --json
 swbctl list --json
 swbctl list --refresh --json
+swbctl show <session-key> --json
+swbctl current --json
+swbctl session name <session-key> <name> --json
+swbctl session purpose <session-key> <purpose> --json
+swbctl session pin <session-key> [--off] --json
+swbctl session handoff <session-key> --json-stdin --json
+swbctl session wrap <session-key> --json-stdin --json
 swbctl hooks install --provider codex --dry-run
 swbctl hooks uninstall --provider codex --dry-run
 swbctl hooks install --provider claude --dry-run
@@ -108,6 +115,8 @@ swbctl prepare-open <session-key> --request-id <uuid> \
   --can-focus-desktop --can-launch-terminal --json
 swbctl prepare-new --project <project-id> --location <location-id> \
   --provider codex|claude --request-id <uuid> \
+  --can-focus-desktop --can-launch-terminal --json
+swbctl prepare-new --from <handoff-id-or-session-key> --request-id <uuid> \
   --can-focus-desktop --can-launch-terminal --json
 swbctl prepare-history --project <project-id> --location <location-id> \
   --request-id <uuid> --can-focus-desktop --can-launch-terminal --json
@@ -172,6 +181,13 @@ then renews a bounded five-minute identity binding grace; the first exact
 lifecycle hook or complete live tmux/process correlation atomically assigns the
 provider UUID and confirms the session/surface binding.
 
+`prepare-new --from` continues from an immutable handoff without reading a
+transcript or injecting provider prompt text. A handoff ID is exact; a session
+key resolves its latest handoff in the same transaction that reserves the
+launch. Project and location derive from the local source session, the source
+provider is the default, and an explicit provider may switch between Codex and
+Claude while preserving the exact lineage.
+
 `prepare-history` follows the same attach-before-start lifecycle but launches
 Claude's native `claude --resume` picker without supplying or discovering a
 session UUID. The picker remains entirely provider-owned. A selected
@@ -192,6 +208,15 @@ Snapshot assembly reads a bounded deterministic session candidate set and
 applies an actual UTF-8 byte budget. If sessions are omitted, the registry is
 unchanged and the envelope includes `snapshot_sessions_truncated` with only
 retained and emitted counts.
+
+`show` and the `session` command family expose local human curation through a
+separate bounded session-detail envelope; handoff bodies remain outside
+Snapshot v1. Name, purpose, and pin changes do not masquerade as provider
+observations. Handoff and wrap accept one strict bounded JSON object on stdin,
+assign immutable sequence and hash state atomically, and support an optional
+client-generated UUID for safe retry. `current` and mutation `--current`
+resolve only an exact confirmed session surface inherited from the caller's
+tmux pane; plain terminals, manager panes, and stale bindings fail closed.
 
 ## Requirements and development setup
 

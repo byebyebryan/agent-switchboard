@@ -2,7 +2,7 @@
 
 Date: 2026-07-19
 
-Status: 4B.0 substrate audit complete; 4B.1 planned
+Status: 4B.1-4B.3 core, CLI, and continuation implemented; 4B.4 next
 
 ## Decision and sequencing
 
@@ -24,6 +24,14 @@ The implementation remains core first:
 Phase 4B is a local human-operated increment. It does not add the agent tool
 server, session capabilities, memory retrieval, remote hosts, or DMS mutation
 actions. Those boundaries remain Phase 4C or Phase 5.
+
+The first implementation loop completed 4B.1 through 4B.3 as one vertical
+core slice. It adds atomic local curation, a bounded versioned detail contract,
+explicit and exact-tmux-current CLI operations, wrap/re-entry lifecycle rules,
+and exact handoff continuation through launch reservation and binding. The
+Snapshot v1 and provider-native no-prompt boundary remain unchanged. TUI
+integration and installed isolated acceptance remain separate 4B.4 and 4B.5
+loops.
 
 ## 4B.0 substrate audit
 
@@ -49,7 +57,7 @@ Already implemented:
 - the Phase 4A frontend model already retains purpose and pin state for search
   and presentation.
 
-Missing or incomplete:
+Missing or incomplete at the 4B.0 audit checkpoint:
 
 - no dedicated curation mutation API exists; `upsert_session` is an observation
   merge with stale-time rules and must not be reused as the human editing API;
