@@ -67,8 +67,9 @@ contract, provider lifecycle, live compositor focus, and same-window dedup
 acceptance are recorded in
 [`docs/phase-3c-plan.md`](docs/phase-3c-plan.md).
 The terminal-native Phase 4A vertical slice has its optional Textual shell,
-terminal-context resolver, and bounded public-command gateway in place;
-searchable session rows and actions continue in the later increments of
+terminal-context resolver, bounded public-command gateway, and pure searchable
+session/launch-target model in place; interactive widgets and actions continue
+in the later increments of
 [`docs/phase-4a-plan.md`](docs/phase-4a-plan.md). Remote SSH transport remains
 Phase 5. See
 [the design](docs/design.md), the

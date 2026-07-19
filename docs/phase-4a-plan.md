@@ -2,7 +2,7 @@
 
 Date: 2026-07-19
 
-Status: 4A.0 and 4A.1 complete; 4A.2 through 4A.5 planned
+Status: 4A.0 through 4A.2 complete; 4A.3 through 4A.5 planned
 
 ## Decision and sequencing
 
@@ -214,7 +214,8 @@ Phase 4A does not add:
 
 ## Implementation checkpoint
 
-As of 2026-07-19, the framework and command-boundary foundation is complete:
+As of 2026-07-19, the framework, command-boundary, and model foundation is
+complete:
 
 - `swbctl tui` loads Textual only from the optional `tui` extra, currently
   bounded to `textual>=8.2.8,<9`; the base install remains dependency-free and
@@ -229,10 +230,16 @@ As of 2026-07-19, the framework and command-boundary foundation is complete:
   existing versioned response envelopes.
 - Snapshot refreshes are coalesced and preserve the last valid snapshot while
   retaining an explicit frontend error for inspection.
+- A pure standard-library frontend model projects stable session rows, declared
+  local launch targets, provider capability state, conservative Claude stop
+  eligibility, and inspectable source/frontend issues. It applies the existing
+  display-status precedence, then recency and session-key ordering; filtering,
+  Unicode token search, selection retention, snapshot staleness, and stale-race
+  rejection remain independent of Textual widgets.
 
-Rows, widgets, user actions, terminal handoff, and installed live acceptance
-remain in 4A.2 through 4A.5. This checkpoint made no provider calls and did not
-attach, start, stop, or focus any session.
+Widgets, user actions, terminal handoff, and installed live acceptance remain
+in 4A.3 through 4A.5. This checkpoint made no provider calls and did not attach,
+start, stop, or focus any session.
 
 ## Acceptance gates
 

@@ -106,6 +106,7 @@ jobs:
           import agent_switchboard.snapshot
           import agent_switchboard.state
           import agent_switchboard.tui_gateway
+          import agent_switchboard.tui_model
           from agent_switchboard.migrations import CURRENT_SCHEMA_VERSION
           from agent_switchboard.storage import Registry
 
