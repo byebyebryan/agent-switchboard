@@ -1176,13 +1176,15 @@ swbctl new [--project <project-id>] [--location <location-id>]
              [--provider <provider>] [--cwd <path>]
 swbctl new --from <handoff-id>|<session-key> [--provider <provider>]
 swbctl prepare-new [--project <project-id>] [--location <location-id>]
-                     [--provider <provider>] [--from <handoff-id>]
+                     [--provider <provider>]
+                     [--from <handoff-id>|<session-key>]
                      --request-id <uuid> --json
 swbctl current [--json]
-swbctl session name [<session-key>|--current] <name>
-swbctl session handoff [<session-key>|--current] --json-stdin
-swbctl session wrap [<session-key>|--current] --json-stdin
-swbctl session pin <session-key> [--off]
+swbctl session name [<session-key>|--current] (<name>|--clear) [--json]
+swbctl session purpose [<session-key>|--current] (<purpose>|--clear) [--json]
+swbctl session handoff [<session-key>|--current] --json-stdin [--json]
+swbctl session wrap [<session-key>|--current] --json-stdin [--json]
+swbctl session pin [<session-key>|--current] [--off] [--json]
 swbctl prepare-open <session-key> --request-id <uuid> --json
 swbctl open <session-key> [--transport tmux]
 swbctl prepare-workspace <provider> --request-id <uuid> --json
@@ -1912,8 +1914,10 @@ passes equivalent live tests.
   after current-session authorization and bounded retrieval contracts pass.
 
 Phase 4 starts with the narrower terminal-native Phase 4A vertical slice in
-[`docs/phase-4a-plan.md`](phase-4a-plan.md). Curation, handoffs, agent tools,
-memory, and remote transport remain outside that first increment.
+[`docs/phase-4a-plan.md`](phase-4a-plan.md). The local-human curation, immutable
+handoff, wrapping, pinning, and exact continuation increment is specified in
+[`docs/phase-4b-plan.md`](phase-4b-plan.md). Capability-authorized agent tools
+and memory remain Phase 4C; remote transport remains Phase 5.
 
 ### Phase 5: Remote hosts
 
@@ -2116,6 +2120,13 @@ for terminal handoff, and deterministic headless interaction tests; the TUI
 still consumes the installed public JSON/action protocols and does not import
 provider adapters. The exact boundary and acceptance sequence are recorded in
 [`docs/phase-4a-plan.md`](phase-4a-plan.md).
+
+Phase 4B exposes the curation and immutable-handoff substrate already present
+in the domain and initial schema through dedicated atomic storage operations,
+versioned public commands, exact continuation, and the terminal TUI. It does
+not reuse observation upserts for human edits or pull agent authorization into
+the human command surface. The audited boundary and implementation sequence are
+recorded in [`docs/phase-4b-plan.md`](phase-4b-plan.md).
 
 ## Remaining Non-blocking Decisions
 

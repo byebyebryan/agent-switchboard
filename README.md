@@ -76,8 +76,11 @@ versioned core commands. Successful routing selects only the inherited tmux
 client or replaces the restored plain terminal with `attach-surface`; installed
 no-model acceptance for the provider contracts, plain terminal, dedicated tmux
 manager, popup, and complete action matrix is recorded in
-[`docs/phase-4a-plan.md`](docs/phase-4a-plan.md). Remote SSH transport remains
-Phase 5. See
+[`docs/phase-4a-plan.md`](docs/phase-4a-plan.md). The audited next increment
+exposes the already-seeded local curation, immutable handoff, wrapping, pinning,
+and exact continuation contracts; its boundary and sequence are recorded in
+[`docs/phase-4b-plan.md`](docs/phase-4b-plan.md). Agent-authorized tools and
+memory remain Phase 4C, while remote SSH transport remains Phase 5. See
 [the design](docs/design.md), the
 [Phase 1 validation record](docs/phase-1-validation.md), and the
 [Phase 2 validation record](docs/phase-2-validation.md), the
