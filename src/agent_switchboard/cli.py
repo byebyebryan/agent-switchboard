@@ -259,8 +259,10 @@ def _run_tui_command() -> int:
     try:
         tui = importlib.import_module(".tui", __package__)
     except ModuleNotFoundError as error:
-        if error.name == "textual" or (
-            error.name is not None and error.name.startswith("textual.")
+        optional_roots = ("rich", "textual")
+        if error.name is not None and any(
+            error.name == root or error.name.startswith(f"{root}.")
+            for root in optional_roots
         ):
             print(
                 "swbctl: TUI support is not installed; install it with: "

@@ -2,7 +2,7 @@
 
 Date: 2026-07-19
 
-Status: 4B.1-4B.4 core, CLI, continuation, and TUI implemented; 4B.5 next
+Status: complete; 4B.1-4B.5 implemented and accepted
 
 ## Decision and sequencing
 
@@ -319,6 +319,75 @@ Implemented checkpoint:
   dedicated manager contexts without a model turn.
 - Confirm no pre-existing provider process, tmux client/server, registry,
   transcript, or desktop window was changed; remove only test-owned state.
+
+### Installed local acceptance
+
+The 2026-07-19 acceptance built the working tree based on commit `80fa0b8` as
+a wheel and installed it into two fresh Python 3.14 environments under one
+isolated root. The dependency-free environment and the environment with
+`textual==8.2.8` both passed `pip check` and reported
+`agent-switchboard==0.1.0`.
+
+The base-install gate found one packaging-path defect before any session work:
+`swbctl tui` imported `rich` before `textual`, but the actionable missing-extra
+handler recognized only `textual`. The handler now recognizes either direct
+optional import and has parameterized regression coverage. A rebuilt base
+wheel then exited with the documented `pip install 'agent-switchboard[tui]'`
+message, empty stdout, and no traceback; Textual remained absent from that
+environment.
+
+Installed commands ran against a private XDG root, registry, work directory,
+and tmux socket:
+
+- explicit-key name, purpose, pin, handoff, and wrap returned fully validated
+  session-detail envelopes;
+- replaying the same client handoff UUID and content retained one immutable
+  row, while conflicting content failed without output or mutation;
+- the retained provider name and provider identity remained intact, curation
+  did not advance the original observation timestamp, two handoffs retained
+  distinct sequence/hash state, and Snapshot v1 contained no handoff body;
+- `current` and a purpose mutation with `--current` succeeded only from the
+  exact metadata-bound private pane, while a plain-terminal `current` failed
+  closed;
+- wrap set `wrapped_at`, and a successful installed `prepare-open` revalidated
+  the private surface, returned an attach plan, and cleared wrapping; and
+- installed `prepare-new --from <exact-handoff-id>` persisted that ID before
+  presentation, then test-owned binding retained the same continuation lineage
+  for both Codex and Claude sessions.
+
+Provider capability reconciliation used only the repository's bounded fake
+executables. Codex received version, schema, and empty app-server discovery
+requests; Claude received only `--version`. Neither fake received an
+interactive resume/new invocation, and no model or provider transcript was
+created.
+
+The installed Textual frontend then ran through real bounded PTYs with a strict
+fixture executable at its public `swbctl` boundary:
+
+- the plain-terminal matrix loaded bounded detail, cleared a name, edited a
+  purpose, toggled pinning, submitted handoff and wrap JSON stdin with distinct
+  client UUIDs, reloaded detail, and prepared continuation from the displayed
+  exact handoff before exiting cleanly;
+- a dedicated manager client rendered, loaded detail, and issued continuation
+  with only its inherited private client TTY; and
+- a popup did the same, then returned to the unchanged attached manager pane
+  and client.
+
+All fixture continuation plans remained deliberately blocked, so the frontend
+stayed resident until explicit clean exit and never attached or started a
+provider. The harness bounded PTY output and process lifetimes and found no
+traceback. Cleanup stopped only the private tmux server and moved the three
+test-owned temporary roots to desktop trash; no test process remained, and the
+pre-existing tmux socket set returned to its exact baseline.
+
+The developer's live Claude process count and default registry digest changed
+repeatedly while acceptance ran, consistent with the explicitly concurrent
+active Claude work and hooks. The harness therefore did not claim that live
+state was static: every installed command used the private XDG root and fake
+provider paths, every tmux operation named the private socket, and cleanup
+signalled only the private server/test process groups. The real Codex process
+count remained stable, and no acceptance command invoked a real provider,
+default registry command, desktop focus operation, or DMS action.
 
 ## Acceptance gates
 

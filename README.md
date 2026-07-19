@@ -79,11 +79,10 @@ only the inherited tmux client or replaces the restored plain terminal with
 `attach-surface`; installed no-model acceptance for the Phase 4A provider
 contracts, plain terminal, dedicated tmux manager, popup, and complete action
 matrix is recorded in
-[`docs/phase-4a-plan.md`](docs/phase-4a-plan.md). The next loop is Phase 4B.5
-installed isolated acceptance; the implemented boundary and remaining sequence
-are recorded in
+[`docs/phase-4a-plan.md`](docs/phase-4a-plan.md). Phase 4B installed isolated
+acceptance is also complete; its implemented boundary and evidence are recorded in
 [`docs/phase-4b-plan.md`](docs/phase-4b-plan.md). Agent-authorized tools and
-memory remain Phase 4C, while remote SSH transport remains Phase 5. See
+memory are next in Phase 4C, while remote SSH transport remains Phase 5. See
 [the design](docs/design.md), the
 [Phase 1 validation record](docs/phase-1-validation.md), and the
 [Phase 2 validation record](docs/phase-2-validation.md), the
