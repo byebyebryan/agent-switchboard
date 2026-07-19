@@ -355,6 +355,140 @@ def test_new_project_launch_is_unbound_waiting_and_idempotent(
     assert len(tmux.create_calls) == 1
 
 
+def test_new_continuation_resolves_exact_handoff_and_retains_lineage(
+    registry: Registry, tmp_path: Path
+) -> None:
+    project_path = tmp_path / "project"
+    project_path.mkdir()
+    project, locations = add_project(registry, project_path)
+    add_session(registry, project_path)
+    registry.upsert_session(
+        {
+            "session_key": SESSION_KEY,
+            "project_id": PROJECT_ID,
+            "location_id": LOCATION_ID,
+            "cwd": str(project_path),
+            "last_observed_at": 2,
+        }
+    )
+    handoff = registry.curate_session_handoff(
+        SESSION_KEY,
+        host_id=HOST_ID,
+        handoff_id=stable_uuid("continuation-handoff"),
+        summary="The curation core is complete.",
+        next_action="Continue in a new exact session.",
+        observed_at=3,
+    )
+    assert handoff.handoff is not None
+    tmux = FakeTmux()
+    launch = new_coordinator(
+        registry,
+        tmux,
+        project_path,
+        projects=(project,),
+        locations=locations,
+        clock=100,
+    )
+
+    plan = launch.prepare_new(
+        None,
+        location_id=None,
+        provider=None,
+        source_ref=SESSION_KEY,
+        request_id=REQUEST_ID,
+        context=ATTACH_CONTEXT,
+    )
+
+    assert plan.kind is PresentationPlanKind.ATTACH
+    stored = registry.list_launches()[0]
+    assert stored["source_handoff_id"] == handoff.handoff["handoff_id"]
+    assert stored["project_id"] == PROJECT_ID
+    assert stored["location_id"] == LOCATION_ID
+    assert stored["provider"] == "codex"
+
+    tmux.attached = True
+
+    def capture(_executable: str, _argv: Sequence[str]) -> None:
+        raise ExecCaptured
+
+    with pytest.raises(ExecCaptured):
+        launch.bootstrap(str(stored["launch_id"]), exec_provider=capture)  # type: ignore[arg-type]
+    bound = registry.bind_provider_session(
+        str(stored["launch_id"]),
+        {
+            "session_key": NEW_SESSION_KEY,
+            "host_id": HOST_ID,
+            "provider": "codex",
+            "provider_session_id": NEW_SESSION_ID,
+            "runtime_presence": "live",
+            "last_observed_at": 150,
+        },
+        lease_owner=f"bootstrap:{stored['launch_id']}",
+        observed_at=150,
+    )
+    assert bound.kind == "bound"
+    assert bound.session["continued_from_handoff_id"] == handoff.handoff["handoff_id"]
+
+
+def test_new_continuation_blocks_without_handoff_or_matching_location(
+    registry: Registry, tmp_path: Path
+) -> None:
+    project_path = tmp_path / "project"
+    project_path.mkdir()
+    project, locations = add_project(registry, project_path)
+    add_session(registry, project_path)
+    registry.upsert_session(
+        {
+            "session_key": SESSION_KEY,
+            "project_id": PROJECT_ID,
+            "location_id": LOCATION_ID,
+            "cwd": str(project_path),
+            "last_observed_at": 2,
+        }
+    )
+    launch = new_coordinator(
+        registry,
+        FakeTmux(),
+        project_path,
+        projects=(project,),
+        locations=locations,
+    )
+
+    missing = launch.prepare_new(
+        None,
+        location_id=None,
+        provider=None,
+        source_ref=SESSION_KEY,
+        request_id=REQUEST_ID,
+        context=ATTACH_CONTEXT,
+    )
+    assert missing.kind is PresentationPlanKind.BLOCKED
+    assert missing.error is not None
+    assert missing.error.code == "continuation_handoff_missing"
+    assert registry.list_launches() == []
+
+    handoff = registry.curate_session_handoff(
+        SESSION_KEY,
+        host_id=HOST_ID,
+        summary="Ready.",
+        next_action="Reject a location override.",
+        observed_at=3,
+    )
+    assert handoff.handoff is not None
+    conflict = launch.prepare_new(
+        PROJECT_ID,
+        location_id=stable_uuid("other-location"),
+        provider=None,
+        source_ref=SESSION_KEY,
+        request_id=stable_uuid("continuation-conflict"),
+        context=ATTACH_CONTEXT,
+    )
+    assert conflict.kind is PresentationPlanKind.BLOCKED
+    assert conflict.error is not None
+    assert conflict.error.code == "continuation_location_conflict"
+    assert registry.list_launches() == []
+
+
 def test_new_project_resolution_blocks_missing_provider_and_ambiguous_location(
     registry: Registry, tmp_path: Path
 ) -> None:
@@ -1140,6 +1274,14 @@ def test_existing_surface_switches_only_the_supplied_live_client(
     tmux.attached = True
     tmux.client_ids = ("/dev/pts/8",)
     add_session(registry, tmp_path, runtime_presence="live", tmux=tmux)
+    registry.curate_session_handoff(
+        SESSION_KEY,
+        host_id=HOST_ID,
+        summary="Wrap before reopening.",
+        next_action="Open the exact managed surface.",
+        wrap=True,
+        observed_at=2,
+    )
     launch = coordinator(registry, tmux)
     adopted = launch.prepare_open(
         SESSION_KEY,
@@ -1147,6 +1289,7 @@ def test_existing_surface_switches_only_the_supplied_live_client(
         context=DMS_CONTEXT,
     )
     assert adopted.surface_id is not None
+    assert registry.get_session(SESSION_KEY)["wrapped_at"] is None
 
     switched = launch.prepare_open(
         SESSION_KEY,
@@ -1158,6 +1301,15 @@ def test_existing_surface_switches_only_the_supplied_live_client(
     assert switched.surface_id == adopted.surface_id
     assert switched.tmux_client == "/dev/pts/8"
 
+    registry.curate_session_handoff(
+        SESSION_KEY,
+        host_id=HOST_ID,
+        summary="Wrap before a blocked reopen.",
+        next_action="Keep wrapping if presentation fails.",
+        wrap=True,
+        observed_at=3,
+    )
+
     stale = launch.prepare_open(
         SESSION_KEY,
         request_id=stable_uuid("stale-client-request"),
@@ -1165,6 +1317,7 @@ def test_existing_surface_switches_only_the_supplied_live_client(
     )
     assert stale.kind is PresentationPlanKind.BLOCKED
     assert stale.error is not None and stale.error.code == "tmux_client_stale"
+    assert registry.get_session(SESSION_KEY)["wrapped_at"] == 3
 
 
 def test_bootstrap_expires_without_a_client(registry: Registry, tmp_path: Path) -> None:
@@ -1189,6 +1342,14 @@ def test_bootstrap_starts_exact_resume_only_after_attachment(
 ) -> None:
     tmux = FakeTmux()
     add_session(registry, tmp_path)
+    registry.curate_session_handoff(
+        SESSION_KEY,
+        host_id=HOST_ID,
+        summary="Wrap the parked session.",
+        next_action="Resume and clear only after binding.",
+        wrap=True,
+        observed_at=2,
+    )
     launch = coordinator(registry, tmux)
     launch.prepare_open(SESSION_KEY, request_id=REQUEST_ID, context=ATTACH_CONTEXT)
     launch_id = str(registry.list_launches()[0]["launch_id"])
@@ -1209,6 +1370,23 @@ def test_bootstrap_starts_exact_resume_only_after_attachment(
     started = registry.get_launch(launch_id)
     assert started["state"] == "provider_started"
     assert started["expires_at"] == 300_100
+    assert registry.get_session(SESSION_KEY)["wrapped_at"] == 2
+
+    bound = registry.bind_provider_session(
+        launch_id,
+        {
+            "session_key": SESSION_KEY,
+            "host_id": HOST_ID,
+            "provider": "codex",
+            "provider_session_id": SESSION_ID,
+            "runtime_presence": "live",
+            "last_observed_at": 150,
+        },
+        lease_owner=f"bootstrap:{launch_id}",
+        observed_at=150,
+    )
+    assert bound.kind == "bound"
+    assert bound.session["wrapped_at"] is None
 
 
 def test_bootstrap_starts_exact_claude_resume_after_attachment(

@@ -30,7 +30,7 @@ from .protocol import (
     PresentationPlan,
     PresentationPlanKind,
 )
-from .storage import Registry, RequestConflict, StorageError
+from .storage import ContinuationError, Registry, RequestConflict, StorageError
 from .tmux import (
     TmuxController,
     TmuxError,
@@ -171,21 +171,57 @@ class LaunchCoordinator:
 
     def prepare_new(
         self,
-        project_id: str,
+        project_id: str | None,
         *,
         location_id: str | None,
         provider: str | None,
+        source_ref: str | None = None,
         request_id: str,
         context: PresentationContext,
     ) -> PresentationPlan:
+        request_id = self._request_id(request_id)
+        now = self.clock()
+        source = None
+        if source_ref is not None:
+            try:
+                source = self.registry.resolve_continuation_source(
+                    source_ref, host_id=str(self.host_id)
+                )
+            except (StorageError, ValidationError) as error:
+                code = (
+                    error.code
+                    if isinstance(error, ContinuationError)
+                    else "continuation_source_invalid"
+                )
+                return self._blocked_new(code, str(error), now)
+            source_project_id = str(source.session["project_id"])
+            source_location_id = str(source.session["location_id"])
+            if project_id is not None and project_id != source_project_id:
+                return self._blocked_new(
+                    "continuation_project_conflict",
+                    "Continuation cannot change the source project.",
+                    now,
+                )
+            if location_id is not None and location_id != source_location_id:
+                return self._blocked_new(
+                    "continuation_location_conflict",
+                    "Continuation cannot change the source project location.",
+                    now,
+                )
+            project_id = source_project_id
+            location_id = source_location_id
+        if project_id is None:
+            return self._blocked_new(
+                "project_missing",
+                "A project or continuation source is required.",
+                now,
+            )
         parsed_project_id = self._stable_id(project_id, ProjectId, "project ID")
         parsed_location_id = (
             self._stable_id(location_id, LocationId, "location ID")
             if location_id is not None
             else None
         )
-        request_id = self._request_id(request_id)
-        now = self.clock()
         project = self.projects.get(str(parsed_project_id))
         if project is None:
             return self._blocked_new(
@@ -247,7 +283,11 @@ class LaunchCoordinator:
                     now,
                 )
         else:
-            resolved_provider = location.provider_override or project.default_provider
+            resolved_provider = (
+                ProviderId(str(source.session["provider"]))
+                if source is not None
+                else location.provider_override or project.default_provider
+            )
         if resolved_provider is None:
             return self._blocked_new(
                 "project_provider_missing",
@@ -284,6 +324,14 @@ class LaunchCoordinator:
             request_id=request_id,
             context=context,
             now=now,
+            source_handoff_id=(
+                str(source.handoff["handoff_id"]) if source is not None else None
+            ),
+            source_session_key=(
+                str(source.session["session_key"])
+                if source is not None and source.from_session
+                else None
+            ),
         )
 
     def prepare_history(
@@ -561,7 +609,15 @@ class LaunchCoordinator:
                 retryable=True,
             )
         self._refresh_attachment(surface, observed, now)
-        return self._shape_plan(surface, observed, context)
+        plan = self._shape_plan(surface, observed, context)
+        if (
+            plan.kind is not PresentationPlanKind.BLOCKED
+            and session.get("wrapped_at") is not None
+        ):
+            self.registry.clear_session_wrapped(
+                str(session_key), host_id=str(self.host_id)
+            )
+        return plan
 
     def _adopt_live_surface(
         self,
@@ -658,7 +714,15 @@ class LaunchCoordinator:
         ):
             self.registry.retire_surface(surface_id, observed_at=max(now, self.clock()))
             raise PresentationError("adopted tmux metadata did not revalidate")
-        return self._shape_plan(stored, verified, context)
+        plan = self._shape_plan(stored, verified, context)
+        if (
+            plan.kind is not PresentationPlanKind.BLOCKED
+            and session.get("wrapped_at") is not None
+        ):
+            self.registry.clear_session_wrapped(
+                str(session_key), host_id=str(self.host_id)
+            )
+        return plan
 
     def _prepare_resume(
         self,
@@ -768,6 +832,8 @@ class LaunchCoordinator:
         request_id: str,
         context: PresentationContext,
         now: int,
+        source_handoff_id: str | None = None,
+        source_session_key: str | None = None,
     ) -> PresentationPlan:
         capability_hash = (
             PREPARE_NEW_CAPABILITY_HASH
@@ -783,6 +849,8 @@ class LaunchCoordinator:
             request_id=request_id,
             context=context,
             now=now,
+            source_handoff_id=source_handoff_id,
+            source_session_key=source_session_key,
         )
 
     def _prepare_unbound(
@@ -796,6 +864,8 @@ class LaunchCoordinator:
         request_id: str,
         context: PresentationContext,
         now: int,
+        source_handoff_id: str | None = None,
+        source_session_key: str | None = None,
     ) -> PresentationPlan:
         if action not in {"new", "history"}:
             raise PresentationError("unbound launch action is unsupported")
@@ -808,7 +878,7 @@ class LaunchCoordinator:
             "project_id": str(project.project_id),
             "location_id": str(location.location_id),
             "cwd": str(location.path),
-            "source_handoff_id": None,
+            "source_handoff_id": source_handoff_id,
             "target_session_key": None,
             "transport": "tmux",
         }
@@ -821,11 +891,19 @@ class LaunchCoordinator:
                 capability_hash=capability_hash,
                 expires_at=now + self.launch_timeout_seconds * 1_000,
                 created_at=now,
+                source_session_key=source_session_key,
             )
         except RequestConflict:
             return self._blocked_new(
                 "request_conflict",
                 "The request ID was already used for a different unbound action.",
+                now,
+                provider=provider,
+            )
+        except ContinuationError as error:
+            return self._blocked_new(
+                error.code,
+                str(error),
                 now,
                 provider=provider,
             )

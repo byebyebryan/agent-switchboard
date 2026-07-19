@@ -90,6 +90,7 @@ jobs:
           import agent_switchboard
           import agent_switchboard.cli
           import agent_switchboard.config
+          import agent_switchboard.curation
           import agent_switchboard.doctor
           import agent_switchboard.domain
           import agent_switchboard.executable
@@ -140,6 +141,10 @@ jobs:
               grep -F "Inspect and route provider-native coding-agent sessions."
             "$swbctl" snapshot --help | grep -F -- "--reconcile {none,live,full}"
             "$swbctl" list --help | grep -F -- "--refresh"
+            "$swbctl" show --help | grep -F -- "--handoff-limit"
+            "$swbctl" current --help | grep -F -- "--handoff-limit"
+            "$swbctl" session --help | grep -F "usage: swbctl session"
+            "$swbctl" prepare-new --help | grep -F -- "--from SOURCE_REF"
             "$swbctl" hooks install --help | grep -F -- "--dry-run"
             "$swbctl" hooks uninstall --help | grep -F -- "--dry-run"
             "$swbctl" doctor --help | grep -F "usage: swbctl doctor"

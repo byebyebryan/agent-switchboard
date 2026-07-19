@@ -25,6 +25,7 @@ from agent_switchboard.protocol import (
     PresentationPlan,
     PresentationPlanEnvelope,
     PresentationPlanKind,
+    SessionDetailEnvelope,
     SnapshotEnvelope,
 )
 from agent_switchboard.storage import Registry
@@ -35,6 +36,10 @@ FAKE_CLAUDE = ROOT / "tests" / "fakes" / "fake_claude.py"
 APP_DIR = "agent-switchboard"
 PROJECT_ID = "22222222-2222-4222-8222-222222222222"
 LOCATION_ID = "33333333-3333-4333-8333-333333333333"
+CURATION_HOST_ID = "11111111-1111-4111-8111-111111111111"
+CURATION_SESSION_ID = "44444444-4444-4444-8444-444444444444"
+CURATION_SESSION_KEY = f"{CURATION_HOST_ID}:codex:{CURATION_SESSION_ID}"
+CURATION_HANDOFF_ID = "55555555-5555-4555-8555-555555555555"
 
 
 @dataclass(frozen=True, slots=True)
@@ -203,6 +208,128 @@ def test_tui_command_has_an_actionable_missing_extra_error(
     assert "Traceback" not in captured.err
 
 
+def seed_curation_registry(environment: CliEnvironment) -> None:
+    with Registry(environment.database) as registry:
+        registry.upsert_host(CURATION_HOST_ID, "local", is_local=True, observed_at=1)
+        registry.upsert_session(
+            {
+                "session_key": CURATION_SESSION_KEY,
+                "host_id": CURATION_HOST_ID,
+                "provider": "codex",
+                "provider_session_id": CURATION_SESSION_ID,
+                "name": "initial",
+                "cwd": "/work/curation",
+                "first_observed_at": 2,
+                "last_observed_at": 2,
+            }
+        )
+
+
+def test_curation_cli_round_trip_and_strict_json_input(
+    cli_environment: CliEnvironment,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seed_curation_registry(cli_environment)
+    monkeypatch.setattr(
+        cli_module, "load_or_create_host_id", lambda: HostId(CURATION_HOST_ID)
+    )
+
+    assert main(["show", CURATION_SESSION_KEY, "--json"]) == 0
+    detail = SessionDetailEnvelope.from_json(capsys.readouterr().out)
+    assert detail.session["name"] == "initial"
+
+    assert (
+        main(
+            [
+                "session",
+                "name",
+                CURATION_SESSION_KEY,
+                "curated title",
+                "--json",
+            ]
+        )
+        == 0
+    )
+    detail = SessionDetailEnvelope.from_json(capsys.readouterr().out)
+    assert detail.session["name"] == "curated title"
+
+    assert (
+        main(
+            [
+                "session",
+                "purpose",
+                CURATION_SESSION_KEY,
+                "Finish Phase 4B",
+                "--json",
+            ]
+        )
+        == 0
+    )
+    detail = SessionDetailEnvelope.from_json(capsys.readouterr().out)
+    assert detail.session["purpose"] == "Finish Phase 4B"
+
+    assert main(["session", "pin", CURATION_SESSION_KEY, "--json"]) == 0
+    detail = SessionDetailEnvelope.from_json(capsys.readouterr().out)
+    assert detail.session["pinned"] is True
+
+    monkeypatch.setattr(
+        "sys.stdin",
+        io.BytesIO(
+            json.dumps(
+                {
+                    "handoffId": CURATION_HANDOFF_ID,
+                    "summary": "Core curation is complete.",
+                    "nextAction": "Implement continuation.",
+                }
+            ).encode()
+        ),
+    )
+    assert (
+        main(["session", "wrap", CURATION_SESSION_KEY, "--json-stdin", "--json"]) == 0
+    )
+    detail = SessionDetailEnvelope.from_json(capsys.readouterr().out)
+    assert detail.session["wrappedAt"] is not None
+    assert detail.session["latestHandoffId"] == CURATION_HANDOFF_ID
+    assert detail.handoffs[0]["source"] == "user"
+
+    with Registry(cli_environment.database) as registry:
+        stored = registry.get_session(CURATION_SESSION_KEY)
+        assert stored is not None
+        assert stored["last_observed_at"] == 2
+
+
+def test_curation_cli_current_and_fail_closed_argument_shapes(
+    cli_environment: CliEnvironment,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seed_curation_registry(cli_environment)
+    key = SessionKey.parse(CURATION_SESSION_KEY)
+    monkeypatch.setattr(
+        cli_module, "load_or_create_host_id", lambda: HostId(CURATION_HOST_ID)
+    )
+    monkeypatch.setattr(cli_module, "resolve_current_session_key", lambda *a, **k: key)
+
+    assert main(["current", "--json"]) == 0
+    SessionDetailEnvelope.from_json(capsys.readouterr().out)
+    assert main(["session", "name", "--current", "current title", "--json"]) == 0
+    detail = SessionDetailEnvelope.from_json(capsys.readouterr().out)
+    assert detail.session["name"] == "current title"
+    assert main(["session", "name", "--current", "--clear", "--json"]) == 0
+    detail = SessionDetailEnvelope.from_json(capsys.readouterr().out)
+    assert detail.session.get("name") is None
+
+    assert main(["session", "pin", CURATION_SESSION_KEY, "--current"]) == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "choose exactly one" in captured.err
+    assert main(["session", "purpose", CURATION_SESSION_KEY]) == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "requires SESSION_KEY and one value" in captured.err
+
+
 def test_prepare_open_emits_one_presentation_envelope_and_context_flags(
     capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -309,6 +436,50 @@ def test_prepare_new_emits_one_presentation_envelope_and_context_flags(
     assert observed[0].request_id == request_id
     assert observed[0].can_focus_desktop
     assert observed[0].can_launch_terminal
+    assert observed[0].source_ref is None
+
+
+def test_prepare_new_accepts_a_continuation_without_a_project_flag(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    observed: list[argparse.Namespace] = []
+    source_ref = "55555555-5555-4555-8555-555555555555"
+    request_id = "66666666-6666-4666-8666-666666666666"
+    plan = PresentationPlan(
+        PresentationPlanKind.BLOCKED,
+        HostId(CURATION_HOST_ID),
+        error=ErrorRecord(
+            "continuation_handoff_not_found",
+            "No retained handoff.",
+            ErrorScope.LAUNCH,
+            False,
+            1,
+            host_id=HostId(CURATION_HOST_ID),
+        ),
+    )
+
+    def prepare(arguments: argparse.Namespace) -> str:
+        observed.append(arguments)
+        return PresentationPlanEnvelope(plan).to_json()
+
+    monkeypatch.setattr(cli_module, "_prepare_new", prepare)
+    assert (
+        main(
+            [
+                "prepare-new",
+                "--from",
+                source_ref,
+                "--request-id",
+                request_id,
+                "--can-launch-terminal",
+                "--json",
+            ]
+        )
+        == 0
+    )
+    PresentationPlanEnvelope.from_json(capsys.readouterr().out)
+    assert observed[0].project is None
+    assert observed[0].source_ref == source_ref
 
 
 def test_surface_action_commands_are_quiet_and_fail_safely(

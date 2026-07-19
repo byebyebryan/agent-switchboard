@@ -12,8 +12,15 @@ from collections.abc import Sequence
 
 from . import __version__
 from .config import SwitchboardConfig, load_config
+from .curation import (
+    CurationError,
+    format_session_detail,
+    read_handoff_input,
+    read_session_detail,
+    resolve_current_session_key,
+)
 from .doctor import run_all_doctors
-from .domain import HostId, PresentationContext, ProviderId, ValidationError
+from .domain import HostId, PresentationContext, ProviderId, SessionKey, ValidationError
 from .executable import resolve_swbctl_executable
 from .hook_config import edit_claude_hooks, edit_codex_hooks
 from .hooks import HookInputError
@@ -28,9 +35,13 @@ from .presentation import (
     attach_surface_argv,
     select_surface,
 )
-from .protocol import PresentationPlanEnvelope, SessionActionEnvelope
+from .protocol import (
+    PresentationPlanEnvelope,
+    SessionActionEnvelope,
+    SessionDetailEnvelope,
+)
 from .session_actions import ManagedSessionController
-from .storage import Registry, StorageError
+from .storage import DEFAULT_HANDOFF_LIMIT, MAX_HANDOFF_LIMIT, Registry, StorageError
 from .tmux import TmuxController, TmuxError
 
 _MAX_ERROR_MESSAGE_LENGTH = 1_024
@@ -108,6 +119,64 @@ def build_parser() -> argparse.ArgumentParser:
         help="open the optional terminal session picker",
     )
 
+    show = commands.add_parser(
+        "show",
+        help="show one retained local session and its newest handoffs",
+    )
+    show.add_argument("session_key")
+    show.add_argument(
+        "--handoff-limit",
+        type=int,
+        default=DEFAULT_HANDOFF_LIMIT,
+        help=f"newest handoffs to include (1-{MAX_HANDOFF_LIMIT})",
+    )
+    show.add_argument("--json", action="store_true")
+
+    current = commands.add_parser(
+        "current",
+        help="show the session bound to this exact inherited tmux pane",
+    )
+    current.add_argument(
+        "--handoff-limit",
+        type=int,
+        default=DEFAULT_HANDOFF_LIMIT,
+        help=f"newest handoffs to include (1-{MAX_HANDOFF_LIMIT})",
+    )
+    current.add_argument("--json", action="store_true")
+
+    session = commands.add_parser(
+        "session",
+        help="curate one retained local session",
+    )
+    session_actions = session.add_subparsers(dest="session_action", required=True)
+    for action, help_text in (
+        ("name", "set or clear a curated session name"),
+        ("purpose", "set or clear an explicit session purpose"),
+    ):
+        edit = session_actions.add_parser(action, help=help_text)
+        edit.add_argument(
+            "values",
+            nargs="*",
+            help="SESSION_KEY VALUE, or VALUE with --current",
+        )
+        edit.add_argument("--current", action="store_true")
+        edit.add_argument("--clear", action="store_true")
+        edit.add_argument("--json", action="store_true")
+    pin = session_actions.add_parser("pin", help="pin or unpin one session")
+    pin.add_argument("session_key", nargs="?")
+    pin.add_argument("--current", action="store_true")
+    pin.add_argument("--off", action="store_true")
+    pin.add_argument("--json", action="store_true")
+    for action, help_text in (
+        ("handoff", "append one immutable user handoff"),
+        ("wrap", "append one immutable user handoff and wrap the session"),
+    ):
+        handoff = session_actions.add_parser(action, help=help_text)
+        handoff.add_argument("session_key", nargs="?")
+        handoff.add_argument("--current", action="store_true")
+        handoff.add_argument("--json-stdin", action="store_true", required=True)
+        handoff.add_argument("--json", action="store_true")
+
     prepare_open = commands.add_parser(
         "prepare-open",
         help="atomically prepare an existing local session for presentation",
@@ -124,9 +193,14 @@ def build_parser() -> argparse.ArgumentParser:
         "prepare-new",
         help="atomically prepare a new local project session for presentation",
     )
-    prepare_new.add_argument("--project", required=True)
+    prepare_new.add_argument("--project")
     prepare_new.add_argument("--location")
     prepare_new.add_argument("--provider", choices=("codex", "claude"))
+    prepare_new.add_argument(
+        "--from",
+        dest="source_ref",
+        help="exact handoff ID or local source session key",
+    )
     prepare_new.add_argument("--request-id", required=True)
     prepare_new.add_argument("--has-current-terminal", action="store_true")
     prepare_new.add_argument("--current-tmux-client")
@@ -267,6 +341,7 @@ def _prepare_new(arguments: argparse.Namespace) -> str:
             arguments.project,
             location_id=arguments.location,
             provider=arguments.provider,
+            source_ref=arguments.source_ref,
             request_id=arguments.request_id,
             context=context,
         )
@@ -327,6 +402,115 @@ def _stop_session(arguments: argparse.Namespace) -> str:
             reconcile_runtime=reconcile,
         ).stop(arguments.session_key)
     return SessionActionEnvelope(action).to_json()
+
+
+def _explicit_or_current_target(
+    arguments: argparse.Namespace,
+    *,
+    registry: Registry,
+    host_id: HostId,
+) -> str:
+    explicit = getattr(arguments, "session_key", None)
+    current = bool(getattr(arguments, "current", False))
+    if current == (explicit is not None):
+        raise CurationError("choose exactly one session key or --current")
+    if current:
+        return str(
+            resolve_current_session_key(
+                registry,
+                host_id=host_id,
+            )
+        )
+    return str(SessionKey.parse(explicit))
+
+
+def _edit_target_and_value(
+    arguments: argparse.Namespace,
+    *,
+    registry: Registry,
+    host_id: HostId,
+) -> tuple[str, str | None]:
+    values = list(arguments.values)
+    if arguments.current:
+        expected = 0 if arguments.clear else 1
+        if len(values) != expected:
+            raise CurationError(
+                "--current requires one value, or no value together with --clear"
+            )
+        target = str(resolve_current_session_key(registry, host_id=host_id))
+        return target, None if arguments.clear else values[0]
+    expected = 1 if arguments.clear else 2
+    if len(values) != expected:
+        raise CurationError(
+            "an explicit edit requires SESSION_KEY and one value, "
+            "or SESSION_KEY with --clear"
+        )
+    target = str(SessionKey.parse(values[0]))
+    return target, None if arguments.clear else values[1]
+
+
+def _render_detail(arguments: argparse.Namespace, detail: SessionDetailEnvelope) -> str:
+    return detail.to_json() if arguments.json else format_session_detail(detail)
+
+
+def _curation_command(arguments: argparse.Namespace) -> str:
+    host_id = load_or_create_host_id()
+    with Registry(database_path()) as registry:
+        if arguments.command == "show":
+            detail = read_session_detail(
+                registry,
+                host_id=host_id,
+                session_key=arguments.session_key,
+                handoff_limit=arguments.handoff_limit,
+            )
+            return _render_detail(arguments, detail)
+        if arguments.command == "current":
+            key = resolve_current_session_key(registry, host_id=host_id)
+            detail = read_session_detail(
+                registry,
+                host_id=host_id,
+                session_key=key,
+                handoff_limit=arguments.handoff_limit,
+            )
+            return _render_detail(arguments, detail)
+
+        if arguments.session_action in {"name", "purpose"}:
+            session_key, value = _edit_target_and_value(
+                arguments, registry=registry, host_id=host_id
+            )
+            if arguments.session_action == "name":
+                registry.set_session_name(session_key, host_id=str(host_id), name=value)
+            else:
+                registry.set_session_purpose(
+                    session_key, host_id=str(host_id), purpose=value
+                )
+        else:
+            session_key = _explicit_or_current_target(
+                arguments, registry=registry, host_id=host_id
+            )
+            if arguments.session_action == "pin":
+                registry.set_session_pinned(
+                    session_key,
+                    host_id=str(host_id),
+                    pinned=not arguments.off,
+                )
+            else:
+                stream = getattr(sys.stdin, "buffer", sys.stdin)
+                handoff = read_handoff_input(stream)
+                registry.curate_session_handoff(
+                    session_key,
+                    host_id=str(host_id),
+                    summary=handoff.summary,
+                    next_action=handoff.next_action,
+                    handoff_id=handoff.handoff_id,
+                    wrap=arguments.session_action == "wrap",
+                )
+        detail = read_session_detail(
+            registry,
+            host_id=host_id,
+            session_key=session_key,
+        )
+        return _render_detail(arguments, detail)
 
 
 def _surface_action(arguments: argparse.Namespace) -> int:
@@ -419,6 +603,23 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 1
         print(result.render())
         return 0 if result.healthy else 1
+
+    if arguments.command in {"show", "current", "session"}:
+        try:
+            sys.stdout.write(f"{_curation_command(arguments)}\n")
+        except (
+            CurationError,
+            ValidationError,
+            StorageError,
+            TmuxError,
+            MigrationError,
+            sqlite3.Error,
+            OSError,
+            ValueError,
+        ) as error:
+            print(f"swbctl: {_safe_error_message(error)}", file=sys.stderr)
+            return 1
+        return 0
 
     if arguments.command == "tui":
         return _run_tui_command()

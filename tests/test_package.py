@@ -73,6 +73,7 @@ def test_ci_smokes_wheel_and_source_distribution_installations() -> None:
     assert "/tmp/switchboard-sdist-smoke" in workflow
     for module in (
         "agent_switchboard.cli",
+        "agent_switchboard.curation",
         "agent_switchboard.doctor",
         "agent_switchboard.executable",
         "agent_switchboard.hook_config",
@@ -94,6 +95,10 @@ def test_ci_smokes_wheel_and_source_distribution_installations() -> None:
     assert "migrations/v0005_history_launch.py" in workflow
     assert 'snapshot --help | grep -F -- "--reconcile {none,live,full}"' in workflow
     assert 'list --help | grep -F -- "--refresh"' in workflow
+    assert 'show --help | grep -F -- "--handoff-limit"' in workflow
+    assert 'current --help | grep -F -- "--handoff-limit"' in workflow
+    assert 'session --help | grep -F "usage: swbctl session"' in workflow
+    assert 'prepare-new --help | grep -F -- "--from SOURCE_REF"' in workflow
     assert 'hooks install --help | grep -F -- "--dry-run"' in workflow
     assert 'hooks uninstall --help | grep -F -- "--dry-run"' in workflow
     assert 'doctor --help | grep -F "usage: swbctl doctor"' in workflow
