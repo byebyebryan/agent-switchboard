@@ -205,6 +205,30 @@ def test_select_surface_revalidates_client_and_locator() -> None:
     assert controller.client_exists(LOCATOR, "/dev/pts/8")
 
 
+def test_provider_exit_is_sent_only_to_the_revalidated_exact_pane() -> None:
+    fake = FakeTmux()
+    controller = TmuxController(runner=fake, systemd_run=None)
+
+    controller.request_provider_exit(LOCATOR)
+
+    commands = [call for call, _timeout in fake.calls]
+    assert commands[-3:] == [
+        ["tmux", "-S", SOCKET, "send-keys", "-t", "%7", "C-c"],
+        [
+            "tmux",
+            "-S",
+            SOCKET,
+            "send-keys",
+            "-t",
+            "%7",
+            "-l",
+            "--",
+            "/exit",
+        ],
+        ["tmux", "-S", SOCKET, "send-keys", "-t", "%7", "Enter"],
+    ]
+
+
 def test_missing_target_and_missing_systemd_run_are_sanitized(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

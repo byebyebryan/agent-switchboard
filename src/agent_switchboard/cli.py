@@ -26,7 +26,8 @@ from .presentation import (
     attach_surface_argv,
     select_surface,
 )
-from .protocol import PresentationPlanEnvelope
+from .protocol import PresentationPlanEnvelope, SessionActionEnvelope
+from .session_actions import ManagedSessionController
 from .storage import Registry, StorageError
 from .tmux import TmuxController, TmuxError
 
@@ -126,6 +127,19 @@ def build_parser() -> argparse.ArgumentParser:
     prepare_new.add_argument("--can-launch-terminal", action="store_true")
     prepare_new.add_argument("--json", action="store_true", required=True)
 
+    prepare_history = commands.add_parser(
+        "prepare-history",
+        help="atomically prepare the native Claude history picker",
+    )
+    prepare_history.add_argument("--project", required=True)
+    prepare_history.add_argument("--location")
+    prepare_history.add_argument("--request-id", required=True)
+    prepare_history.add_argument("--has-current-terminal", action="store_true")
+    prepare_history.add_argument("--current-tmux-client")
+    prepare_history.add_argument("--can-focus-desktop", action="store_true")
+    prepare_history.add_argument("--can-launch-terminal", action="store_true")
+    prepare_history.add_argument("--json", action="store_true", required=True)
+
     select = commands.add_parser(
         "select-surface",
         help="switch one revalidated tmux client to a managed surface",
@@ -138,6 +152,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="attach this terminal to a revalidated managed surface",
     )
     attach.add_argument("surface_id")
+
+    stop = commands.add_parser(
+        "stop-session",
+        help="stop one revalidated launch-owned Claude session",
+    )
+    stop.add_argument("session_key")
+    stop.add_argument("--json", action="store_true", required=True)
 
     bootstrap = commands.add_parser(
         "bootstrap", help="internal waiting-surface bootstrap"
@@ -224,6 +245,27 @@ def _prepare_new(arguments: argparse.Namespace) -> str:
     return PresentationPlanEnvelope(plan).to_json()
 
 
+def _prepare_history(arguments: argparse.Namespace) -> str:
+    host_id = load_or_create_host_id()
+    config = load_config(host_id=host_id)
+    context = PresentationContext(
+        arguments.has_current_terminal,
+        arguments.current_tmux_client,
+        arguments.can_focus_desktop,
+        arguments.can_launch_terminal,
+    )
+    with Registry(database_path()) as registry:
+        materialize_configured_projects(registry, str(host_id), config)
+        reconcile_live(registry, str(host_id))
+        plan = _coordinator(registry, host_id=host_id, config=config).prepare_history(
+            arguments.project,
+            location_id=arguments.location,
+            request_id=arguments.request_id,
+            context=context,
+        )
+    return PresentationPlanEnvelope(plan).to_json()
+
+
 def _bootstrap(arguments: argparse.Namespace) -> int:
     launch_environment = os.environ.get("AGENT_SWITCHBOARD_LAUNCH_ID")
     surface_environment = os.environ.get("AGENT_SWITCHBOARD_SURFACE_ID")
@@ -239,6 +281,24 @@ def _bootstrap(arguments: argparse.Namespace) -> int:
             expected_surface_id=surface_environment,
             reconcile_runtime=lambda: reconcile_live(registry, str(host_id)),
         )
+
+
+def _stop_session(arguments: argparse.Namespace) -> str:
+    host_id = load_or_create_host_id()
+    config = load_config(host_id=host_id)
+    with Registry(database_path()) as registry:
+        materialize_configured_projects(registry, str(host_id), config)
+
+        def reconcile() -> object:
+            return reconcile_live(registry, str(host_id))
+
+        action = ManagedSessionController(
+            registry,
+            host_id=host_id,
+            tmux=TmuxController(),
+            reconcile_runtime=reconcile,
+        ).stop(arguments.session_key)
+    return SessionActionEnvelope(action).to_json()
 
 
 def _surface_action(arguments: argparse.Namespace) -> int:
@@ -335,9 +395,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     if arguments.command in {
         "prepare-open",
         "prepare-new",
+        "prepare-history",
         "bootstrap",
         "select-surface",
         "attach-surface",
+        "stop-session",
     }:
         try:
             if arguments.command == "prepare-open":
@@ -346,8 +408,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             if arguments.command == "prepare-new":
                 sys.stdout.write(f"{_prepare_new(arguments)}\n")
                 return 0
+            if arguments.command == "prepare-history":
+                sys.stdout.write(f"{_prepare_history(arguments)}\n")
+                return 0
             if arguments.command == "bootstrap":
                 return _bootstrap(arguments)
+            if arguments.command == "stop-session":
+                sys.stdout.write(f"{_stop_session(arguments)}\n")
+                return 0
             return _surface_action(arguments)
         except (
             ValidationError,

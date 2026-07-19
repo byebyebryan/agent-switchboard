@@ -124,6 +124,7 @@ class LaunchAction(StrEnum):
     NEW = "new"
     RESUME = "resume"
     ATTACH = "attach"
+    HISTORY = "history"
     MANAGE = "manage"
 
 
@@ -200,6 +201,7 @@ class StateConfidence(StrEnum):
 class LaunchRequestKind(StrEnum):
     OPEN = "open"
     NEW = "new"
+    HISTORY = "history"
     MANAGE = "manage"
 
 
@@ -947,15 +949,24 @@ class LaunchIntent:
                 raise ValidationError("target session belongs to a different host")
             if self.target_session_key.provider is not self.provider:
                 raise ValidationError("target session belongs to a different provider")
-        if self.action is LaunchAction.NEW:
+        if self.action in {LaunchAction.NEW, LaunchAction.HISTORY}:
             if not all((self.project_id, self.location_id, self.cwd)):
-                raise ValidationError("new launch requires project, location, and cwd")
+                raise ValidationError(
+                    f"{self.action} launch requires project, location, and cwd"
+                )
+            if self.action is LaunchAction.HISTORY and (
+                self.provider is not ProviderId.CLAUDE
+                or self.source_handoff_id is not None
+            ):
+                raise ValidationError(
+                    "history launch requires Claude without a source handoff"
+                )
             if (
                 self.target_session_key is not None
                 and self.state is not LaunchState.BOUND
             ):
                 raise ValidationError(
-                    "new launch receives a target session only when bound"
+                    f"{self.action} launch receives a target session only when bound"
                 )
         elif self.action in {LaunchAction.RESUME, LaunchAction.ATTACH}:
             if self.target_session_key is None:
@@ -1077,9 +1088,12 @@ class LaunchIntent:
             self.assert_lease(owner, now)
         if state is LaunchState.BOUND and self.action is LaunchAction.MANAGE:
             raise LaunchTransitionError("manage launch cannot bind a session")
-        if state is LaunchState.BOUND and self.action is LaunchAction.NEW:
+        if state is LaunchState.BOUND and self.action in {
+            LaunchAction.NEW,
+            LaunchAction.HISTORY,
+        }:
             raise LaunchTransitionError(
-                "new launch binding requires the provider session identity"
+                "unbound launch binding requires the provider session identity"
             )
         if (
             state is LaunchState.MANAGER_READY
@@ -1134,8 +1148,10 @@ class LaunchIntent:
     ) -> Self:
         """Atomically model the provider identity supplied for a new launch."""
 
-        if self.action is not LaunchAction.NEW:
-            raise LaunchTransitionError("only a new launch receives a bound target")
+        if self.action not in {LaunchAction.NEW, LaunchAction.HISTORY}:
+            raise LaunchTransitionError(
+                "only a new or history launch receives a bound target"
+            )
         if self.state is not LaunchState.PROVIDER_STARTED:
             raise LaunchTransitionError(
                 "launch must be provider_started before binding"
@@ -1206,6 +1222,19 @@ class LaunchRequest:
                 raise ValidationError("new request requires project, location, and cwd")
             if self.target_session_key is not None:
                 raise ValidationError("new request cannot target an existing session")
+        elif self.kind is LaunchRequestKind.HISTORY:
+            if not all((self.project_id, self.location_id, self.cwd)):
+                raise ValidationError(
+                    "history request requires project, location, and cwd"
+                )
+            if (
+                self.provider is not ProviderId.CLAUDE
+                or self.target_session_key is not None
+                or self.source_handoff_id is not None
+            ):
+                raise ValidationError(
+                    "history request requires unbound Claude project context"
+                )
         elif self.kind is LaunchRequestKind.MANAGE:
             if any(
                 (

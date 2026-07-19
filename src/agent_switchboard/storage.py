@@ -3758,13 +3758,13 @@ class Registry:
         if (
             launch["host_id"] != values["host_id"]
             or launch["provider"] != values["provider"]
-            or launch["action"] not in {"new", "resume", "attach"}
+            or launch["action"] not in {"new", "resume", "attach", "history"}
             or (
                 launch["action"] in {"resume", "attach"}
                 and launch["target_session_key"] != session["session_key"]
             )
             or (
-                launch["action"] == "new"
+                launch["action"] in {"new", "history"}
                 and launch["target_session_key"] not in {None, session["session_key"]}
             )
             or surface["host_id"] != values["host_id"]

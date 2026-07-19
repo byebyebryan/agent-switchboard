@@ -466,6 +466,24 @@ class TmuxController:
             missing_ok=True,
         )
 
+    def request_provider_exit(self, locator: TmuxLocator) -> None:
+        """Ask the provider in one exact managed pane to exit cleanly."""
+
+        self.inspect_locator(locator)
+        self._run(self._tmux(locator.socket, "send-keys", "-t", locator.pane, "C-c"))
+        self._run(
+            self._tmux(
+                locator.socket,
+                "send-keys",
+                "-t",
+                locator.pane,
+                "-l",
+                "--",
+                "/exit",
+            )
+        )
+        self._run(self._tmux(locator.socket, "send-keys", "-t", locator.pane, "Enter"))
+
     def attached(self, locator: TmuxLocator) -> bool:
         return self.inspect_locator(locator).client_attached
 

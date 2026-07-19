@@ -656,6 +656,60 @@ def test_reconcile_binds_pending_new_launch_after_missed_hook(
     assert surface["binding_confidence"] == "confirmed"
 
 
+def test_complete_tmux_absence_retires_cancelled_pending_launch(
+    registry: Registry, tmp_path: Path
+) -> None:
+    socket = tmp_path / "cancelled.sock"
+    socket.touch()
+    locator = TmuxLocator(str(socket), "picker", "@1", "%7")
+    _prepare_pending_new(registry, locator)
+
+    result = reconcile_live(
+        registry,
+        HOST_ID,
+        proc_root=_proc_root(tmp_path),
+        uid=os.getuid(),
+        environment={},
+        tmux_runner=_tmux_runner(returncode=1, stderr=b"no server running"),
+        entry_ns=130_000_000,
+    )
+
+    assert result.errors == ()
+    launch = registry.get_launch(LAUNCH_ID)
+    assert launch is not None
+    assert launch["state"] == "failed"
+    assert launch["failure_code"] == "surface_terminated"
+    surface = registry.get_surface(SURFACE_ID)
+    assert surface is not None and surface["retired_at"] == 130
+
+
+def test_incomplete_tmux_scan_preserves_pending_launch_surface(
+    registry: Registry, tmp_path: Path
+) -> None:
+    socket = tmp_path / "inaccessible.sock"
+    socket.touch()
+    _prepare_pending_new(
+        registry,
+        TmuxLocator(str(socket), "picker", "@1", "%7"),
+    )
+
+    result = reconcile_live(
+        registry,
+        HOST_ID,
+        proc_root=_proc_root(tmp_path),
+        uid=os.getuid(),
+        environment={},
+        tmux_runner=_tmux_runner(returncode=2, stderr=b"permission denied"),
+        entry_ns=130_000_000,
+    )
+
+    assert {error.code for error in result.errors} == {"tmux_probe_failed"}
+    launch = registry.get_launch(LAUNCH_ID)
+    assert launch is not None and launch["state"] == "provider_started"
+    surface = registry.get_surface(SURFACE_ID)
+    assert surface is not None and surface["retired_at"] is None
+
+
 def test_runtime_launch_binding_rejects_a_different_tmux_locator(
     registry: Registry,
 ) -> None:

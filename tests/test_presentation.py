@@ -18,6 +18,7 @@ from agent_switchboard.domain import (
 )
 from agent_switchboard.presentation import (
     PREPARE_CLAUDE_CAPABILITY_HASH,
+    PREPARE_CLAUDE_HISTORY_CAPABILITY_HASH,
     PREPARE_NEW_CLAUDE_CAPABILITY_HASH,
     LaunchCoordinator,
     PresentationError,
@@ -510,6 +511,106 @@ def test_new_claude_project_launch_forces_disabled_agent_view_and_starts_exact_c
 
     assert captured == ["/opt/claude", ("/opt/claude",)]
     assert registry.get_launch(str(stored["launch_id"]))["state"] == "provider_started"
+
+
+def test_claude_history_launch_uses_native_picker_and_binds_selected_session(
+    registry: Registry, tmp_path: Path
+) -> None:
+    project_path = tmp_path / "project"
+    project_path.mkdir()
+    project, locations = add_project(
+        registry,
+        project_path,
+        default_provider="claude",
+    )
+    tmux = FakeTmux()
+    launch = new_coordinator(
+        registry,
+        tmux,
+        project_path,
+        projects=(project,),
+        locations=locations,
+    )
+
+    plan = launch.prepare_history(
+        PROJECT_ID,
+        location_id=LOCATION_ID,
+        request_id=REQUEST_ID,
+        context=ATTACH_CONTEXT,
+    )
+
+    assert plan.kind is PresentationPlanKind.ATTACH
+    stored = registry.list_launches()[0]
+    assert stored["action"] == "history"
+    assert stored["provider"] == "claude"
+    assert stored["target_session_key"] is None
+    assert stored["capability_hash"] == PREPARE_CLAUDE_HISTORY_CAPABILITY_HASH
+    assert tmux.create_calls[0]["session_key"] is None
+    assert tmux.create_calls[0]["environment"] == {
+        "AGENT_SWITCHBOARD_LAUNCH_ID": stored["launch_id"],
+        "AGENT_SWITCHBOARD_SURFACE_ID": str(plan.surface_id),
+        "CLAUDE_CODE_DISABLE_AGENT_VIEW": "1",
+    }
+
+    tmux.attached = True
+    captured: list[object] = []
+
+    def capture(executable: str, argv: Sequence[str]) -> None:
+        captured.extend((executable, tuple(argv)))
+        raise ExecCaptured
+
+    with pytest.raises(ExecCaptured):
+        launch.bootstrap(str(stored["launch_id"]), exec_provider=capture)  # type: ignore[arg-type]
+
+    assert captured == ["/opt/claude", ("/opt/claude", "--resume")]
+    bound = registry.bind_provider_session(
+        str(stored["launch_id"]),
+        {
+            "session_key": NEW_CLAUDE_SESSION_KEY,
+            "host_id": HOST_ID,
+            "provider": "claude",
+            "provider_session_id": NEW_SESSION_ID,
+            "runtime_presence": "live",
+            "last_observed_at": 150,
+        },
+        lease_owner=f"bootstrap:{stored['launch_id']}",
+        observed_at=150,
+    )
+    assert bound.kind == "bound"
+    assert bound.launch["target_session_key"] == NEW_CLAUDE_SESSION_KEY
+    assert bound.surface is not None
+    assert bound.surface["current_session_key"] == NEW_CLAUDE_SESSION_KEY
+
+
+def test_claude_history_blocked_plan_keeps_provider_attribution(
+    registry: Registry, tmp_path: Path
+) -> None:
+    project_path = tmp_path / "project"
+    project_path.mkdir()
+    project, locations = add_project(
+        registry,
+        project_path,
+        default_provider="claude",
+    )
+    launch = new_coordinator(
+        registry,
+        FakeTmux(),
+        project_path,
+        projects=(project,),
+        locations=locations,
+    )
+
+    blocked = launch.prepare_history(
+        PROJECT_ID,
+        location_id=LOCATION_ID,
+        request_id=REQUEST_ID,
+        context=PresentationContext(False, None, False, False),
+    )
+
+    assert blocked.kind is PresentationPlanKind.BLOCKED
+    assert blocked.error is not None
+    assert blocked.error.code == "presentation_unavailable"
+    assert blocked.error.provider is ProviderId.CLAUDE
 
 
 def test_disabled_claude_blocks_new_without_mutating_launch_state(

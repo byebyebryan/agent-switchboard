@@ -143,6 +143,12 @@ class PresentationPlanKind(StrEnum):
     BLOCKED = "blocked"
 
 
+class SessionActionStatus(StrEnum):
+    STOPPED = "stopped"
+    ALREADY_STOPPED = "already_stopped"
+    BLOCKED = "blocked"
+
+
 def _decode(raw: str | bytes | bytearray) -> Mapping[str, Any]:
     try:
         size = len(raw.encode("utf-8")) if isinstance(raw, str) else len(raw)
@@ -1309,6 +1315,113 @@ class PresentationPlanEnvelope:
 
     def _raw_dict(self) -> dict[str, JsonValue]:
         return _envelope({"plan": self.plan.to_dict()})
+
+    def to_dict(self) -> dict[str, JsonValue]:
+        normalized = type(self).from_dict(self._raw_dict())
+        return normalized._raw_dict()
+
+    def to_json(self) -> str:
+        return _dump(self.to_dict())
+
+
+@dataclass(frozen=True, slots=True)
+class SessionAction:
+    status: SessionActionStatus
+    host_id: HostId
+    session_key: SessionKey
+    error: ErrorRecord | None = None
+
+    def __post_init__(self) -> None:
+        try:
+            status = (
+                self.status
+                if isinstance(self.status, SessionActionStatus)
+                else SessionActionStatus(self.status)
+            )
+        except ValueError as exc:
+            raise ProtocolError(
+                f"unsupported session action status: {self.status}"
+            ) from exc
+        object.__setattr__(self, "status", status)
+        if not isinstance(self.host_id, HostId):
+            object.__setattr__(self, "host_id", HostId(self.host_id))
+        if not isinstance(self.session_key, SessionKey):
+            object.__setattr__(self, "session_key", SessionKey.parse(self.session_key))
+        if self.session_key.host_id != self.host_id:
+            raise ProtocolError("session action host and session identity disagree")
+        if self.session_key.provider is not ProviderId.CLAUDE:
+            raise ProtocolError("session actions currently support Claude only")
+        if status is SessionActionStatus.BLOCKED:
+            if self.error is None:
+                raise ProtocolError("blocked session action requires an error")
+            if (
+                self.error.host_id not in {None, self.host_id}
+                or self.error.provider not in {None, ProviderId.CLAUDE}
+                or self.error.session_key not in {None, self.session_key}
+            ):
+                raise ProtocolError("blocked session action error routing disagrees")
+        elif self.error is not None:
+            raise ProtocolError("successful session action cannot contain an error")
+
+    @classmethod
+    def from_dict(cls, value: object, path: str = "action") -> Self:
+        table = _object(value, path)
+        kind = _string(_required(table, "kind", path), f"{path}.kind")
+        if kind != "stop":
+            raise ProtocolError(f"{path}.kind is not supported")
+        try:
+            status = SessionActionStatus(
+                _string(_required(table, "status", path), f"{path}.status")
+            )
+        except ValueError as exc:
+            raise ProtocolError(f"{path}.status is not supported") from exc
+        host_id = _uuid(_required(table, "hostId", path), f"{path}.hostId", HostId)
+        try:
+            session_key = SessionKey.parse(
+                _string(_required(table, "sessionKey", path), f"{path}.sessionKey")
+                or ""
+            )
+        except ValidationError as exc:
+            raise ProtocolError(f"{path}.sessionKey: {exc}") from exc
+        return cls(
+            status,
+            host_id,
+            session_key,
+            error=(
+                ErrorRecord.from_dict(table["error"], f"{path}.error")
+                if table.get("error") is not None
+                else None
+            ),
+        )
+
+    def to_dict(self) -> dict[str, JsonValue]:
+        result: dict[str, JsonValue] = {
+            "kind": "stop",
+            "status": self.status,
+            "hostId": str(self.host_id),
+            "sessionKey": str(self.session_key),
+        }
+        if self.error is not None:
+            result["error"] = self.error.to_dict()
+        return result
+
+
+@dataclass(frozen=True, slots=True)
+class SessionActionEnvelope:
+    action: SessionAction
+
+    @classmethod
+    def from_dict(cls, value: object) -> Self:
+        table = _object(value, "envelope")
+        _versions(table)
+        return cls(SessionAction.from_dict(_required(table, "action", "envelope")))
+
+    @classmethod
+    def from_json(cls, raw: str | bytes | bytearray) -> Self:
+        return cls.from_dict(_decode(raw))
+
+    def _raw_dict(self) -> dict[str, JsonValue]:
+        return _envelope({"action": self.action.to_dict()})
 
     def to_dict(self) -> dict[str, JsonValue]:
         normalized = type(self).from_dict(self._raw_dict())

@@ -25,6 +25,9 @@ from agent_switchboard.protocol import (
     PresentationPlanEnvelope,
     PresentationPlanKind,
     ProtocolError,
+    SessionAction,
+    SessionActionEnvelope,
+    SessionActionStatus,
     SnapshotEnvelope,
 )
 
@@ -36,6 +39,7 @@ LOCATION = "44444444-4444-4444-8444-444444444444"
 SESSION_ID = "55555555-5555-4555-8555-555555555555"
 LAUNCH = "66666666-6666-4666-8666-666666666666"
 SESSION_KEY = f"{HOST}:codex:{SESSION_ID}"
+CLAUDE_SESSION_KEY = SessionKey.parse(f"{HOST}:claude:{SESSION_ID}")
 
 
 @pytest.mark.parametrize(
@@ -520,6 +524,67 @@ def test_focus_attach_and_blocked_plan_shapes() -> None:
     error = ErrorRecord("unsafe_handoff", "No safe route.", ErrorScope.LAUNCH, False, 1)
     blocked = PresentationPlan(PresentationPlanKind.BLOCKED, HOST, error=error)
     blocked.validate_for_context(PresentationContext(False, None, False, False))
+
+
+def test_session_stop_action_is_versioned_and_fail_closed() -> None:
+    stopped = SessionActionEnvelope(
+        SessionAction(
+            SessionActionStatus.STOPPED,
+            HOST,
+            CLAUDE_SESSION_KEY,
+        )
+    )
+    parsed = SessionActionEnvelope.from_json(stopped.to_json())
+    assert parsed == stopped
+    assert parsed.to_dict()["action"] == {
+        "kind": "stop",
+        "status": "stopped",
+        "hostId": str(HOST),
+        "sessionKey": str(CLAUDE_SESSION_KEY),
+    }
+
+    error = ErrorRecord(
+        "surface_not_owned",
+        "The surface is unmanaged.",
+        ErrorScope.SESSION,
+        False,
+        1,
+        host_id=HOST,
+        provider=ProviderId.CLAUDE,
+        session_key=CLAUDE_SESSION_KEY,
+    )
+    blocked = SessionAction(
+        SessionActionStatus.BLOCKED,
+        HOST,
+        CLAUDE_SESSION_KEY,
+        error,
+    )
+    assert (
+        SessionActionEnvelope.from_json(
+            SessionActionEnvelope(blocked).to_json()
+        ).action.error
+        == error
+    )
+    with pytest.raises(ProtocolError, match="requires an error"):
+        SessionAction(
+            SessionActionStatus.BLOCKED,
+            HOST,
+            CLAUDE_SESSION_KEY,
+        )
+    with pytest.raises(ProtocolError, match="routing disagrees"):
+        SessionAction(
+            SessionActionStatus.BLOCKED,
+            HOST,
+            CLAUDE_SESSION_KEY,
+            ErrorRecord(
+                "surface_not_owned",
+                "The surface is unmanaged.",
+                ErrorScope.SESSION,
+                False,
+                1,
+                host_id=HostId("99999999-9999-4999-8999-999999999999"),
+            ),
+        )
 
 
 def test_plan_rejects_non_applicable_fields() -> None:

@@ -738,8 +738,11 @@ def _pending_launch_for_pane(
                 launch["action"] in {"resume", "attach"}
                 and launch["target_session_key"] != str(session_key)
             )
-            or (launch["action"] == "new" and launch["target_session_key"] is not None)
-            or launch["action"] not in {"new", "resume", "attach"}
+            or (
+                launch["action"] in {"new", "history"}
+                and launch["target_session_key"] is not None
+            )
+            or launch["action"] not in {"new", "resume", "attach", "history"}
         ):
             continue
         surface_id = launch["surface_id"]
@@ -768,6 +771,62 @@ def _pending_launch_for_pane(
         ):
             matches.append(str(launch["launch_id"]))
     return matches[0] if len(matches) == 1 else None
+
+
+def _retire_missing_launch_surfaces(
+    registry: Registry,
+    launch_surfaces: Sequence[tuple[dict[str, object], TmuxLocator]],
+    tmux_scan: TmuxScan,
+    *,
+    observed_at: int,
+) -> None:
+    """Retire only launch surfaces proven absent by one complete tmux scan."""
+
+    if not tmux_scan.complete:
+        return
+    observed_locators = {
+        (pane.socket, pane.session, pane.window, pane.pane_id)
+        for pane in tmux_scan.panes
+    }
+    for surface, locator in launch_surfaces:
+        if (
+            locator.socket,
+            locator.session,
+            locator.window,
+            locator.pane,
+        ) in observed_locators:
+            continue
+        launch_id = surface.get("launch_id")
+        surface_id = surface.get("surface_id")
+        if not isinstance(launch_id, str) or not isinstance(surface_id, str):
+            continue
+        launch = registry.get_launch(launch_id)
+        if (
+            launch is None
+            or launch["state"] not in {"waiting_for_client", "provider_started"}
+            or launch["action"] not in {"new", "resume", "attach", "history"}
+            or launch["surface_id"] != surface_id
+            or launch["lease_owner"] is None
+            or observed_at < int(launch["updated_at"])
+            or observed_at < int(str(surface["last_observed_at"]))
+        ):
+            continue
+        if observed_at >= int(launch["expires_at"]):
+            registry.transition_launch(
+                launch_id,
+                "expired",
+                observed_at=observed_at,
+            )
+        else:
+            registry.transition_launch(
+                launch_id,
+                "failed",
+                lease_owner=str(launch["lease_owner"]),
+                observed_at=observed_at,
+                failure_code="surface_terminated",
+                failure_detail="launch-owned tmux surface exited before binding",
+            )
+        registry.retire_surface(surface_id, observed_at=observed_at)
 
 
 def _error_record(
@@ -844,6 +903,19 @@ def reconcile_live(
         else ProcessIdentityScan((), {}, True, ())
     )
     env = os.environ if environment is None else environment
+    launch_surfaces: list[tuple[dict[str, object], TmuxLocator]] = []
+    for surface in registry.list_surfaces(host_id=host_id):
+        if (
+            surface["retired_at"] is not None
+            or surface["transport"] != "tmux"
+            or surface["launch_id"] is None
+        ):
+            continue
+        try:
+            locator = TmuxLocator.from_storage(surface["transport_locator"])
+        except TmuxError:
+            continue
+        launch_surfaces.append((surface, locator))
     sockets: list[str | None] = [None]
     current_socket = _current_tmux_socket(env)
     if current_socket is not None:
@@ -853,6 +925,7 @@ def reconcile_live(
         for row in all_sessions
         if row["tmux_socket"] is not None
     )
+    sockets.extend(locator.socket for _surface, locator in launch_surfaces)
     tmux_scan = scan_tmux_panes(
         sockets,
         runner=tmux_runner,
@@ -861,6 +934,12 @@ def reconcile_live(
     issues = [*process_scan.issues, *tmux_scan.issues]
     claude_issues = (
         [*claude_process_scan.issues, *tmux_scan.issues] if claude_sessions else []
+    )
+    _retire_missing_launch_surfaces(
+        registry,
+        launch_surfaces,
+        tmux_scan,
+        observed_at=observed_at,
     )
 
     by_pid = {process.pid: process for process in process_scan.processes}

@@ -43,12 +43,13 @@ def test_migrations_are_explicit_contiguous_and_idempotent(tmp_path) -> None:
     database = tmp_path / "switchboard.db"
     connection = configured_connection(str(database))
 
-    assert [migration.version for migration in MIGRATIONS] == [1, 2, 3, 4]
+    assert [migration.version for migration in MIGRATIONS] == [1, 2, 3, 4, 5]
     assert [migration.name for migration in MIGRATIONS] == [
         "initial_registry",
         "remote_snapshot_cache",
         "name_provenance_runtime_index",
         "runtime_truth_ordering",
+        "history_launch",
     ]
     assert migrate(connection, now=100) == CURRENT_SCHEMA_VERSION
     assert migrate(connection, now=200) == CURRENT_SCHEMA_VERSION
@@ -61,11 +62,12 @@ def test_migrations_are_explicit_contiguous_and_idempotent(tmp_path) -> None:
         (2, "remote_snapshot_cache", 100),
         (3, "name_provenance_runtime_index", 100),
         (4, "runtime_truth_ordering", 100),
+        (5, "history_launch", 100),
     ]
-    assert connection.execute("PRAGMA user_version").fetchone()[0] == 4
+    assert connection.execute("PRAGMA user_version").fetchone()[0] == 5
     assert dict(
         connection.execute("SELECT key, value FROM registry_metadata").fetchall()
-    ) == {"protocol_version": "1", "schema_version": "4"}
+    ) == {"protocol_version": "1", "schema_version": "5"}
     assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
     connection.close()
 
@@ -112,7 +114,7 @@ def test_upgrade_from_v1_preserves_registry_rows(tmp_path) -> None:
     connection.close()
 
     upgraded = connect_database(database)
-    assert upgraded.execute("PRAGMA user_version").fetchone()[0] == 4
+    assert upgraded.execute("PRAGMA user_version").fetchone()[0] == 5
     assert (
         upgraded.execute(
             """
@@ -137,6 +139,92 @@ def test_upgrade_from_v1_preserves_registry_rows(tmp_path) -> None:
     )
     assert upgraded.execute("PRAGMA foreign_key_check").fetchall() == []
     upgraded.close()
+
+
+def test_upgrade_from_v4_preserves_launches_and_adds_claude_history(tmp_path) -> None:
+    connection = configured_connection(str(tmp_path / "switchboard.db"))
+    assert migrate(connection, target_version=4, now=10) == 4
+    host_id = "11111111-1111-4111-8111-111111111111"
+    project_id = stable_uuid("history-project")
+    location_id = stable_uuid("history-location")
+    connection.execute(
+        """
+        INSERT INTO hosts(host_id, display_name, is_local, created_at, updated_at)
+        VALUES (?, 'host', 1, 10, 10)
+        """,
+        (host_id,),
+    )
+    connection.execute(
+        """
+        INSERT INTO projects(project_id, name, created_at, updated_at)
+        VALUES (?, 'project', 10, 10)
+        """,
+        (project_id,),
+    )
+    connection.execute(
+        """
+        INSERT INTO project_locations(
+            location_id, project_id, host_id, path, is_default,
+            created_at, updated_at
+        ) VALUES (?, ?, ?, '/work/project', 1, 10, 10)
+        """,
+        (location_id, project_id, host_id),
+    )
+    old_launch_id = stable_uuid("pre-history-launch")
+    launch_values = (
+        old_launch_id,
+        stable_uuid("pre-history-request"),
+        host_id,
+        project_id,
+        location_id,
+    )
+    connection.execute(
+        """
+        INSERT INTO launch_intents(
+            launch_id, request_id, request_fingerprint, host_id, provider,
+            action, project_id, location_id, cwd, transport, state,
+            lease_owner, capability_hash, created_at, updated_at, expires_at
+        ) VALUES (?, ?, ?, ?, 'claude', 'new', ?, ?, '/work/project', 'tmux',
+                  'reserved', 'worker', ?, 10, 10, 100)
+        """,
+        (*launch_values[:2], "a" * 64, *launch_values[2:], "b" * 64),
+    )
+
+    assert migrate(connection, now=20) == CURRENT_SCHEMA_VERSION
+    assert (
+        connection.execute(
+            "SELECT action FROM launch_intents WHERE launch_id = ?", (old_launch_id,)
+        ).fetchone()[0]
+        == "new"
+    )
+
+    history_values = (
+        stable_uuid("history-launch"),
+        stable_uuid("history-request"),
+        "c" * 64,
+        host_id,
+        project_id,
+        location_id,
+        "d" * 64,
+    )
+    connection.execute(
+        """
+        INSERT INTO launch_intents(
+            launch_id, request_id, request_fingerprint, host_id, provider,
+            action, project_id, location_id, cwd, transport, state,
+            lease_owner, capability_hash, created_at, updated_at, expires_at
+        ) VALUES (?, ?, ?, ?, 'claude', 'history', ?, ?, '/work/project',
+                  'tmux', 'reserved', 'worker', ?, 20, 20, 100)
+        """,
+        history_values,
+    )
+    with pytest.raises(sqlite3.IntegrityError):
+        connection.execute(
+            "UPDATE launch_intents SET provider = 'codex' WHERE launch_id = ?",
+            (history_values[0],),
+        )
+    assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
+    connection.close()
 
 
 def test_upgrade_from_v2_backfills_name_provenance_and_adds_runtime_index(

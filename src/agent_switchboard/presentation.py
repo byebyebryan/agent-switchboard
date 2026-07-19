@@ -51,6 +51,9 @@ PREPARE_NEW_CAPABILITY_HASH = hashlib.sha256(
 PREPARE_NEW_CLAUDE_CAPABILITY_HASH = hashlib.sha256(
     b"agent-switchboard:phase-3c:local-claude-new-session"
 ).hexdigest()
+PREPARE_CLAUDE_HISTORY_CAPABILITY_HASH = hashlib.sha256(
+    b"agent-switchboard:phase-3c:local-claude-history-picker"
+).hexdigest()
 PREPARE_SURFACE_WAIT_SECONDS = 2.0
 BOOTSTRAP_START_WAIT_SECONDS = 5.0
 PROVIDER_BIND_GRACE_SECONDS = 300
@@ -74,14 +77,14 @@ def _exec_provider(executable: str, argv: Sequence[str]) -> Never:
     os.execvp(executable, list(argv))
 
 
-def _synchronize_bound_new_metadata(
+def _synchronize_bound_unbound_metadata(
     registry: Registry,
     tmux: TmuxController,
     surface: dict[str, object],
     observed: TmuxSurfaceObservation,
     expected_session_key: str,
 ) -> TmuxSurfaceObservation:
-    """Promote an atomically bound new-session identity into pane metadata."""
+    """Promote an atomically bound unbound-launch identity into pane metadata."""
 
     metadata = observed.metadata
     if metadata.session_key == expected_session_key:
@@ -96,7 +99,7 @@ def _synchronize_bound_new_metadata(
     launch = registry.get_launch(launch_id)
     if (
         launch is None
-        or launch["action"] != "new"
+        or launch["action"] not in {"new", "history"}
         or launch["state"] != "bound"
         or launch["target_session_key"] != expected_session_key
         or launch["provider"] != expected_provider
@@ -283,6 +286,107 @@ class LaunchCoordinator:
             now=now,
         )
 
+    def prepare_history(
+        self,
+        project_id: str,
+        *,
+        location_id: str | None,
+        request_id: str,
+        context: PresentationContext,
+    ) -> PresentationPlan:
+        parsed_project_id = self._stable_id(project_id, ProjectId, "project ID")
+        parsed_location_id = (
+            self._stable_id(location_id, LocationId, "location ID")
+            if location_id is not None
+            else None
+        )
+        request_id = self._request_id(request_id)
+        now = self.clock()
+        project = self.projects.get(str(parsed_project_id))
+        if project is None:
+            return self._blocked_new(
+                "project_not_found",
+                "The selected project is not declared on this host.",
+                now,
+                provider=ProviderId.CLAUDE,
+            )
+        candidates = sorted(
+            (
+                location
+                for location in self.locations.values()
+                if location.project_id == parsed_project_id
+                and location.host_id == self.host_id
+            ),
+            key=lambda location: str(location.location_id),
+        )
+        location: ProjectLocation | None = None
+        if parsed_location_id is not None:
+            location = self.locations.get(str(parsed_location_id))
+            if (
+                location is None
+                or location.project_id != parsed_project_id
+                or location.host_id != self.host_id
+            ):
+                return self._blocked_new(
+                    "location_not_found",
+                    "The selected location does not belong to this local project.",
+                    now,
+                    provider=ProviderId.CLAUDE,
+                )
+        elif len(candidates) == 1:
+            location = candidates[0]
+        else:
+            defaults = [candidate for candidate in candidates if candidate.is_default]
+            if len(defaults) == 1:
+                location = defaults[0]
+            elif not candidates:
+                return self._blocked_new(
+                    "project_location_missing",
+                    "The selected project has no location on this host.",
+                    now,
+                    provider=ProviderId.CLAUDE,
+                )
+            else:
+                return self._blocked_new(
+                    "project_location_ambiguous",
+                    "The selected project requires an explicit location.",
+                    now,
+                    provider=ProviderId.CLAUDE,
+                )
+        assert location is not None
+        if self.claude_executable is None:
+            return self._blocked_new(
+                "provider_unavailable",
+                "Claude is disabled in the current host configuration.",
+                now,
+                provider=ProviderId.CLAUDE,
+            )
+        transport = location.transport_override or project.default_transport
+        if transport is not Transport.TMUX:
+            return self._blocked_new(
+                "transport_not_supported",
+                "Claude history requires the tmux transport.",
+                now,
+                provider=ProviderId.CLAUDE,
+            )
+        if not location.path.is_absolute() or not location.path.is_dir():
+            return self._blocked_new(
+                "working_directory_unavailable",
+                "The selected project location is unavailable.",
+                now,
+                provider=ProviderId.CLAUDE,
+            )
+        return self._prepare_unbound(
+            project,
+            location,
+            provider=ProviderId.CLAUDE,
+            action="history",
+            capability_hash=PREPARE_CLAUDE_HISTORY_CAPABILITY_HASH,
+            request_id=request_id,
+            context=context,
+            now=now,
+        )
+
     @staticmethod
     def _stable_id[T: ProjectId | LocationId](
         value: str,
@@ -435,7 +539,7 @@ class LaunchCoordinator:
                 now,
                 retryable=True,
             )
-        observed = _synchronize_bound_new_metadata(
+        observed = _synchronize_bound_unbound_metadata(
             self.registry,
             self.tmux,
             surface,
@@ -665,12 +769,42 @@ class LaunchCoordinator:
         context: PresentationContext,
         now: int,
     ) -> PresentationPlan:
+        capability_hash = (
+            PREPARE_NEW_CAPABILITY_HASH
+            if provider is ProviderId.CODEX
+            else PREPARE_NEW_CLAUDE_CAPABILITY_HASH
+        )
+        return self._prepare_unbound(
+            project,
+            location,
+            provider=provider,
+            action="new",
+            capability_hash=capability_hash,
+            request_id=request_id,
+            context=context,
+            now=now,
+        )
+
+    def _prepare_unbound(
+        self,
+        project: Project,
+        location: ProjectLocation,
+        *,
+        provider: ProviderId,
+        action: str,
+        capability_hash: str,
+        request_id: str,
+        context: PresentationContext,
+        now: int,
+    ) -> PresentationPlan:
+        if action not in {"new", "history"}:
+            raise PresentationError("unbound launch action is unsupported")
         launch_id = str(uuid.uuid4())
         lease_owner = self._lease_owner(launch_id)
         request = {
             "host_id": str(self.host_id),
             "provider": provider.value,
-            "action": "new",
+            "action": action,
             "project_id": str(project.project_id),
             "location_id": str(location.location_id),
             "cwd": str(location.path),
@@ -684,19 +818,16 @@ class LaunchCoordinator:
                 request_id=request_id,
                 launch_id=launch_id,
                 lease_owner=lease_owner,
-                capability_hash=(
-                    PREPARE_NEW_CAPABILITY_HASH
-                    if provider is ProviderId.CODEX
-                    else PREPARE_NEW_CLAUDE_CAPABILITY_HASH
-                ),
+                capability_hash=capability_hash,
                 expires_at=now + self.launch_timeout_seconds * 1_000,
                 created_at=now,
             )
         except RequestConflict:
             return self._blocked_new(
                 "request_conflict",
-                "The request ID was already used for a different new-session action.",
+                "The request ID was already used for a different unbound action.",
                 now,
+                provider=provider,
             )
         launch = reservation.launch
         if reservation.kind != "created":
@@ -759,6 +890,7 @@ class LaunchCoordinator:
         session_key: SessionKey | None,
         context: PresentationContext,
     ) -> PresentationPlan:
+        provider = ProviderId(str(launch["provider"]))
         deadline = time.monotonic() + PREPARE_SURFACE_WAIT_SECONDS
         while launch["state"] in {"reserved", "surface_ready"}:
             if time.monotonic() >= deadline:
@@ -768,6 +900,7 @@ class LaunchCoordinator:
                     session_key,
                     self.clock(),
                     retryable=True,
+                    provider=provider,
                 )
             self.sleeper(0.02)
             refreshed = self.registry.get_launch(str(launch["launch_id"]))
@@ -782,6 +915,7 @@ class LaunchCoordinator:
                 session_key,
                 self.clock(),
                 retryable=True,
+                provider=provider,
             )
         if (
             launch["state"] == "bound"
@@ -800,6 +934,7 @@ class LaunchCoordinator:
                 session_key,
                 self.clock(),
                 retryable=True,
+                provider=provider,
             )
         try:
             locator = TmuxLocator.from_storage(surface["transport_locator"])
@@ -811,9 +946,10 @@ class LaunchCoordinator:
                 session_key,
                 self.clock(),
                 retryable=True,
+                provider=provider,
             )
         if session_key is not None:
-            observed = _synchronize_bound_new_metadata(
+            observed = _synchronize_bound_unbound_metadata(
                 self.registry,
                 self.tmux,
                 surface,
@@ -833,6 +969,7 @@ class LaunchCoordinator:
                 session_key,
                 self.clock(),
                 retryable=True,
+                provider=provider,
             )
         lease = None if launch["state"] == "bound" else int(launch["expires_at"])
         return self._shape_plan(surface, observed, context, lease_expires_at=lease)
@@ -904,6 +1041,7 @@ class LaunchCoordinator:
                     SessionKey.parse(session_key) if session_key is not None else None,
                     self.clock(),
                     retryable=True,
+                    provider=ProviderId(str(surface["provider"])),
                 )
             plan = PresentationPlan(
                 PresentationPlanKind.SWITCH,
@@ -941,6 +1079,7 @@ class LaunchCoordinator:
                 SessionKey.parse(session_key) if session_key is not None else None,
                 self.clock(),
                 retryable=True,
+                provider=ProviderId(str(surface["provider"])),
             )
         plan.validate_for_context(context)
         return plan
@@ -998,6 +1137,7 @@ class LaunchCoordinator:
         observed_at: int,
         *,
         retryable: bool = False,
+        provider: ProviderId | None = ProviderId.CODEX,
     ) -> PresentationPlan:
         if session_key is not None:
             return self._blocked(
@@ -1012,6 +1152,7 @@ class LaunchCoordinator:
             message,
             observed_at,
             retryable=retryable,
+            provider=provider,
         )
 
     @staticmethod
@@ -1069,6 +1210,7 @@ class LaunchCoordinator:
         if launch["host_id"] != str(self.host_id) or launch["action"] not in {
             "new",
             "resume",
+            "history",
         }:
             raise PresentationError("bootstrap launch is not a supported local session")
         if launch["state"] != "waiting_for_client":
@@ -1080,7 +1222,10 @@ class LaunchCoordinator:
             or (
                 launch["action"] == "resume" and not isinstance(target_session_key, str)
             )
-            or (launch["action"] == "new" and target_session_key is not None)
+            or (
+                launch["action"] in {"new", "history"}
+                and target_session_key is not None
+            )
         ):
             self._fail_launch(launch_id, lease_owner, "invalid_launch_identity")
             return 1
@@ -1198,6 +1343,8 @@ class LaunchCoordinator:
                     "--resume",
                     str(parsed_key.provider_session_id),
                 )
+        elif launch["action"] == "history":
+            argv = (provider_executable, "--resume")
         else:
             argv = (provider_executable,)
         try:
@@ -1271,7 +1418,7 @@ def actionable_surface_locator(
             or launch["surface_id"] != surface_id
             or launch["host_id"] != str(parsed_host)
             or launch["provider"] != provider.value
-            or launch["action"] not in {"new", "resume"}
+            or launch["action"] not in {"new", "resume", "history"}
             or launch["state"]
             not in {"waiting_for_client", "provider_started", "bound"}
         ):
@@ -1287,7 +1434,7 @@ def actionable_surface_locator(
                 or surface["binding_confidence"] != "confirmed"
             ):
                 raise PresentationError("bound surface identity is inconsistent")
-        elif launch["action"] == "new" and (
+        elif launch["action"] in {"new", "history"} and (
             expected_session_key is not None
             or launch["target_session_key"] is not None
             or surface["binding_confidence"] != "unknown"
@@ -1304,7 +1451,7 @@ def actionable_surface_locator(
     except TmuxError as error:
         raise PresentationError("surface tmux target is unavailable") from error
     if isinstance(expected_session_key, str):
-        observed = _synchronize_bound_new_metadata(
+        observed = _synchronize_bound_unbound_metadata(
             registry,
             tmux,
             surface,
@@ -1359,6 +1506,7 @@ __all__ = [
     "BOOTSTRAP_START_WAIT_SECONDS",
     "PREPARE_CAPABILITY_HASH",
     "PREPARE_CLAUDE_CAPABILITY_HASH",
+    "PREPARE_CLAUDE_HISTORY_CAPABILITY_HASH",
     "PREPARE_NEW_CAPABILITY_HASH",
     "PREPARE_NEW_CLAUDE_CAPABILITY_HASH",
     "PREPARE_SURFACE_WAIT_SECONDS",
