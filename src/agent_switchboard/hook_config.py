@@ -9,9 +9,7 @@ import json
 import os
 import secrets
 import shlex
-import shutil
 import stat
-import sys
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass
@@ -19,6 +17,7 @@ from pathlib import Path
 from typing import Any, Final
 
 from .config import ConfigError
+from .executable import resolve_swbctl_executable
 from .providers.claude import claude_settings_path
 
 HOOK_STATUS_MESSAGE: Final = "Agent Switchboard: tracking session"
@@ -122,27 +121,6 @@ def codex_home(*, environ: Mapping[str, str] | None = None) -> Path:
         raise HookConfigError("CODEX_HOME must resolve to an absolute path")
     if path == path.parent:
         raise HookConfigError("CODEX_HOME must not be the filesystem root")
-    return path
-
-
-def resolve_swbctl_executable() -> Path:
-    """Resolve the installed command path used by Codex's shell hook runner."""
-
-    invoked = Path(sys.argv[0])
-    found: str | None = None
-    if invoked.name == "swbctl":
-        found = (
-            str(invoked.absolute())
-            if invoked.is_absolute()
-            else shutil.which(sys.argv[0])
-        )
-    if found is None:
-        found = shutil.which("swbctl")
-    if found is None:
-        raise HookConfigError("swbctl is not available on PATH")
-    path = Path(found).absolute()
-    if not path.is_file() or not os.access(path, os.X_OK):
-        raise HookConfigError("the resolved swbctl path is not executable")
     return path
 
 

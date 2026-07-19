@@ -157,13 +157,16 @@ def test_parser_requires_json_and_retains_global_version(
 
 
 def test_tui_command_is_lazy_and_returns_the_frontend_status(
-    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+    cli_environment: CliEnvironment,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls: list[tuple[str, str | None]] = []
 
     class FakeTui:
         @staticmethod
-        def run_tui() -> int:
+        def run_tui(*, swbctl_executable: Path) -> int:
+            assert swbctl_executable == cli_environment.executable
             return 7
 
     def import_module(name: str, package: str | None = None) -> FakeTui:
@@ -171,6 +174,11 @@ def test_tui_command_is_lazy_and_returns_the_frontend_status(
         return FakeTui()
 
     monkeypatch.setattr(cli_module.importlib, "import_module", import_module)
+    monkeypatch.setattr(
+        cli_module,
+        "resolve_swbctl_executable",
+        lambda: cli_environment.executable,
+    )
 
     assert main(["tui"]) == 7
     assert capsys.readouterr() == ("", "")

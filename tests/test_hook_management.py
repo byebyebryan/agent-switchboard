@@ -10,6 +10,7 @@ from typing import Any
 import pytest
 
 import agent_switchboard.cli as cli_module
+import agent_switchboard.executable as executable_module
 import agent_switchboard.hook_config as hook_config_module
 from agent_switchboard.config import ConfigError, HooksConfig, parse_config
 from agent_switchboard.doctor import CombinedDoctorResult, DoctorResult, run_doctor
@@ -91,10 +92,11 @@ def test_swbctl_resolution_prefers_the_invoked_entry_point(
     stale = tmp_path / "stale" / "swbctl"
     stale.parent.mkdir()
     stale.touch(mode=0o755)
-    monkeypatch.setattr(hook_config_module.sys, "argv", [str(invoked)])
     monkeypatch.setenv("PATH", str(stale.parent))
 
-    assert hook_config_module.resolve_swbctl_executable() == invoked
+    assert (
+        executable_module.resolve_swbctl_executable(invoked_as=str(invoked)) == invoked
+    )
 
 
 def test_install_preserves_unrelated_hooks_is_private_and_idempotent(

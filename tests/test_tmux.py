@@ -42,6 +42,8 @@ class FakeTmux:
                 command, 0, f"{SOCKET}\tas-codex-test\t@4\t%7\n".encode(), b""
             )
         if "display-message" in tmux:
+            if tmux[-1] == "#{client_tty}":
+                return subprocess.CompletedProcess(command, 0, b"/dev/pts/8\n", b"")
             values = [
                 SOCKET,
                 "as-codex-test",
@@ -203,6 +205,26 @@ def test_select_surface_revalidates_client_and_locator() -> None:
         "=as-codex-test",
     ]
     assert controller.client_exists(LOCATOR, "/dev/pts/8")
+
+
+def test_current_client_uses_only_the_inherited_tmux_server() -> None:
+    fake = FakeTmux()
+    controller = TmuxController(runner=fake, systemd_run=None)
+
+    assert controller.current_client({}) is None
+    assert controller.current_client({"TMUX": f"{SOCKET},123,0"}) == "/dev/pts/8"
+    assert fake.calls[-1][0] == [
+        "tmux",
+        "-S",
+        SOCKET,
+        "display-message",
+        "-p",
+        "#{client_tty}",
+    ]
+
+    for invalid in ("", "relative,123,0", f"{SOCKET},pid,0", f"{SOCKET},123"):
+        with pytest.raises(TmuxError, match="TMUX"):
+            controller.current_client({"TMUX": invalid})
 
 
 def test_provider_exit_is_sent_only_to_the_revalidated_exact_pane() -> None:

@@ -536,6 +536,32 @@ class TmuxController:
             raise TmuxError("tmux returned non-UTF-8 client metadata") from error
         return clients.count(client) == 1
 
+    def current_client(self, environment: Mapping[str, str]) -> str | None:
+        """Resolve only the tmux client represented by the inherited context."""
+
+        raw_tmux = environment.get("TMUX")
+        if raw_tmux is None:
+            return None
+        raw_tmux = _bounded_text(raw_tmux, "TMUX", maximum=4608)
+        parts = raw_tmux.rsplit(",", 2)
+        if (
+            len(parts) != 3
+            or not parts[1].isdigit()
+            or not parts[2].isdigit()
+            or not Path(parts[0]).is_absolute()
+        ):
+            raise TmuxError("TMUX does not identify one bounded local server")
+        result = self._run(
+            self._tmux(parts[0], "display-message", "-p", "#{client_tty}")
+        )
+        if not result.stdout.endswith(b"\n") or b"\n" in result.stdout[:-1]:
+            raise TmuxError("tmux returned an invalid current client")
+        try:
+            client = result.stdout[:-1].decode("utf-8")
+        except UnicodeDecodeError as error:
+            raise TmuxError("tmux returned a non-UTF-8 current client") from error
+        return _bounded_text(client, "tmux client ID", maximum=1024)
+
     def select_surface(self, locator: TmuxLocator, *, client: str) -> None:
         if not self.client_exists(locator, client):
             raise TmuxTargetMissing("tmux client is stale or ambiguous")

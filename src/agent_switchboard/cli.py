@@ -14,7 +14,8 @@ from . import __version__
 from .config import SwitchboardConfig, load_config
 from .doctor import run_all_doctors
 from .domain import HostId, PresentationContext, ProviderId, ValidationError
-from .hook_config import edit_claude_hooks, edit_codex_hooks, resolve_swbctl_executable
+from .executable import resolve_swbctl_executable
+from .hook_config import edit_claude_hooks, edit_codex_hooks
 from .hooks import HookInputError
 from .live import reconcile_live
 from .local import build_local_snapshot_json, materialize_configured_projects
@@ -194,7 +195,11 @@ def _run_tui_command() -> int:
             )
             return 1
         raise
-    return int(tui.run_tui())
+    try:
+        return int(tui.run_tui(swbctl_executable=resolve_swbctl_executable()))
+    except (ValidationError, TmuxError, OSError, ValueError) as error:
+        print(f"swbctl: {_safe_error_message(error)}", file=sys.stderr)
+        return 1
 
 
 def _configured_claude_executable(config: SwitchboardConfig) -> str | None:

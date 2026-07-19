@@ -72,6 +72,7 @@ def test_ci_smokes_wheel_and_source_distribution_installations() -> None:
     for module in (
         "agent_switchboard.cli",
         "agent_switchboard.doctor",
+        "agent_switchboard.executable",
         "agent_switchboard.hook_config",
         "agent_switchboard.hooks",
         "agent_switchboard.local",
@@ -82,6 +83,7 @@ def test_ci_smokes_wheel_and_source_distribution_installations() -> None:
         "agent_switchboard.providers.claude",
         "agent_switchboard.reconcile",
         "agent_switchboard.snapshot",
+        "agent_switchboard.tui_gateway",
     ):
         assert f"import {module}" in workflow
     assert "migrations/v0003_name_provenance_runtime_index.py" in workflow
