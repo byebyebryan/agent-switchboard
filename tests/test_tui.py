@@ -7,6 +7,7 @@ import json
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
+from uuid import UUID
 
 import pytest
 
@@ -21,6 +22,16 @@ ROOT = Path(__file__).parents[1]
 SNAPSHOT_FIXTURE = ROOT / "tests/fixtures/protocol/v1/snapshot.json"
 NOW_MS = 1_784_142_010_000
 PROJECT_ID = "22222222-2222-4222-8222-222222222222"
+HOST_ID = "11111111-1111-4111-8111-111111111111"
+LOCATION_ID = "44444444-4444-4444-8444-444444444444"
+SURFACE_ID = "33333333-3333-4333-8333-333333333333"
+STOP_SURFACE_ID = "33333333-3333-4333-8333-333333333334"
+TMUX_CLIENT = "/dev/pts/7"
+REQUEST_IDS = (
+    UUID("99999999-9999-4999-8999-999999999991"),
+    UUID("99999999-9999-4999-8999-999999999992"),
+    UUID("99999999-9999-4999-8999-999999999993"),
+)
 
 
 def _value() -> dict[str, Any]:
@@ -126,6 +137,94 @@ def _empty_snapshot() -> Any:
     return protocol_module.SnapshotEnvelope.from_dict(value)
 
 
+def _stoppable_snapshot() -> Any:
+    value = _mixed_snapshot().to_dict()
+    claude = value["sessions"][1]
+    surface = copy.deepcopy(value["surfaces"][0])
+    surface.update(
+        {
+            "surfaceId": STOP_SURFACE_ID,
+            "provider": "claude",
+            "currentSessionKey": claude["sessionKey"],
+            "transportLocator": "as-claude:@2.%2",
+            "launchId": "66666666-6666-4666-8666-666666666667",
+        }
+    )
+    claude["surfaceId"] = surface["surfaceId"]
+    value["surfaces"].append(surface)
+    return protocol_module.SnapshotEnvelope.from_dict(value)
+
+
+def _plan(kind: str, *, client: str | None = None) -> Any:
+    fields: dict[str, Any] = {
+        "kind": kind,
+        "hostId": HOST_ID,
+        "surfaceId": SURFACE_ID,
+        "workspaceId": "as-test",
+        "tmuxTarget": "as-test:@1.%1",
+    }
+    if client is not None:
+        fields["tmuxClient"] = client
+    return protocol_module.PresentationPlanEnvelope.from_dict(
+        {
+            "schemaVersion": 1,
+            "protocolVersion": 1,
+            "plan": fields,
+        }
+    )
+
+
+def _blocked_plan(
+    code: str = "surface_unavailable",
+    message: str = "The selected session cannot be presented.",
+) -> Any:
+    return protocol_module.PresentationPlanEnvelope.from_dict(
+        {
+            "schemaVersion": 1,
+            "protocolVersion": 1,
+            "plan": {
+                "kind": "blocked",
+                "hostId": HOST_ID,
+                "error": {
+                    "code": code,
+                    "message": message,
+                    "scope": "session",
+                    "retryable": True,
+                    "observedAt": NOW_MS,
+                },
+            },
+        }
+    )
+
+
+def _stop_action(status: str, *, blocked: bool = False) -> Any:
+    session_key = _stoppable_snapshot().sessions[1]["sessionKey"]
+    action: dict[str, Any] = {
+        "kind": "stop",
+        "status": status,
+        "hostId": HOST_ID,
+        "sessionKey": session_key,
+    }
+    if blocked:
+        action["error"] = {
+            "code": "stop_revalidation_failed",
+            "message": "The session is no longer safe to stop.",
+            "scope": "session",
+            "retryable": True,
+            "observedAt": NOW_MS,
+            "hostId": HOST_ID,
+            "provider": "claude",
+            "sessionKey": session_key,
+        }
+    return protocol_module.SessionActionEnvelope.from_dict(
+        {
+            "schemaVersion": 1,
+            "protocolVersion": 1,
+            "action": action,
+        }
+    )
+
+
 class FakeGateway:
     def __init__(
         self,
@@ -134,12 +233,25 @@ class FakeGateway:
         full: list[Any] | None = None,
         full_started: asyncio.Event | None = None,
         full_release: asyncio.Event | None = None,
+        plan: Any | None = None,
+        action: Any | None = None,
+        prepare_started: asyncio.Event | None = None,
+        prepare_release: asyncio.Event | None = None,
+        prepare_cancelled: asyncio.Event | None = None,
     ) -> None:
         self.retained = retained
         self.full = [] if full is None else list(full)
         self.full_started = full_started
         self.full_release = full_release
+        self.plan = _blocked_plan() if plan is None else plan
+        self.stop_action = (
+            _stop_action("blocked", blocked=True) if action is None else action
+        )
+        self.prepare_started = prepare_started
+        self.prepare_release = prepare_release
+        self.prepare_cancelled = prepare_cancelled
         self.calls: list[str] = []
+        self.action_calls: list[tuple[Any, ...]] = []
 
     async def snapshot(self, *, reconcile: str) -> Any:
         self.calls.append(reconcile)
@@ -156,12 +268,86 @@ class FakeGateway:
             raise result
         return result
 
+    async def _prepare(self) -> Any:
+        if self.prepare_started is not None:
+            self.prepare_started.set()
+        try:
+            if self.prepare_release is not None:
+                await self.prepare_release.wait()
+        except asyncio.CancelledError:
+            if self.prepare_cancelled is not None:
+                self.prepare_cancelled.set()
+            raise
+        if isinstance(self.plan, BaseException):
+            raise self.plan
+        return self.plan
 
-def _app(gateway: FakeGateway) -> Any:
+    async def prepare_open(
+        self,
+        session_key: str,
+        *,
+        request_id: str,
+        context: Any,
+    ) -> Any:
+        self.action_calls.append(("open", session_key, request_id, context))
+        return await self._prepare()
+
+    async def prepare_new(
+        self,
+        project_id: str,
+        *,
+        location_id: str | None,
+        provider: str,
+        request_id: str,
+        context: Any,
+    ) -> Any:
+        self.action_calls.append(
+            ("new", project_id, location_id, provider, request_id, context)
+        )
+        return await self._prepare()
+
+    async def prepare_history(
+        self,
+        project_id: str,
+        *,
+        location_id: str | None,
+        request_id: str,
+        context: Any,
+    ) -> Any:
+        self.action_calls.append(
+            ("history", project_id, location_id, request_id, context)
+        )
+        return await self._prepare()
+
+    async def stop_session(self, session_key: str) -> Any:
+        self.action_calls.append(("stop", session_key))
+        return self.stop_action
+
+    async def select_surface(self, surface_id: str, *, client: str) -> None:
+        self.action_calls.append(("select", surface_id, client))
+
+    def attach_surface_command(self, surface_id: str) -> tuple[str, ...]:
+        self.action_calls.append(("attach", surface_id))
+        return ("/fake/swbctl", "attach-surface", surface_id)
+
+
+def _app(
+    gateway: FakeGateway,
+    *,
+    tmux_client: str | None = None,
+    request_ids: tuple[UUID, ...] = REQUEST_IDS,
+) -> Any:
+    ids = iter(request_ids)
     return tui_module.SwitchboardApp(
         gateway=gateway,
-        terminal_context=domain_module.PresentationContext(True, None, False, False),
+        terminal_context=domain_module.PresentationContext(
+            True,
+            tmux_client,
+            False,
+            False,
+        ),
         now_ms=lambda: NOW_MS,
+        request_id_factory=lambda: next(ids),
     )
 
 
@@ -178,7 +364,7 @@ async def _wait_until(
         await pilot.pause(0.01)
 
 
-def test_read_only_application_renders_status_navigation_details_and_help() -> None:
+def test_application_renders_status_navigation_details_and_help() -> None:
     async def exercise() -> None:
         gateway = FakeGateway(retained=_mixed_snapshot(degraded=True))
         app = _app(gateway)
@@ -202,7 +388,6 @@ def test_read_only_application_renders_status_navigation_details_and_help() -> N
             assert "2 issue(s)" in status
             assert "claude degraded" in status
             assert "plain terminal" in status
-            assert "read-only" in status
 
             await _wait_until(
                 pilot,
@@ -403,3 +588,353 @@ def test_narrow_and_empty_layout_remain_usable() -> None:
             )
 
     asyncio.run(exercise())
+
+
+def test_plain_terminal_open_returns_public_attach_handoff() -> None:
+    async def exercise() -> None:
+        context = domain_module.PresentationContext(True, None, False, False)
+        gateway = FakeGateway(retained=_mixed_snapshot(), plan=_plan("attach"))
+        app = _app(gateway)
+        async with app.run_test(size=(100, 28)) as pilot:
+            await _wait_until(
+                pilot,
+                lambda: app.model is not None and not app.refreshing,
+                message="retained snapshot did not render",
+            )
+            session_key = app.model.selected_row.session_key
+            await pilot.press("o")
+            await _wait_until(
+                pilot,
+                lambda: not app.is_running,
+                message="attach plan did not close the TUI",
+            )
+            assert app.return_value == (
+                "/fake/swbctl",
+                "attach-surface",
+                SURFACE_ID,
+            )
+            assert gateway.action_calls == [
+                ("open", session_key, str(REQUEST_IDS[0]), context),
+                ("attach", SURFACE_ID),
+            ]
+
+    asyncio.run(exercise())
+
+
+def test_tmux_open_selects_only_inherited_client_then_exits() -> None:
+    async def exercise() -> None:
+        context = domain_module.PresentationContext(
+            True,
+            TMUX_CLIENT,
+            False,
+            False,
+        )
+        gateway = FakeGateway(
+            retained=_mixed_snapshot(),
+            plan=_plan("switch", client=TMUX_CLIENT),
+        )
+        app = _app(gateway, tmux_client=TMUX_CLIENT)
+        async with app.run_test(size=(100, 28)) as pilot:
+            await _wait_until(
+                pilot,
+                lambda: app.model is not None and not app.refreshing,
+                message="retained snapshot did not render",
+            )
+            session_key = app.model.selected_row.session_key
+            await pilot.press("enter")
+            await _wait_until(
+                pilot,
+                lambda: not app.is_running,
+                message="switch plan did not close the TUI",
+            )
+            assert app.return_value is None
+            assert gateway.action_calls == [
+                ("open", session_key, str(REQUEST_IDS[0]), context),
+                ("select", SURFACE_ID, TMUX_CLIENT),
+            ]
+
+    asyncio.run(exercise())
+
+
+def test_blocked_open_stays_visible_and_later_retry_gets_fresh_request_id() -> None:
+    async def exercise() -> None:
+        gateway = FakeGateway(retained=_mixed_snapshot(), plan=_blocked_plan())
+        app = _app(gateway)
+        async with app.run_test(size=(100, 28)) as pilot:
+            await _wait_until(
+                pilot,
+                lambda: app.model is not None and not app.refreshing,
+                message="retained snapshot did not render",
+            )
+            table = app.query_one("#sessions", widgets_module.DataTable)
+            await pilot.press("o")
+            await _wait_until(
+                pilot,
+                lambda: app.action_error is not None and not app.action_busy,
+                message="blocked plan was not published",
+            )
+            assert app.is_running is True
+            assert table.has_focus
+            assert "surface_unavailable" in str(
+                app.query_one("#issues", widgets_module.Static).content
+            )
+            assert "ACTION ERROR surface_unavailable" in str(
+                app.query_one("#status", widgets_module.Static).content
+            )
+
+            await pilot.press("o")
+            await _wait_until(
+                pilot,
+                lambda: len(gateway.action_calls) == 2 and not app.action_busy,
+                message="independent retry did not complete",
+            )
+            assert [call[2] for call in gateway.action_calls] == [
+                str(REQUEST_IDS[0]),
+                str(REQUEST_IDS[1]),
+            ]
+
+    asyncio.run(exercise())
+
+
+def test_duplicate_inflight_open_is_ignored_and_quit_cancels_worker() -> None:
+    async def exercise() -> None:
+        started = asyncio.Event()
+        release = asyncio.Event()
+        cancelled = asyncio.Event()
+        gateway = FakeGateway(
+            retained=_mixed_snapshot(),
+            plan=_blocked_plan(),
+            prepare_started=started,
+            prepare_release=release,
+            prepare_cancelled=cancelled,
+        )
+        app = _app(gateway)
+        async with app.run_test(size=(100, 28)) as pilot:
+            await _wait_until(
+                pilot,
+                lambda: app.model is not None and not app.refreshing,
+                message="retained snapshot did not render",
+            )
+            await pilot.press("o")
+            await started.wait()
+            await pilot.press("o")
+            await pilot.press("x")
+            await pilot.press("n")
+            await pilot.pause()
+            assert len(gateway.action_calls) == 1
+            assert gateway.action_calls[0][2] == str(REQUEST_IDS[0])
+            assert app.action_error is None
+            assert app.action_busy is True
+            await pilot.press("q")
+            await _wait_until(
+                pilot,
+                cancelled.is_set,
+                message="preparation worker was not cancelled",
+            )
+            assert app.is_running is False
+
+    asyncio.run(exercise())
+
+
+def test_prepare_command_failure_stays_in_tui_with_bounded_error() -> None:
+    async def exercise() -> None:
+        failure = gateway_module.GatewayError(
+            "command_timeout",
+            "The Switchboard command exceeded its deadline.",
+            retryable=True,
+        )
+        gateway = FakeGateway(retained=_mixed_snapshot(), plan=failure)
+        app = _app(gateway)
+        async with app.run_test(size=(100, 28)) as pilot:
+            await _wait_until(
+                pilot,
+                lambda: app.model is not None and not app.refreshing,
+                message="retained snapshot did not render",
+            )
+            await pilot.press("o")
+            await _wait_until(
+                pilot,
+                lambda: app.action_error is not None and not app.action_busy,
+                message="command failure was not published",
+            )
+            assert app.is_running is True
+            assert app.action_error.code == "command_timeout"
+            assert "exceeded its deadline" in str(
+                app.query_one("#issues", widgets_module.Static).content
+            )
+            assert "ACTION ERROR command_timeout" in str(
+                app.query_one("#status", widgets_module.Static).content
+            )
+
+    asyncio.run(exercise())
+
+
+def test_new_and_history_use_declared_target_picker() -> None:
+    async def exercise_new() -> None:
+        context = domain_module.PresentationContext(True, None, False, False)
+        gateway = FakeGateway(retained=_mixed_snapshot(), plan=_plan("attach"))
+        app = _app(gateway)
+        async with app.run_test(size=(100, 28)) as pilot:
+            await _wait_until(
+                pilot,
+                lambda: app.model is not None and not app.refreshing,
+                message="retained snapshot did not render",
+            )
+            await pilot.press("n")
+            assert isinstance(app.screen, tui_module.TargetPicker)
+            await pilot.press("enter")
+            await _wait_until(
+                pilot,
+                lambda: not app.is_running,
+                message="new-session attach plan did not exit",
+            )
+            assert gateway.action_calls[:1] == [
+                (
+                    "new",
+                    PROJECT_ID,
+                    LOCATION_ID,
+                    "codex",
+                    str(REQUEST_IDS[0]),
+                    context,
+                )
+            ]
+
+    async def exercise_history() -> None:
+        context = domain_module.PresentationContext(True, None, False, False)
+        gateway = FakeGateway(retained=_mixed_snapshot(), plan=_blocked_plan())
+        app = _app(gateway)
+        async with app.run_test(size=(100, 28)) as pilot:
+            await _wait_until(
+                pilot,
+                lambda: app.model is not None and not app.refreshing,
+                message="retained snapshot did not render",
+            )
+            await pilot.press("h")
+            picker = app.screen
+            assert isinstance(picker, tui_module.TargetPicker)
+            assert len(picker.targets) == 1
+            assert picker.targets[0].provider.value == "claude"
+            await pilot.press("escape")
+            await pilot.pause()
+            assert gateway.action_calls == []
+
+            await pilot.press("h")
+            await pilot.press("enter")
+            await _wait_until(
+                pilot,
+                lambda: app.action_error is not None and not app.action_busy,
+                message="history blocked plan did not complete",
+            )
+            assert gateway.action_calls == [
+                (
+                    "history",
+                    PROJECT_ID,
+                    LOCATION_ID,
+                    str(REQUEST_IDS[0]),
+                    context,
+                )
+            ]
+
+    asyncio.run(exercise_new())
+    asyncio.run(exercise_history())
+
+
+def test_stop_requires_public_eligibility_confirmation_and_revalidation() -> None:
+    async def exercise_ineligible() -> None:
+        gateway = FakeGateway(retained=_mixed_snapshot())
+        app = _app(gateway)
+        async with app.run_test(size=(100, 28)) as pilot:
+            await _wait_until(
+                pilot,
+                lambda: app.model is not None and not app.refreshing,
+                message="retained snapshot did not render",
+            )
+            await pilot.press("x")
+            assert app.action_error.code == "stop_not_eligible"
+            assert gateway.action_calls == []
+
+    async def exercise_eligible() -> None:
+        snapshot = _stoppable_snapshot()
+        gateway = FakeGateway(
+            retained=snapshot,
+            action=_stop_action("stopped"),
+        )
+        app = _app(gateway)
+        async with app.run_test(size=(100, 28)) as pilot:
+            await _wait_until(
+                pilot,
+                lambda: app.model is not None and not app.refreshing,
+                message="retained snapshot did not render",
+            )
+            session_key = app.model.selected_row.session_key
+            assert app.model.selected_row.can_stop is True
+            await pilot.press("x")
+            assert isinstance(app.screen, tui_module.StopConfirmation)
+            await pilot.press("n")
+            await pilot.pause()
+            assert gateway.action_calls == []
+
+            await pilot.press("x")
+            await pilot.press("y")
+            await _wait_until(
+                pilot,
+                lambda: (
+                    gateway.action_calls == [("stop", session_key)]
+                    and not app.action_busy
+                    and not app.refreshing
+                ),
+                message="confirmed stop did not refresh retained state",
+            )
+            assert app.action_message == "Session stopped"
+            assert gateway.calls == ["none", "none"]
+
+    asyncio.run(exercise_ineligible())
+    asyncio.run(exercise_eligible())
+
+
+def test_blocked_stop_stays_in_tui_with_stable_reason() -> None:
+    async def exercise() -> None:
+        gateway = FakeGateway(retained=_stoppable_snapshot())
+        app = _app(gateway)
+        async with app.run_test(size=(100, 28)) as pilot:
+            await _wait_until(
+                pilot,
+                lambda: app.model is not None and not app.refreshing,
+                message="retained snapshot did not render",
+            )
+            await pilot.press("x")
+            await pilot.press("y")
+            await _wait_until(
+                pilot,
+                lambda: app.action_error is not None and not app.action_busy,
+                message="blocked stop did not complete",
+            )
+            assert app.is_running is True
+            assert app.action_error.code == "stop_revalidation_failed"
+            assert "no longer safe to stop" in str(
+                app.query_one("#issues", widgets_module.Static).content
+            )
+
+    asyncio.run(exercise())
+
+
+def test_terminal_handoff_exec_is_exact_and_failure_is_restored(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    command = ("/installed/swbctl", "attach-surface", SURFACE_ID)
+    calls: list[tuple[str, tuple[str, ...]]] = []
+
+    def returned(executable: str, argv: Any) -> None:
+        calls.append((executable, tuple(argv)))
+
+    assert tui_module._execute_terminal_handoff(command, exec_replace=returned) == 1
+    assert calls == [(command[0], command)]
+    assert "terminal restored" in capsys.readouterr().err
+
+    def failed(_executable: str, _argv: Any) -> None:
+        raise OSError("private failure")
+
+    assert tui_module._execute_terminal_handoff(command, exec_replace=failed) == 1
+    error = capsys.readouterr().err
+    assert "terminal restored" in error
+    assert "private failure" not in error

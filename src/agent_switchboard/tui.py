@@ -1,27 +1,45 @@
-"""Optional read-only Textual frontend for local Switchboard sessions."""
+"""Optional Textual frontend for local Switchboard sessions."""
 
 from __future__ import annotations
 
 import asyncio
+import os
+import sys
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from pathlib import Path
+from uuid import UUID, uuid4
 
 from rich.text import Text
 from textual import events, work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Grid, Vertical, VerticalScroll
-from textual.widgets import DataTable, Footer, Header, Input, Select, Static
+from textual.screen import ModalScreen
+from textual.widgets import (
+    DataTable,
+    Footer,
+    Header,
+    Input,
+    OptionList,
+    Select,
+    Static,
+)
+from textual.widgets.option_list import Option
 
-from .domain import PresentationContext, ValidationError
+from .domain import PresentationContext, ProviderId, ValidationError
+from .protocol import (
+    PresentationPlanEnvelope,
+    PresentationPlanKind,
+    SessionActionStatus,
+)
 from .tui_gateway import (
     GatewayError,
     SnapshotSource,
     SwbctlGateway,
     resolve_terminal_context,
 )
-from .tui_model import FrontendModel, SessionRow, ViewFilters
+from .tui_model import FrontendModel, LaunchTarget, SessionRow, ViewFilters
 
 MIN_TERMINAL_WIDTH = 72
 MIN_TERMINAL_HEIGHT = 20
@@ -42,13 +60,128 @@ _STATUS_CUES = {
 }
 
 
-class SwitchboardApp(App[None]):
-    """Read-only Phase 4A terminal session index."""
+class TargetPicker(ModalScreen[LaunchTarget | None]):
+    """Choose one declared project/location/provider launch target."""
+
+    BINDINGS = (Binding("escape", "cancel", "Cancel"),)
+    CSS = """
+    TargetPicker {
+        align: center middle;
+    }
+
+    #target-dialog {
+        width: 80%;
+        max-width: 96;
+        height: 80%;
+        max-height: 28;
+        border: round $accent;
+        background: $surface;
+        padding: 1 2;
+    }
+
+    #target-title {
+        height: 2;
+        text-style: bold;
+    }
+
+    #target-list {
+        height: 1fr;
+    }
+
+    #target-help {
+        height: 2;
+    }
+    """
+
+    def __init__(
+        self,
+        title: str,
+        targets: Sequence[LaunchTarget],
+    ) -> None:
+        super().__init__()
+        self.title = title
+        self.targets = tuple(targets)
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="target-dialog"):
+            yield Static(self.title, id="target-title", markup=False)
+            yield OptionList(
+                *(
+                    Option(_target_label(target), id=str(index))
+                    for index, target in enumerate(self.targets)
+                ),
+                id="target-list",
+                markup=False,
+            )
+            yield Static("Enter selects · Esc cancels", id="target-help", markup=False)
+
+    def on_mount(self) -> None:
+        self.query_one("#target-list", OptionList).focus()
+
+    def on_option_list_option_selected(
+        self,
+        event: OptionList.OptionSelected,
+    ) -> None:
+        self.dismiss(self.targets[event.option_index])
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
+class StopConfirmation(ModalScreen[bool]):
+    """Require an explicit confirmation before requesting safe stop."""
+
+    BINDINGS = (
+        Binding("y", "confirm", "Stop"),
+        Binding("n", "cancel", "Cancel"),
+        Binding("escape", "cancel", "Cancel"),
+    )
+    CSS = """
+    StopConfirmation {
+        align: center middle;
+    }
+
+    #stop-dialog {
+        width: 64;
+        max-width: 90%;
+        height: 9;
+        border: round $warning;
+        background: $surface;
+        padding: 1 2;
+    }
+    """
+
+    def __init__(self, row: SessionRow) -> None:
+        super().__init__()
+        self.row = row
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="stop-dialog"):
+            yield Static(
+                f"Stop {self.row.label}?\n\n"
+                "Switchboard will revalidate launch ownership before stopping it.\n"
+                "Press y to stop or n/Esc to cancel.",
+                markup=False,
+            )
+
+    def action_confirm(self) -> None:
+        self.dismiss(True)
+
+    def action_cancel(self) -> None:
+        self.dismiss(False)
+
+
+class SwitchboardApp(App[tuple[str, ...] | None]):
+    """Phase 4A terminal session index and validated action router."""
 
     TITLE = "Switchboard"
     SUB_TITLE = "Terminal session router"
     BINDINGS = (
         Binding("/", "focus_search", "Search"),
+        Binding("o", "open_session", "Open"),
+        Binding("n", "new_session", "New"),
+        Binding("h", "history", "History"),
+        Binding("x", "stop_session", "Stop"),
         Binding("r", "refresh", "Refresh"),
         Binding("ctrl+l", "clear_filters", "Clear filters"),
         Binding("e", "focus_issues", "Issues"),
@@ -147,6 +280,7 @@ class SwitchboardApp(App[None]):
         gateway: SwbctlGateway,
         terminal_context: PresentationContext,
         now_ms: Callable[[], int] | None = None,
+        request_id_factory: Callable[[], UUID] = uuid4,
     ) -> None:
         super().__init__()
         self.gateway = gateway
@@ -155,7 +289,12 @@ class SwitchboardApp(App[None]):
         self.model: FrontendModel | None = None
         self.refreshing = False
         self.last_error: GatewayError | None = None
+        self.action_busy = False
+        self.action_label: str | None = None
+        self.action_message: str | None = None
+        self.action_error: GatewayError | None = None
         self._now_ms = (lambda: int(time.time() * 1000)) if now_ms is None else now_ms
+        self._request_id_factory = request_id_factory
         self._snapshot_request_id = 0
         self._filter_request_id = 0
         self._snapshot_mode = "retained"
@@ -239,9 +378,9 @@ class SwitchboardApp(App[None]):
                     yield Static("Issues", classes="panel-heading", markup=False)
                     yield Static("No current issues.", id="issues", markup=False)
             yield Static(
-                "/ search · arrows navigate · r refresh · Ctrl+L clear filters · "
-                "e issues · ? help · q quit\n"
-                "This view is read-only. Open, new, history, and stop arrive in 4A.4.",
+                "/ search · arrows navigate · Enter/o open · n new · h Claude history\n"
+                "x safe stop · r refresh · Ctrl+L clear filters · e issues · "
+                "? help · q quit",
                 id="help",
                 markup=False,
             )
@@ -470,6 +609,9 @@ class SwitchboardApp(App[None]):
             return
         self._render_details()
 
+    def on_data_table_row_selected(self, _event: DataTable.RowSelected) -> None:
+        self.action_open_session()
+
     def _render_details(self) -> None:
         details = self.query_one("#details", Static)
         model = self.model
@@ -513,7 +655,10 @@ class SwitchboardApp(App[None]):
         widget = self.query_one("#issues", Static)
         model = self.model
         issues = () if model is None else model.issues
-        if not issues and self.last_error is None:
+        command_errors = tuple(
+            error for error in (self.action_error, self.last_error) if error is not None
+        )
+        if not issues and not command_errors:
             widget.update("No current issues.")
             return
         ordered_issues = tuple(
@@ -526,19 +671,23 @@ class SwitchboardApp(App[None]):
             )
         )
         lines: list[str] = []
-        last_error_is_projected = self.last_error is None or any(
-            issue.source.value == "frontend" and issue.code == self.last_error.code
-            for issue in ordered_issues
-        )
-        if self.last_error is not None and not last_error_is_projected:
-            lines.append(
-                f"- frontend/{self.last_error.code}: {self.last_error.message}"
+        unprojected_errors = tuple(
+            error
+            for error in command_errors
+            if not any(
+                issue.source.value == "frontend" and issue.code == error.code
+                for issue in ordered_issues
             )
+        )
+        lines.extend(
+            f"- frontend/{error.code}: {error.message}"
+            for error in unprojected_errors[:ISSUE_DISPLAY_LIMIT]
+        )
         lines.extend(
             f"- {issue.source.value}/{issue.code}: {issue.message}"
             for issue in ordered_issues[: ISSUE_DISPLAY_LIMIT - len(lines)]
         )
-        issue_count = len(ordered_issues) + (0 if last_error_is_projected else 1)
+        issue_count = len(ordered_issues) + len(unprojected_errors)
         if issue_count > ISSUE_DISPLAY_LIMIT:
             lines.append(f"- … {issue_count - ISSUE_DISPLAY_LIMIT} more issue(s)")
         widget.update("\n".join(lines))
@@ -571,13 +720,278 @@ class SwitchboardApp(App[None]):
             )
         if self.last_error is not None:
             parts.append(f"ERROR {self.last_error.code}")
+        if self.action_busy:
+            parts.append(f"ACTION {self.action_label or 'working'}…")
+        elif self.action_error is not None:
+            parts.append(f"ACTION ERROR {self.action_error.code}")
+        elif self.action_message is not None:
+            parts.append(self.action_message)
         parts.append(
             "tmux client"
             if self.terminal_context.current_tmux_client is not None
             else "plain terminal"
         )
-        parts.append("read-only")
         self.query_one("#status", Static).update(" · ".join(parts))
+
+    def _publish_action_error(
+        self,
+        code: str,
+        message: str,
+        *,
+        retryable: bool,
+    ) -> None:
+        self.action_error = GatewayError(code, message, retryable=retryable)
+        self.action_message = None
+        self._render_issues()
+        self._render_status()
+
+    def _begin_action(self, label: str) -> bool:
+        if self.action_busy:
+            return False
+        self.action_busy = True
+        self.action_label = label
+        self.action_message = None
+        self.action_error = None
+        self._render_issues()
+        self._render_status()
+        return True
+
+    def _new_request_id(self) -> str:
+        return str(self._request_id_factory())
+
+    def _finish_action(self) -> None:
+        self.action_busy = False
+        self.action_label = None
+        if self.is_mounted:
+            self._render_issues()
+            self._render_status()
+
+    async def _apply_plan(self, envelope: PresentationPlanEnvelope) -> None:
+        plan = envelope.plan
+        if plan.kind is PresentationPlanKind.BLOCKED:
+            if plan.error is None:
+                raise GatewayError(
+                    "response_invalid",
+                    "The Switchboard plan is incompatible with this terminal.",
+                    retryable=False,
+                )
+            self._publish_action_error(
+                plan.error.code,
+                plan.error.message,
+                retryable=plan.error.retryable,
+            )
+            return
+        if plan.kind is PresentationPlanKind.FOCUS:
+            raise GatewayError(
+                "response_invalid",
+                "The Switchboard plan is incompatible with this terminal.",
+                retryable=False,
+            )
+        if plan.surface_id is None:
+            raise GatewayError(
+                "response_invalid",
+                "The Switchboard plan is incompatible with this terminal.",
+                retryable=False,
+            )
+        surface_id = str(plan.surface_id)
+        if plan.kind is PresentationPlanKind.ATTACH:
+            command = self.gateway.attach_surface_command(surface_id)
+            self.action_message = "Attaching selected surface"
+            self.exit(command)
+            return
+        client = self.terminal_context.current_tmux_client
+        if client is None:
+            raise GatewayError(
+                "response_invalid",
+                "The Switchboard plan is incompatible with this terminal.",
+                retryable=False,
+            )
+        await self.gateway.select_surface(surface_id, client=client)
+        self.action_message = "Selected surface on current tmux client"
+        self.exit()
+
+    def action_open_session(self) -> None:
+        if self.action_busy:
+            return
+        row = None if self.model is None else self.model.selected_row
+        if row is None:
+            self._publish_action_error(
+                "session_not_selected",
+                "Select a known session before opening it.",
+                retryable=False,
+            )
+            return
+        if self._begin_action(f"opening {row.label}"):
+            self._prepare_open(row.session_key, self._new_request_id())
+
+    @work(exclusive=False, group="action", exit_on_error=False)
+    async def _prepare_open(self, session_key: str, request_id: str) -> None:
+        try:
+            envelope = await self.gateway.prepare_open(
+                session_key,
+                request_id=request_id,
+                context=self.terminal_context,
+            )
+            await self._apply_plan(envelope)
+        except GatewayError as error:
+            self._publish_action_error(
+                error.code,
+                error.message,
+                retryable=error.retryable,
+            )
+        finally:
+            self._finish_action()
+
+    def action_new_session(self) -> None:
+        if self.action_busy:
+            return
+        targets = () if self.model is None else self.model.launch_targets
+        if not targets:
+            self._publish_action_error(
+                "launch_target_unavailable",
+                "No configured local launch targets are available.",
+                retryable=False,
+            )
+            return
+        self.push_screen(
+            TargetPicker("Start a configured session", targets),
+            self._on_new_target,
+        )
+
+    def _on_new_target(self, target: LaunchTarget | None) -> None:
+        if target is None:
+            return
+        if self._begin_action(
+            f"starting {target.provider.value} in {target.project_name}"
+        ):
+            self._prepare_new(target, self._new_request_id())
+
+    @work(exclusive=False, group="action", exit_on_error=False)
+    async def _prepare_new(self, target: LaunchTarget, request_id: str) -> None:
+        try:
+            envelope = await self.gateway.prepare_new(
+                target.project_id,
+                location_id=target.location_id,
+                provider=target.provider.value,
+                request_id=request_id,
+                context=self.terminal_context,
+            )
+            await self._apply_plan(envelope)
+        except GatewayError as error:
+            self._publish_action_error(
+                error.code,
+                error.message,
+                retryable=error.retryable,
+            )
+        finally:
+            self._finish_action()
+
+    def action_history(self) -> None:
+        if self.action_busy:
+            return
+        targets = tuple(
+            target
+            for target in (() if self.model is None else self.model.launch_targets)
+            if target.provider is ProviderId.CLAUDE
+        )
+        if not targets:
+            self._publish_action_error(
+                "history_target_unavailable",
+                "No configured local Claude history targets are available.",
+                retryable=False,
+            )
+            return
+        self.push_screen(
+            TargetPicker("Open Claude history", targets),
+            self._on_history_target,
+        )
+
+    def _on_history_target(self, target: LaunchTarget | None) -> None:
+        if target is None:
+            return
+        if self._begin_action(f"opening Claude history in {target.project_name}"):
+            self._prepare_history(target, self._new_request_id())
+
+    @work(exclusive=False, group="action", exit_on_error=False)
+    async def _prepare_history(self, target: LaunchTarget, request_id: str) -> None:
+        try:
+            envelope = await self.gateway.prepare_history(
+                target.project_id,
+                location_id=target.location_id,
+                request_id=request_id,
+                context=self.terminal_context,
+            )
+            await self._apply_plan(envelope)
+        except GatewayError as error:
+            self._publish_action_error(
+                error.code,
+                error.message,
+                retryable=error.retryable,
+            )
+        finally:
+            self._finish_action()
+
+    def action_stop_session(self) -> None:
+        if self.action_busy:
+            return
+        row = None if self.model is None else self.model.selected_row
+        if row is None:
+            self._publish_action_error(
+                "session_not_selected",
+                "Select a known session before stopping it.",
+                retryable=False,
+            )
+            return
+        if not row.can_stop:
+            self._publish_action_error(
+                "stop_not_eligible",
+                "The selected session is not eligible for safe stop.",
+                retryable=False,
+            )
+            return
+        self.push_screen(
+            StopConfirmation(row),
+            lambda confirmed: self._on_stop_confirmed(row, confirmed),
+        )
+
+    def _on_stop_confirmed(self, row: SessionRow, confirmed: bool) -> None:
+        if not confirmed:
+            return
+        if self._begin_action(f"stopping {row.label}"):
+            self._stop_session(row.session_key)
+
+    @work(exclusive=False, group="action", exit_on_error=False)
+    async def _stop_session(self, session_key: str) -> None:
+        try:
+            envelope = await self.gateway.stop_session(session_key)
+            action = envelope.action
+            if action.status is SessionActionStatus.BLOCKED:
+                if action.error is None:
+                    raise GatewayError(
+                        "response_invalid",
+                        "The Switchboard command emitted an incompatible response.",
+                        retryable=False,
+                    )
+                self._publish_action_error(
+                    action.error.code,
+                    action.error.message,
+                    retryable=action.error.retryable,
+                )
+                return
+            self.action_message = (
+                "Session stopped"
+                if action.status is SessionActionStatus.STOPPED
+                else "Session was already stopped"
+            )
+            self._request_snapshot(full=False)
+        except GatewayError as error:
+            self._publish_action_error(
+                error.code,
+                error.message,
+                retryable=error.retryable,
+            )
+        finally:
+            self._finish_action()
 
     def action_focus_search(self) -> None:
         search = self.query_one("#search", Input)
@@ -612,6 +1026,20 @@ def _status_cue(row: SessionRow) -> str:
     return _STATUS_CUES[row.status.value]
 
 
+def _target_label(target: LaunchTarget) -> str:
+    location = target.location_name or target.location_path
+    qualifiers = []
+    if target.is_default:
+        qualifiers.append("default location")
+    if target.is_preferred_provider:
+        qualifiers.append("preferred provider")
+    suffix = "" if not qualifiers else f" ({', '.join(qualifiers)})"
+    return (
+        f"{target.project_name} · {location} · {target.provider.value}{suffix}\n"
+        f"  {target.location_path}"
+    )
+
+
 def _format_age(timestamp_ms: int, now_ms: int) -> str:
     seconds = max(0, (now_ms - timestamp_ms) // 1000)
     if seconds < 60:
@@ -625,19 +1053,43 @@ def _format_age(timestamp_ms: int, now_ms: int) -> str:
     return f"{hours // 24}d ago"
 
 
+def _execute_terminal_handoff(
+    command: tuple[str, ...],
+    *,
+    exec_replace: Callable[[str, Sequence[str]], object] = os.execv,
+) -> int:
+    """Replace the restored terminal process with one public attach command."""
+
+    try:
+        exec_replace(command[0], command)
+    except OSError:
+        print(
+            "swbctl: could not attach the selected surface; terminal restored",
+            file=sys.stderr,
+        )
+        return 1
+    print(
+        "swbctl: surface attachment unexpectedly returned; terminal restored",
+        file=sys.stderr,
+    )
+    return 1
+
+
 def run_tui(*, swbctl_executable: str | Path) -> int:
     """Run the optional terminal frontend."""
 
-    SwitchboardApp(
+    command = SwitchboardApp(
         gateway=SwbctlGateway(swbctl_executable),
         terminal_context=resolve_terminal_context(),
     ).run()
-    return 0
+    return 0 if command is None else _execute_terminal_handoff(command)
 
 
 __all__ = [
     "MIN_TERMINAL_HEIGHT",
     "MIN_TERMINAL_WIDTH",
+    "StopConfirmation",
     "SwitchboardApp",
+    "TargetPicker",
     "run_tui",
 ]

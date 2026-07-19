@@ -74,6 +74,7 @@ class RecordingRunner:
             "prepare-new": PLAN_RECORD,
             "prepare-history": PLAN_RECORD,
             "stop-session": ACTION_RECORD,
+            "select-surface": b"",
         }
         return CommandOutput(records[command[1]], b"", 0)
 
@@ -132,6 +133,10 @@ def test_gateway_uses_exact_public_argv_and_reuses_request_id(tmp_path: Path) ->
             context=context,
         )
         stopped = await gateway.stop_session(CLAUDE_SESSION_KEY)
+        await gateway.select_surface(
+            "33333333-3333-4333-8333-333333333333",
+            client=TMUX_CLIENT,
+        )
 
         assert snapshot.host.host_id == HostId(HOST_ID)
         assert first == second == created == history
@@ -207,7 +212,22 @@ def test_gateway_uses_exact_public_argv_and_reuses_request_id(tmp_path: Path) ->
             3.0,
         ),
         ((prefix, "stop-session", CLAUDE_SESSION_KEY, "--json"), 3.0),
+        (
+            (
+                prefix,
+                "select-surface",
+                "33333333-3333-4333-8333-333333333333",
+                "--client",
+                TMUX_CLIENT,
+            ),
+            3.0,
+        ),
     ]
+    assert gateway.attach_surface_command("33333333-3333-4333-8333-333333333333") == (
+        prefix,
+        "attach-surface",
+        "33333333-3333-4333-8333-333333333333",
+    )
 
 
 @pytest.mark.parametrize(
@@ -265,7 +285,48 @@ def test_gateway_rejects_invalid_arguments_before_execution(tmp_path: Path) -> N
                 context=PresentationContext(False, None, False, False),
             )
         )
+    with pytest.raises(GatewayError, match="surface ID"):
+        asyncio.run(gateway.select_surface("invalid", client=TMUX_CLIENT))
+    with pytest.raises(GatewayError, match="tmux client"):
+        asyncio.run(
+            gateway.select_surface(
+                "33333333-3333-4333-8333-333333333333",
+                client="bad\nclient",
+            )
+        )
+    with pytest.raises(GatewayError, match="surface ID"):
+        gateway.attach_surface_command("invalid")
     assert runner.calls == []
+
+
+@pytest.mark.parametrize(
+    "output",
+    (
+        CommandOutput(b"secret output", b"", 0),
+        CommandOutput(b"", b"private diagnostic", 0),
+        CommandOutput(b"", b"private diagnostic", 1),
+    ),
+)
+def test_select_surface_requires_silent_success(
+    tmp_path: Path,
+    output: CommandOutput,
+) -> None:
+    executable = tmp_path / "swbctl"
+    executable.touch(mode=0o755)
+
+    async def runner(_argv: Sequence[str], _timeout: float) -> CommandOutput:
+        return output
+
+    gateway = SwbctlGateway(executable, runner=runner)
+    with pytest.raises(GatewayError) as failure:
+        asyncio.run(
+            gateway.select_surface(
+                "33333333-3333-4333-8333-333333333333",
+                client=TMUX_CLIENT,
+            )
+        )
+    assert "private diagnostic" not in str(failure.value)
+    assert "secret output" not in str(failure.value)
 
 
 def test_gateway_rejects_plan_for_a_different_tmux_client(tmp_path: Path) -> None:
@@ -284,6 +345,31 @@ def test_gateway_rejects_plan_for_a_different_tmux_client(tmp_path: Path) -> Non
         )
     assert failure.value.code == "response_invalid"
     assert len(runner.calls) == 1
+
+
+def test_gateway_rejects_stop_response_for_a_different_session(
+    tmp_path: Path,
+) -> None:
+    executable = tmp_path / "swbctl"
+    executable.touch(mode=0o755)
+    other_key = f"{HOST_ID}:claude:88888888-8888-4888-8888-888888888888"
+    response = _record(
+        SessionActionEnvelope(
+            SessionAction(
+                SessionActionStatus.STOPPED,
+                HostId(HOST_ID),
+                SessionKey.parse(other_key),
+            )
+        )
+    )
+
+    async def runner(_argv: Sequence[str], _timeout: float) -> CommandOutput:
+        return CommandOutput(response, b"", 0)
+
+    gateway = SwbctlGateway(executable, runner=runner)
+    with pytest.raises(GatewayError) as failure:
+        asyncio.run(gateway.stop_session(CLAUDE_SESSION_KEY))
+    assert failure.value.code == "response_invalid"
 
 
 def test_snapshot_source_coalesces_refresh_and_preserves_last_good(

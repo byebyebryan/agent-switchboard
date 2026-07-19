@@ -2,7 +2,7 @@
 
 Date: 2026-07-19
 
-Status: 4A.0 through 4A.3 complete; 4A.4 and 4A.5 planned
+Status: 4A.0 through 4A.4 complete; 4A.5 planned
 
 ## Decision and sequencing
 
@@ -214,8 +214,8 @@ Phase 4A does not add:
 
 ## Implementation checkpoint
 
-As of 2026-07-19, the framework, command-boundary, and model foundation is
-complete:
+As of 2026-07-19, the framework, command boundary, model, interaction surface,
+and terminal handoff are complete:
 
 - `swbctl tui` loads Textual only from the optional `tui` extra, currently
   bounded to `textual>=8.2.8,<9`; the base install remains dependency-free and
@@ -236,16 +236,37 @@ complete:
   display-status precedence, then recency and session-key ordering; filtering,
   Unicode token search, selection retention, snapshot staleness, and stale-race
   rejection remain independent of Textual widgets.
-- The read-only Textual application loads retained state and explicit full
-  refreshes through asynchronous workers, moves model/filter projection to
+- The Textual application loads retained state and explicit full refreshes
+  through asynchronous workers, moves model/filter projection to
   worker threads, and renders non-color-only status cues, search, provider,
   project, activity, runtime, and attachment filters, stable row selection,
   details, issues, refresh state, and help. Its responsive wide/narrow contract
   is headlessly tested down to a documented minimum of 72 columns by 20 rows.
+- Open, configured new, and Claude history actions each receive a fresh UUID
+  after the user commits one action. A duplicate input while preparation is in
+  flight is ignored, while a later independent retry receives a new UUID.
+- A target picker exposes only declared Snapshot launch targets. Safe stop
+  proceeds only for conservatively eligible Claude rows, requires explicit
+  confirmation, and remains subject to the existing authoritative core
+  revalidation.
+- Blocked preparation and stop responses remain visible in the TUI with their
+  stable public reason. Preparation failure or cancellation leaves no private
+  command output in the UI.
+- A validated `switch` plan invokes silent `select-surface` for only the exact
+  inherited tmux client and exits. A validated `attach` plan exits first, lets
+  Textual restore the terminal, then replaces the process with the absolute
+  public `swbctl attach-surface <surface-id>` argv. An `exec` failure reports a
+  bounded diagnostic in the already-restored terminal.
+- Headless action tests cover plain-terminal attachment, exact-client tmux
+  selection, target selection and cancellation, safe-stop confirmation,
+  blocked results, fresh request IDs, duplicate in-flight input, worker
+  cancellation, and failed process replacement without invoking a provider.
+- The isolated tmux gate continues to prove client-gated startup, exact-client
+  switching, stale-client rejection, launch expiry, and cleanup on its private
+  socket without contacting Codex or Claude.
 
-User actions, terminal handoff, and installed live acceptance remain in 4A.4
-and 4A.5. This checkpoint made no provider calls and did not attach, start,
-stop, or focus any session.
+Installed live acceptance remains in 4A.5. This checkpoint made no provider
+calls and did not attach, start, stop, or focus any real session.
 
 ## Acceptance gates
 

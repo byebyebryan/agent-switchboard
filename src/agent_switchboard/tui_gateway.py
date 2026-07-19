@@ -287,6 +287,24 @@ class SwbctlGateway:
                 retryable=False,
             ) from error
 
+    async def _empty(self, arguments: Sequence[str]) -> None:
+        output = await self._runner(
+            (self.executable, *arguments),
+            self.timeout_seconds,
+        )
+        if output.exit_code != 0:
+            raise GatewayError(
+                "command_failed",
+                "The Switchboard command failed.",
+                retryable=True,
+            )
+        if output.stdout or output.stderr:
+            raise GatewayError(
+                "response_invalid",
+                "The Switchboard command emitted unexpected output.",
+                retryable=False,
+            )
+
     @staticmethod
     def _context_arguments(context: PresentationContext) -> tuple[str, ...]:
         if (
@@ -423,9 +441,37 @@ class SwbctlGateway:
                 "Session key is invalid.",
                 retryable=False,
             ) from error
-        return await self._json(
+        envelope = await self._json(
             ("stop-session", canonical_key, "--json"),
             SessionActionEnvelope.from_json,
+        )
+        if str(envelope.action.session_key) != canonical_key:
+            raise GatewayError(
+                "response_invalid",
+                "The Switchboard command emitted an incompatible response.",
+                retryable=False,
+            )
+        return envelope
+
+    async def select_surface(self, surface_id: str, *, client: str) -> None:
+        """Select one validated surface on the exact inherited tmux client."""
+
+        await self._empty(
+            (
+                "select-surface",
+                _uuid_argument(surface_id, "surface ID"),
+                "--client",
+                _bounded_argument(client, "tmux client", maximum=1024),
+            )
+        )
+
+    def attach_surface_command(self, surface_id: str) -> tuple[str, ...]:
+        """Build the public attachment command for post-TUI process replacement."""
+
+        return (
+            self.executable,
+            "attach-surface",
+            _uuid_argument(surface_id, "surface ID"),
         )
 
     @staticmethod

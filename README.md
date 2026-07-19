@@ -68,9 +68,13 @@ acceptance are recorded in
 [`docs/phase-3c-plan.md`](docs/phase-3c-plan.md).
 The terminal-native Phase 4A vertical slice has its optional Textual shell,
 terminal-context resolver, bounded public-command gateway, and pure searchable
-session/launch-target model in place. Its read-only Textual view now provides
-responsive session navigation, search, filters, details, issues, help, and
-refresh; local actions continue in the later increments of
+session/launch-target model in place. Its Textual view provides responsive
+session navigation, search, filters, details, issues, help, and refresh. It can
+open known sessions, start configured Codex or Claude sessions, enter Claude's
+native history picker, and request confirmed safe stop through the existing
+versioned core commands. Successful routing selects only the inherited tmux
+client or replaces the restored plain terminal with `attach-surface`; installed
+live acceptance remains in
 [`docs/phase-4a-plan.md`](docs/phase-4a-plan.md). Remote SSH transport remains
 Phase 5. See
 [the design](docs/design.md), the
