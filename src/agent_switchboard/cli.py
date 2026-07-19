@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import importlib
 import os
 import sqlite3
 import sys
@@ -101,6 +102,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="diagnose provider hooks and local event latency",
     )
 
+    commands.add_parser(
+        "tui",
+        help="open the optional terminal session picker",
+    )
+
     prepare_open = commands.add_parser(
         "prepare-open",
         help="atomically prepare an existing local session for presentation",
@@ -172,6 +178,23 @@ def _configured_codex_executable(config: SwitchboardConfig) -> str | None:
         if provider.provider is ProviderId.CODEX:
             return (provider.executable or "codex") if provider.enabled else None
     return None
+
+
+def _run_tui_command() -> int:
+    try:
+        tui = importlib.import_module(".tui", __package__)
+    except ModuleNotFoundError as error:
+        if error.name == "textual" or (
+            error.name is not None and error.name.startswith("textual.")
+        ):
+            print(
+                "swbctl: TUI support is not installed; install it with: "
+                "pip install 'agent-switchboard[tui]'",
+                file=sys.stderr,
+            )
+            return 1
+        raise
+    return int(tui.run_tui())
 
 
 def _configured_claude_executable(config: SwitchboardConfig) -> str | None:
@@ -391,6 +414,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 1
         print(result.render())
         return 0 if result.healthy else 1
+
+    if arguments.command == "tui":
+        return _run_tui_command()
 
     if arguments.command in {
         "prepare-open",

@@ -188,7 +188,7 @@ standard library.
 
 ```sh
 python3.12 -m venv .venv
-.venv/bin/python -m pip install --upgrade build pytest ruff -e .
+.venv/bin/python -m pip install --upgrade build pytest ruff -e '.[tui]'
 ```
 
 Run the local acceptance gates from the repository root:

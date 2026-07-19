@@ -156,6 +156,45 @@ def test_parser_requires_json_and_retains_global_version(
     assert capsys.readouterr().out == f"swbctl {__version__}\n"
 
 
+def test_tui_command_is_lazy_and_returns_the_frontend_status(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[tuple[str, str | None]] = []
+
+    class FakeTui:
+        @staticmethod
+        def run_tui() -> int:
+            return 7
+
+    def import_module(name: str, package: str | None = None) -> FakeTui:
+        calls.append((name, package))
+        return FakeTui()
+
+    monkeypatch.setattr(cli_module.importlib, "import_module", import_module)
+
+    assert main(["tui"]) == 7
+    assert capsys.readouterr() == ("", "")
+    assert calls == [(".tui", "agent_switchboard")]
+
+
+def test_tui_command_has_an_actionable_missing_extra_error(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def missing_textual(_name: str, _package: str | None = None) -> None:
+        raise ModuleNotFoundError("No module named 'textual'", name="textual")
+
+    monkeypatch.setattr(cli_module.importlib, "import_module", missing_textual)
+
+    assert main(["tui"]) == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == (
+        "swbctl: TUI support is not installed; install it with: "
+        "pip install 'agent-switchboard[tui]'\n"
+    )
+    assert "Traceback" not in captured.err
+
+
 def test_prepare_open_emits_one_presentation_envelope_and_context_flags(
     capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:

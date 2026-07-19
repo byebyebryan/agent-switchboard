@@ -21,6 +21,7 @@ def test_static_pep_621_metadata_and_stdlib_runtime() -> None:
     assert project["license-files"] == ["LICENSE"]
     assert project["requires-python"] == ">=3.12"
     assert project["dependencies"] == []
+    assert project["optional-dependencies"] == {"tui": ["textual>=8.2.8,<9"]}
     assert project["scripts"]["swbctl"] == "agent_switchboard.cli:main"
     assert "dynamic" not in project
     assert metadata["build-system"] == {
@@ -63,6 +64,7 @@ def test_ci_smokes_wheel_and_source_distribution_installations() -> None:
     assert workflow.count("actions/checkout@v6") == 2
     assert workflow.count("actions/setup-python@v6") == 2
     assert "actions/upload-artifact@v7" in workflow
+    assert "pytest ruff '.[tui]'" in workflow
     assert "/tmp/switchboard-wheel-smoke/bin/python" in workflow
     assert "/tmp/switchboard-sdist-smoke/bin/python" in workflow
     assert "--no-deps /tmp/switchboard-build-a/*.tar.gz" in workflow
@@ -90,6 +92,8 @@ def test_ci_smokes_wheel_and_source_distribution_installations() -> None:
     assert 'hooks install --help | grep -F -- "--dry-run"' in workflow
     assert 'hooks uninstall --help | grep -F -- "--dry-run"' in workflow
     assert 'doctor --help | grep -F "usage: swbctl doctor"' in workflow
+    assert 'tui --help | grep -F "usage: swbctl tui"' in workflow
+    assert "grep -F \"pip install 'agent-switchboard[tui]'\"" in workflow
     assert 'snapshot --json > "$smoke_root/snapshot.json"' in workflow
     assert 'list --json > "$smoke_root/list.json"' in workflow
     assert "Path(sys.argv[1]).read_bytes()" in workflow
