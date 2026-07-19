@@ -39,6 +39,7 @@ def test_static_pep_621_metadata_and_stdlib_runtime() -> None:
         "docs/phase-3a-validation.md",
         "docs/phase-3b-plan.md",
         "docs/phase-3c-plan.md",
+        "docs/phase-4a-plan.md",
     ]
     assert metadata["tool"]["pytest"]["ini_options"]["pythonpath"] == ["src"]
 
@@ -51,6 +52,7 @@ def test_readme_states_phase_and_license() -> None:
     assert "docs/phase-2b-plan.md" in readme
     assert "docs/phase-3a-validation.md" in readme
     assert "docs/phase-3b-plan.md" in readme
+    assert "docs/phase-4a-plan.md" in readme
     assert "MIT License" in readme
     assert "SOURCE_DATE_EPOCH=1784073600" in readme
 
@@ -94,6 +96,7 @@ def test_ci_smokes_wheel_and_source_distribution_installations() -> None:
     assert '"docs/phase-3a-validation.md"' in verifier
     assert '"docs/phase-3b-plan.md"' in verifier
     assert '"docs/phase-3c-plan.md"' in verifier
+    assert '"docs/phase-4a-plan.md"' in verifier
     assert '"agent_switchboard/migrations/v0003_name_provenance_runtime_index.py"' in (
         verifier
     )

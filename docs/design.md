@@ -1894,8 +1894,8 @@ acceptance evidence are recorded in
 
 Phase 3C is implemented in core and DMS. Known resume, new session, native
 history selection, cancellation cleanup, and safe stop have installed live
-provider/bridge evidence. The remaining compositor focus observation gap is
-explicitly unclaimed but does not block the completed provider and adapter
+provider/bridge evidence. A follow-up isolated desktop exercise also proved
+live niri focus and same-window dedup through the existing public presentation
 contract. Exact evidence is recorded in
 [`docs/phase-3c-plan.md`](phase-3c-plan.md).
 
@@ -1910,6 +1910,10 @@ passes equivalent live tests.
 - Support normal terminal, tmux popup, and switch-client flows.
 - Add the session-scoped agent tool surface and optional memory adapter only
   after current-session authorization and bounded retrieval contracts pass.
+
+Phase 4 starts with the narrower terminal-native Phase 4A vertical slice in
+[`docs/phase-4a-plan.md`](phase-4a-plan.md). Curation, handoffs, agent tools,
+memory, and remote transport remain outside that first increment.
 
 ### Phase 5: Remote hosts
 
@@ -2104,16 +2108,19 @@ DMS is migrated immediately after the local launch path reaches parity. The TUI
 is built on the resulting stable API rather than serving as the first test of
 provider and transport behavior.
 
+### TUI framework
+
+Phase 4A uses Textual behind an optional packaging extra. The base core remains
+dependency-free. Textual supplies asynchronous UI primitives, clean suspension
+for terminal handoff, and deterministic headless interaction tests; the TUI
+still consumes the installed public JSON/action protocols and does not import
+provider adapters. The exact boundary and acceptance sequence are recorded in
+[`docs/phase-4a-plan.md`](phase-4a-plan.md).
+
 ## Remaining Non-blocking Decisions
 
 These choices do not block Phase 1 or the read-only portion of Phase 2. Each
 must be resolved before implementation reaches the phase that owns it.
-
-### TUI framework
-
-Select before Phase 4. The framework must support asynchronous
-refresh, fuzzy filtering, deterministic model tests, status styling that does
-not rely on color alone, and clean suspension or tmux switching.
 
 ### Claude history discovery
 

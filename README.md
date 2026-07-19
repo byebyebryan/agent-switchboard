@@ -63,9 +63,12 @@ separate DMS adapter. Phase 2B implementation, Agent View cutover, and live
 acceptance are also complete. Phase 3C reuses the Codex managed-tmux lifecycle
 for known, new, and provider-history-selected Claude sessions, adds safe stop,
 and projects those actions through the separate DMS adapter. Its completed
-contract, verification, and remaining compositor-only acceptance caveat are
-recorded in [`docs/phase-3c-plan.md`](docs/phase-3c-plan.md).
-The searchable TUI remains Phase 4 and remote SSH transport remains Phase 5. See
+contract, provider lifecycle, live compositor focus, and same-window dedup
+acceptance are recorded in
+[`docs/phase-3c-plan.md`](docs/phase-3c-plan.md).
+The terminal-native Phase 4A vertical slice is planned in
+[`docs/phase-4a-plan.md`](docs/phase-4a-plan.md); remote SSH transport remains
+Phase 5. See
 [the design](docs/design.md), the
 [Phase 1 validation record](docs/phase-1-validation.md), and the
 [Phase 2 validation record](docs/phase-2-validation.md), the

@@ -3,8 +3,8 @@
 Date: 2026-07-18
 
 Status: complete for local Claude known-session resume, new sessions, native
-history selection, graceful stop, and DMS parity; live compositor focus/dedup
-acceptance remains a cross-cutting desktop caveat
+history selection, graceful stop, DMS parity, live compositor focus, and
+same-window dedup acceptance
 
 ## Decision and boundary
 
@@ -216,7 +216,7 @@ and restoration of the user's pre-test desktop state.
 
 The first 2026-07-18 checkpoint passed 469 core tests. The completed Phase 3C
 core passes 483 tests, Ruff format/lint, compilation, whitespace checks, and
-reproducible wheel/sdist verification. The DMS adapter passes 122 Python tests,
+reproducible wheel/sdist verification. The DMS adapter passes 123 Python tests,
 21 deterministic JavaScript behavior groups, QML formatting, Ruff, Pyright,
 and whitespace checks.
 
@@ -293,8 +293,28 @@ and adapter lifecycle:
   transcript was moved to the desktop trash.
 
 No prompt was submitted and no model turn was requested during this final
-exercise. The earlier live niri focus/same-window observation gap is not a
-Phase 3C provider or bridge blocker, but it remains explicitly unclaimed.
+exercise.
+
+### Compositor closeout
+
+A follow-up 2026-07-18 exercise recovered the active niri environment from the
+DMS user service instead of relying on the control shell. It launched the
+installed DMS helper with an isolated Switchboard state tree and dedicated tmux
+socket; the wrapper explicitly removed the outer `TMUX` value so the managed
+surface could not reuse the user's server.
+
+The exact managed Ghostty application ID resolved to one niri window. Reopening
+the controlled Claude session through `switchboard-open` returned `focused` for
+the same surface, retained that same niri window ID, and left the matching
+managed-window count at one. The provider started only after the real terminal
+client attached. No prompt was submitted and no model turn was requested.
+
+The public stop action removed only the controlled Claude runtime and managed
+window. The pre-existing active Claude session remained alive, no test-owned
+process or surface remained, the isolated state was removed, and the empty
+test transcript was moved to the desktop trash. This closes the earlier live
+niri focus and same-window dedup observation gap without widening the core/DMS
+boundary.
 
 ## Stop conditions
 
