@@ -621,6 +621,83 @@ def test_session_name_provenance_defaults_curated_and_syncs_explicit_provider(
     assert unchanged_provider["last_observed_at"] == 50
 
 
+def test_dedicated_curation_preserves_observation_time_and_name_provenance(
+    registry: Registry,
+) -> None:
+    add_session(registry)
+    registry.upsert_session(
+        {
+            "session_key": SESSION_KEY,
+            "name": "provider title",
+            "name_source": "provider",
+            "last_observed_at": 40,
+        }
+    )
+
+    named = registry.set_session_name(
+        SESSION_KEY, host_id=HOST_ID, name="  Curated naïve title  "
+    )
+    purposed = registry.set_session_purpose(
+        SESSION_KEY, host_id=HOST_ID, purpose="  Finish the curation core.  "
+    )
+    pinned = registry.set_session_pinned(SESSION_KEY, host_id=HOST_ID, pinned=True)
+
+    assert named["name"] == "Curated naïve title"
+    assert named["name_source"] == "curated"
+    assert purposed["purpose"] == "Finish the curation core."
+    assert pinned["pinned"] == 1
+    assert named["last_observed_at"] == 40
+    assert purposed["last_observed_at"] == 40
+    assert pinned["last_observed_at"] == 40
+
+    cleared_name = registry.set_session_name(SESSION_KEY, host_id=HOST_ID, name=None)
+    cleared_purpose = registry.set_session_purpose(
+        SESSION_KEY, host_id=HOST_ID, purpose=None
+    )
+    unpinned = registry.set_session_pinned(SESSION_KEY, host_id=HOST_ID, pinned=False)
+    assert cleared_name["name"] == "provider title"
+    assert cleared_name["name_source"] == "provider"
+    assert cleared_purpose["purpose"] is None
+    assert unpinned["pinned"] == 0
+    assert unpinned["last_observed_at"] == 40
+
+
+def test_dedicated_curation_rejects_invalid_or_nonlocal_targets(
+    registry: Registry,
+) -> None:
+    add_session(registry)
+    with pytest.raises(StorageError, match="different host"):
+        registry.set_session_name(SESSION_KEY, host_id=REMOTE_HOST_ID, name="not local")
+    with pytest.raises(StorageError, match="control"):
+        registry.set_session_purpose(
+            SESSION_KEY, host_id=HOST_ID, purpose="bad\x1bpurpose"
+        )
+    with pytest.raises(StorageError, match="must not be empty"):
+        registry.set_session_name(SESSION_KEY, host_id=HOST_ID, name="   ")
+    with pytest.raises(StorageError, match="boolean"):
+        registry.set_session_pinned(  # type: ignore[arg-type]
+            SESSION_KEY, host_id=HOST_ID, pinned=1
+        )
+
+    registry.upsert_host(REMOTE_HOST_ID, "remote", observed_at=50)
+    registry.upsert_session(
+        {
+            "session_key": REMOTE_SESSION_KEY,
+            "host_id": REMOTE_HOST_ID,
+            "provider": "claude",
+            "provider_session_id": REMOTE_SESSION_ID,
+            "first_observed_at": 50,
+            "last_observed_at": 50,
+        }
+    )
+    with pytest.raises(StorageError, match="local host"):
+        registry.set_session_purpose(
+            REMOTE_SESSION_KEY,
+            host_id=REMOTE_HOST_ID,
+            purpose="must remain read-only",
+        )
+
+
 @pytest.mark.parametrize(
     ("name_fields", "message"),
     (
@@ -750,6 +827,182 @@ def test_handoffs_are_hashed_sequenced_idempotent_and_append_only(
             source_host_id=HOST_ID,
             created_at=130,
         )
+
+
+def test_local_handoff_wrap_and_bounded_detail_are_atomic(registry: Registry) -> None:
+    original = add_session(registry)
+    first = registry.curate_session_handoff(
+        SESSION_KEY,
+        host_id=HOST_ID,
+        handoff_id=stable_uuid("curated-handoff-1"),
+        summary="  Storage is ready.  ",
+        next_action="  Expose the public contract.  ",
+        observed_at=100,
+    )
+    wrapped = registry.curate_session_handoff(
+        SESSION_KEY,
+        host_id=HOST_ID,
+        handoff_id=stable_uuid("curated-handoff-2"),
+        summary="Public contract is designed.",
+        next_action="Implement the CLI.",
+        wrap=True,
+        observed_at=110,
+    )
+    replay = registry.curate_session_handoff(
+        SESSION_KEY,
+        host_id=HOST_ID,
+        handoff_id=stable_uuid("curated-handoff-2"),
+        summary="Public contract is designed.",
+        next_action="Implement the CLI.",
+        wrap=True,
+        observed_at=120,
+    )
+
+    assert first.handoff is not None
+    assert first.handoff["summary"] == "Storage is ready."
+    assert first.handoff["source"] == "user"
+    assert first.handoff["source_host_id"] == HOST_ID
+    assert wrapped.handoff is not None
+    assert wrapped.handoff["sequence"] == 2
+    assert wrapped.session["wrapped_at"] == 110
+    assert wrapped.session["latest_handoff_id"] == stable_uuid("curated-handoff-2")
+    assert wrapped.session["last_observed_at"] == original["last_observed_at"]
+    assert replay == wrapped
+
+    detail = registry.read_session_detail(SESSION_KEY, host_id=HOST_ID, handoff_limit=1)
+    assert detail.session["wrapped_at"] == 110
+    assert [row["sequence"] for row in detail.handoffs] == [2]
+    assert detail.handoffs_truncated is True
+    assert registry.get_handoff(stable_uuid("curated-handoff-1")) == first.handoff
+    assert [row["sequence"] for row in registry.list_handoffs(SESSION_KEY)] == [2, 1]
+    assert [
+        row["sequence"]
+        for row in registry.list_handoffs(SESSION_KEY, before_sequence=2)
+    ] == [1]
+
+    cleared = registry.clear_session_wrapped(SESSION_KEY, host_id=HOST_ID)
+    assert cleared["wrapped_at"] is None
+    assert cleared["latest_handoff_id"] == stable_uuid("curated-handoff-2")
+    assert cleared["last_observed_at"] == original["last_observed_at"]
+
+    replay_after_reentry = registry.curate_session_handoff(
+        SESSION_KEY,
+        host_id=HOST_ID,
+        handoff_id=stable_uuid("curated-handoff-2"),
+        summary="Public contract is designed.",
+        next_action="Implement the CLI.",
+        wrap=True,
+        observed_at=130,
+    )
+    assert replay_after_reentry.session["wrapped_at"] is None
+
+
+def test_continuation_source_resolution_and_atomic_latest_reservation(
+    registry: Registry,
+) -> None:
+    add_session(registry)
+    first = registry.curate_session_handoff(
+        SESSION_KEY,
+        host_id=HOST_ID,
+        handoff_id=stable_uuid("continuation-first"),
+        summary="First handoff.",
+        next_action="Write the second handoff.",
+        observed_at=100,
+    )
+    assert first.handoff is not None
+    by_session = registry.resolve_continuation_source(SESSION_KEY, host_id=HOST_ID)
+    by_handoff = registry.resolve_continuation_source(
+        first.handoff["handoff_id"], host_id=HOST_ID
+    )
+    assert by_session.from_session is True
+    assert by_handoff.from_session is False
+    assert by_session.handoff == by_handoff.handoff
+
+    second = registry.curate_session_handoff(
+        SESSION_KEY,
+        host_id=HOST_ID,
+        handoff_id=stable_uuid("continuation-second"),
+        summary="Second handoff.",
+        next_action="Reserve the exact continuation.",
+        observed_at=110,
+    )
+    assert second.handoff is not None
+    request = new_request()
+    request["source_handoff_id"] = first.handoff["handoff_id"]
+    reserved = registry.reserve_launch(
+        request,
+        source_session_key=SESSION_KEY,
+        launch_id=stable_uuid("continuation-launch"),
+        request_id=stable_uuid("continuation-request"),
+        lease_owner="continuation-test",
+        capability_hash=digest("continuation"),
+        created_at=120,
+        expires_at=220,
+    )
+    assert reserved.launch["source_handoff_id"] == second.handoff["handoff_id"]
+
+    third = registry.curate_session_handoff(
+        SESSION_KEY,
+        host_id=HOST_ID,
+        handoff_id=stable_uuid("continuation-third"),
+        summary="Third handoff after reservation.",
+        next_action="Retry the original request.",
+        observed_at=130,
+    )
+    assert third.handoff is not None
+    retry = registry.reserve_launch(
+        request,
+        source_session_key=SESSION_KEY,
+        request_id=stable_uuid("continuation-request"),
+        lease_owner="continuation-retry",
+        capability_hash=digest("ignored-on-retry"),
+        created_at=140,
+        expires_at=240,
+    )
+    assert retry.kind == "idempotent"
+    assert retry.launch["source_handoff_id"] == second.handoff["handoff_id"]
+
+
+def test_continuation_reservation_rejects_missing_or_changed_source(
+    registry: Registry,
+) -> None:
+    add_session(registry)
+    with pytest.raises(StorageError, match="no explicit handoff"):
+        registry.resolve_continuation_source(SESSION_KEY, host_id=HOST_ID)
+    with pytest.raises(StorageError, match="no explicit handoff"):
+        registry.reserve_launch(
+            new_request(),
+            source_session_key=SESSION_KEY,
+            request_id=stable_uuid("missing-continuation-request"),
+            lease_owner="continuation-test",
+            capability_hash=digest("continuation"),
+            created_at=100,
+            expires_at=200,
+        )
+    assert registry.list_launches() == []
+
+    handoff = registry.curate_session_handoff(
+        SESSION_KEY,
+        host_id=HOST_ID,
+        handoff_id=stable_uuid("changed-source"),
+        summary="Source before change.",
+        next_action="Detect changed location.",
+        observed_at=110,
+    )
+    assert handoff.handoff is not None
+    request = new_request()
+    request["source_handoff_id"] = handoff.handoff["handoff_id"]
+    request["cwd"] = "/work/other"
+    with pytest.raises(StorageError, match="project location changed"):
+        registry.reserve_launch(
+            request,
+            request_id=stable_uuid("changed-source-request"),
+            lease_owner="continuation-test",
+            capability_hash=digest("continuation"),
+            created_at=120,
+            expires_at=220,
+        )
+    assert registry.list_launches() == []
 
 
 def test_domain_handoff_hash_is_storage_canonical(registry: Registry) -> None:

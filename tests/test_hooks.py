@@ -26,6 +26,9 @@ SECOND_KEY = f"{HOST_ID}:codex:{SECOND_ID}"
 LAUNCH_ID = "44444444-4444-4444-8444-444444444444"
 SURFACE_ID = "55555555-5555-4555-8555-555555555555"
 REQUEST_ID = "66666666-6666-4666-8666-666666666666"
+PROJECT_ID = "77777777-7777-4777-8777-777777777777"
+LOCATION_ID = "88888888-8888-4888-8888-888888888888"
+HANDOFF_ID = "99999999-9999-4999-8999-999999999999"
 
 
 def digest(value: str) -> str:
@@ -655,6 +658,113 @@ def prepare_resume_launch(registry: Registry) -> None:
             observed_at=observed_at,
             surface_id=surface_id,
         )
+
+
+def test_new_hook_binding_retains_exact_continuation_lineage(tmp_path) -> None:
+    environment = {
+        "AGENT_SWITCHBOARD_LAUNCH_ID": LAUNCH_ID,
+        "AGENT_SWITCHBOARD_SURFACE_ID": SURFACE_ID,
+    }
+    with Registry(tmp_path / "continuation.db") as registry:
+        registry.upsert_host(HOST_ID, "starship", is_local=True, observed_at=10)
+        registry.materialize_projects(
+            HOST_ID,
+            [
+                {
+                    "project_id": PROJECT_ID,
+                    "name": "switchboard",
+                    "default_provider": "codex",
+                    "default_transport": "tmux",
+                    "locations": [
+                        {
+                            "location_id": LOCATION_ID,
+                            "path": "/work/switchboard",
+                            "is_default": True,
+                        }
+                    ],
+                }
+            ],
+            observed_at=20,
+        )
+        registry.upsert_session(
+            {
+                "session_key": SECOND_KEY,
+                "host_id": HOST_ID,
+                "provider": "codex",
+                "provider_session_id": SECOND_ID,
+                "project_id": PROJECT_ID,
+                "location_id": LOCATION_ID,
+                "cwd": "/work/switchboard",
+                "first_observed_at": 20,
+                "last_observed_at": 20,
+            }
+        )
+        registry.curate_session_handoff(
+            SECOND_KEY,
+            host_id=HOST_ID,
+            handoff_id=HANDOFF_ID,
+            summary="The source session is wrapped.",
+            next_action="Bind the exact continuation through the hook.",
+            observed_at=30,
+        )
+        registry.reserve_launch(
+            {
+                "host_id": HOST_ID,
+                "provider": "codex",
+                "action": "new",
+                "project_id": PROJECT_ID,
+                "location_id": LOCATION_ID,
+                "cwd": "/work/switchboard",
+                "source_handoff_id": HANDOFF_ID,
+                "target_session_key": None,
+                "transport": "tmux",
+            },
+            request_id=REQUEST_ID,
+            lease_owner="private-worker-token",
+            capability_hash=digest("continuation-capability"),
+            expires_at=10_000,
+            launch_id=LAUNCH_ID,
+            created_at=100,
+        )
+        registry.upsert_surface(
+            {
+                "surface_id": SURFACE_ID,
+                "host_id": HOST_ID,
+                "provider": "codex",
+                "transport": "tmux",
+                "transport_locator": "tmux:test:0.0",
+                "role": "session",
+                "launch_id": LAUNCH_ID,
+                "created_at": 110,
+                "last_observed_at": 110,
+            }
+        )
+        for state, observed_at, surface_id in (
+            ("surface_ready", 120, SURFACE_ID),
+            ("waiting_for_client", 130, None),
+            ("provider_started", 140, None),
+        ):
+            registry.transition_launch(
+                LAUNCH_ID,
+                state,
+                lease_owner="private-worker-token",
+                observed_at=observed_at,
+                surface_id=surface_id,
+            )
+
+        event = normalized(
+            "SessionStart",
+            entry_ns=200_000_000,
+            environment=environment,
+            source="startup",
+        )
+        result = registry.ingest_hook_event(
+            event.storage_mapping(HostId(HOST_ID)), host_display_name="starship"
+        )
+
+        assert result.kind == "applied"
+        assert result.launch is not None and result.launch["state"] == "bound"
+        assert result.session["continued_from_handoff_id"] == HANDOFF_ID
 
 
 def test_hook_binding_consumes_stored_lease_and_mismatch_preserves_actual_session(

@@ -11,6 +11,7 @@ from agent_switchboard.domain import (
     ProviderId,
     SessionKey,
     SurfaceId,
+    handoff_content_hash,
 )
 from agent_switchboard.protocol import (
     MAX_JSON_BYTES,
@@ -28,6 +29,7 @@ from agent_switchboard.protocol import (
     SessionAction,
     SessionActionEnvelope,
     SessionActionStatus,
+    SessionDetailEnvelope,
     SnapshotEnvelope,
 )
 
@@ -40,6 +42,49 @@ SESSION_ID = "55555555-5555-4555-8555-555555555555"
 LAUNCH = "66666666-6666-4666-8666-666666666666"
 SESSION_KEY = f"{HOST}:codex:{SESSION_ID}"
 CLAUDE_SESSION_KEY = SessionKey.parse(f"{HOST}:claude:{SESSION_ID}")
+HANDOFF_ONE = "77777777-7777-4777-8777-777777777777"
+HANDOFF_TWO = "88888888-8888-4888-8888-888888888888"
+
+
+def session_detail_value() -> dict[str, object]:
+    snapshot = json.loads((FIXTURES / "snapshot.json").read_text())
+    session = snapshot["sessions"][0]
+    session["latestHandoffId"] = HANDOFF_TWO
+    first_summary = "Second summary.\nStill explicit."
+    first_next = "Implement the CLI.\tThen test it."
+    second_summary = "First summary."
+    second_next = "Design the protocol."
+    return {
+        "schemaVersion": 1,
+        "protocolVersion": 1,
+        "generatedAt": 100,
+        "session": session,
+        "handoffs": [
+            {
+                "handoffId": HANDOFF_TWO,
+                "sessionKey": SESSION_KEY,
+                "sequence": 2,
+                "summary": first_summary,
+                "nextAction": first_next,
+                "source": "user",
+                "sourceHostId": str(HOST),
+                "createdAt": 90,
+                "contentHash": handoff_content_hash(first_summary, first_next),
+            },
+            {
+                "handoffId": HANDOFF_ONE,
+                "sessionKey": SESSION_KEY,
+                "sequence": 1,
+                "summary": second_summary,
+                "nextAction": second_next,
+                "source": "agent",
+                "sourceHostId": str(HOST),
+                "createdAt": 80,
+                "contentHash": handoff_content_hash(second_summary, second_next),
+            },
+        ],
+        "handoffsTruncated": False,
+    }
 
 
 @pytest.mark.parametrize(
@@ -58,6 +103,68 @@ def test_versioned_redacted_fixture_round_trip(name: str, envelope_type: type) -
     assert envelope_type.from_json(canonical) == parsed
     assert "futureEnvelopeField" not in canonical
     assert "futureField" not in canonical
+
+
+def test_session_detail_round_trip_is_bounded_exact_and_multiline_safe() -> None:
+    detail = SessionDetailEnvelope.from_dict(session_detail_value())
+    canonical = detail.to_json()
+    assert SessionDetailEnvelope.from_json(canonical) == detail
+    assert detail.session["latestHandoffId"] == HANDOFF_TWO
+    assert [handoff["sequence"] for handoff in detail.handoffs] == [2, 1]
+    assert detail.handoffs[0]["summary"] == "Second summary.\nStill explicit."
+    assert "futureSessionField" not in canonical
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda value: value.__setitem__("futureField", "unsafe\nline"),
+        lambda value: value["session"].__setitem__(
+            "futureSessionField", "unsafe\nline"
+        ),
+        lambda value: value["handoffs"][0].__setitem__(
+            "futureHandoffField", "unsafe\nline"
+        ),
+    ],
+)
+def test_session_detail_allows_multiline_only_in_explicit_handoff_text(
+    mutate: object,
+) -> None:
+    value = session_detail_value()
+    assert callable(mutate)
+    mutate(value)
+    with pytest.raises(ProtocolError, match="terminal control"):
+        SessionDetailEnvelope.from_dict(value)
+
+
+@pytest.mark.parametrize(
+    ("mutate", "message"),
+    [
+        (lambda value: value["handoffs"].reverse(), "newest-first"),
+        (
+            lambda value: value["handoffs"][0].__setitem__("contentHash", "0" * 64),
+            "does not match",
+        ),
+        (
+            lambda value: value["handoffs"][0].__setitem__(
+                "sessionKey", str(CLAUDE_SESSION_KEY)
+            ),
+            "different session",
+        ),
+        (
+            lambda value: value["session"].__setitem__("latestHandoffId", HANDOFF_ONE),
+            "pointer is inconsistent",
+        ),
+    ],
+)
+def test_session_detail_rejects_inconsistent_handoff_records(
+    mutate: object, message: str
+) -> None:
+    value = session_detail_value()
+    assert callable(mutate)
+    mutate(value)
+    with pytest.raises(ProtocolError, match=message):
+        SessionDetailEnvelope.from_dict(value)
 
 
 def test_snapshot_contract_fields_and_capability_report() -> None:

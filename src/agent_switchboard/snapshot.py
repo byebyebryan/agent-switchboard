@@ -99,7 +99,9 @@ def _location(row: Mapping[str, Any]) -> dict[str, Any]:
     return result
 
 
-def _session(row: Mapping[str, Any]) -> dict[str, Any]:
+def session_record(row: Mapping[str, Any]) -> dict[str, Any]:
+    """Project one retained session through the public Snapshot field boundary."""
+
     result: dict[str, Any] = {
         "sessionKey": row["session_key"],
         "hostId": row["host_id"],
@@ -219,7 +221,7 @@ def _bounded_session_rows(
     for row in rows.sessions:
         try:
             encoded = json.dumps(
-                _session(row),
+                session_record(row),
                 ensure_ascii=False,
                 allow_nan=False,
                 separators=(",", ":"),
@@ -302,7 +304,7 @@ def _assemble(
         ),
         projects=tuple(_project(row) for row in rows.projects),
         locations=tuple(_location(row) for row in rows.locations),
-        sessions=tuple(_session(row) for row in rows.sessions),
+        sessions=tuple(session_record(row) for row in rows.sessions),
         runtimes=tuple(_runtime(row) for row in rows.runtimes),
         surfaces=tuple(_surface(row) for row in rows.surfaces),
         capabilities=ordered_capabilities,

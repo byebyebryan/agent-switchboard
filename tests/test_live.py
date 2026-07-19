@@ -41,6 +41,7 @@ SURFACE_ID = "55555555-5555-4555-8555-555555555555"
 REQUEST_ID = "66666666-6666-4666-8666-666666666666"
 PROJECT_ID = "77777777-7777-4777-8777-777777777777"
 LOCATION_ID = "88888888-8888-4888-8888-888888888888"
+HANDOFF_ID = "99999999-9999-4999-8999-999999999999"
 
 
 def _proc_entry(
@@ -196,7 +197,12 @@ def _prepare_pending_resume(registry: Registry, locator: TmuxLocator) -> None:
     )
 
 
-def _prepare_pending_new(registry: Registry, locator: TmuxLocator) -> None:
+def _prepare_pending_new(
+    registry: Registry,
+    locator: TmuxLocator,
+    *,
+    source_handoff_id: str | None = None,
+) -> None:
     registry.materialize_projects(
         HOST_ID,
         [
@@ -224,7 +230,7 @@ def _prepare_pending_new(registry: Registry, locator: TmuxLocator) -> None:
             "project_id": PROJECT_ID,
             "location_id": LOCATION_ID,
             "cwd": "/work/project",
-            "source_handoff_id": None,
+            "source_handoff_id": source_handoff_id,
             "target_session_key": None,
             "transport": "tmux",
         },
@@ -616,7 +622,55 @@ def test_reconcile_binds_pending_new_launch_after_missed_hook(
     registry: Registry, tmp_path: Path
 ) -> None:
     locator = TmuxLocator("/tmp/fake", "work", "@1", "%7")
-    _prepare_pending_new(registry, locator)
+    source_session_key = f"{HOST_ID}:codex:{SECOND_SESSION_ID}"
+    registry.materialize_projects(
+        HOST_ID,
+        [
+            {
+                "project_id": PROJECT_ID,
+                "name": "project",
+                "default_provider": "codex",
+                "default_transport": "tmux",
+                "locations": [
+                    {
+                        "location_id": LOCATION_ID,
+                        "path": "/work/project",
+                        "is_default": True,
+                    }
+                ],
+            }
+        ],
+        observed_at=2,
+    )
+    registry.upsert_session(
+        {
+            "session_key": source_session_key,
+            "host_id": HOST_ID,
+            "provider": "codex",
+            "provider_session_id": SECOND_SESSION_ID,
+            "project_id": PROJECT_ID,
+            "location_id": LOCATION_ID,
+            "cwd": "/work/project",
+            "runtime_presence": "unknown",
+            "resumability": "resumable",
+            "activity": "ready",
+            "activity_reason": "turn_complete",
+            "attachment": "detached",
+            "metadata_source": "provider",
+            "first_observed_at": 1,
+            "last_observed_at": 2,
+        }
+    )
+    registry.append_handoff(
+        session_key=source_session_key,
+        handoff_id=HANDOFF_ID,
+        summary="Continue the vertical slice.",
+        next_action="Repair the missed runtime binding.",
+        source="user",
+        source_host_id=HOST_ID,
+        created_at=3,
+    )
+    _prepare_pending_new(registry, locator, source_handoff_id=HANDOFF_ID)
     root = _proc_root(tmp_path)
     _proc_entry(root, 50, ppid=1, argv=("/bin/sh",), start=500)
     _proc_entry(
@@ -649,6 +703,7 @@ def test_reconcile_binds_pending_new_launch_after_missed_hook(
     assert session["location_id"] == LOCATION_ID
     assert session["cwd"] == "/work/project"
     assert session["metadata_source"] == "launch"
+    assert session["continued_from_handoff_id"] == HANDOFF_ID
     assert session["surface_id"] == SURFACE_ID
     surface = registry.get_surface(SURFACE_ID)
     assert surface is not None

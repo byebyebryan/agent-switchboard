@@ -692,7 +692,11 @@ def normalize_handoff_text(value: str, field: str) -> str:
     normalized = unicodedata.normalize("NFC", value).strip()
     if not normalized:
         raise ValidationError(f"{field} must not be empty")
-    if len(normalized.encode("utf-8")) > MAX_HANDOFF_FIELD_BYTES:
+    try:
+        encoded = normalized.encode("utf-8")
+    except UnicodeEncodeError as error:
+        raise ValidationError(f"{field} contains invalid Unicode") from error
+    if len(encoded) > MAX_HANDOFF_FIELD_BYTES:
         raise ValidationError(f"{field} exceeds {MAX_HANDOFF_FIELD_BYTES} bytes")
     if any(
         unicodedata.category(char) == "Cc" and char not in "\n\t" for char in normalized

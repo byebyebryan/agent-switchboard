@@ -62,6 +62,8 @@ MAX_EVENT_LIMIT: Final = 100_000
 DEFAULT_SNAPSHOT_SESSION_LIMIT: Final = 1_000
 DEFAULT_SNAPSHOT_RUNTIME_LIMIT: Final = 10_000
 DEFAULT_LIVENESS_OBSERVATION_LIMIT: Final = 16
+DEFAULT_HANDOFF_LIMIT: Final = 20
+MAX_HANDOFF_LIMIT: Final = 100
 _SQLITE_MAX_INTEGER: Final = 2**63 - 1
 _MAX_EVIDENCE_PRIORITY: Final = 1_000_000
 
@@ -236,6 +238,14 @@ class RequestConflict(StorageError):
     """A launch request ID was reused for a different normalized request."""
 
 
+class ContinuationError(StorageError):
+    """A local handoff reference cannot safely seed a new launch."""
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+
+
 class RegistryClosed(StorageError):
     """An operation was attempted after the registry was closed."""
 
@@ -361,6 +371,32 @@ class HostSnapshotRows:
     surfaces: tuple[dict[str, Any], ...]
 
 
+@dataclass(frozen=True, slots=True)
+class SessionDetailRows:
+    """One coherent local session and a bounded newest-first handoff page."""
+
+    session: dict[str, Any]
+    handoffs: tuple[dict[str, Any], ...]
+    handoffs_truncated: bool
+
+
+@dataclass(frozen=True, slots=True)
+class SessionCurationResult:
+    """Committed curation state and its optional immutable handoff."""
+
+    session: dict[str, Any]
+    handoff: dict[str, Any] | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ContinuationSource:
+    """A retained local source session and one exact immutable handoff."""
+
+    session: dict[str, Any]
+    handoff: dict[str, Any]
+    from_session: bool
+
+
 def now_ms() -> int:
     """Return the current Unix time in integer milliseconds."""
 
@@ -429,6 +465,19 @@ def _reject_mapping_controls(value: Mapping[str, Any], fields: Sequence[str]) ->
     for field in fields:
         if field in value:
             _reject_controls(value[field], field)
+
+
+def _normalize_curation_text(value: str, field: str, *, maximum: int) -> str:
+    if not isinstance(value, str):
+        raise StorageError(f"{field} must be a string")
+    normalized = unicodedata.normalize("NFC", value).strip()
+    if not normalized:
+        raise StorageError(f"{field} must not be empty")
+    if len(normalized) > maximum:
+        raise StorageError(f"{field} exceeds {maximum} characters")
+    _reject_controls(normalized, field)
+    _reject_invalid_unicode(normalized, field)
+    return normalized
 
 
 def _row_dict(row: sqlite3.Row | None) -> dict[str, Any] | None:
@@ -1721,6 +1770,309 @@ class Registry:
             ).fetchall()
         return [dict(row) for row in rows]
 
+    @staticmethod
+    def _local_session_row(
+        connection: sqlite3.Connection,
+        *,
+        host_id: str,
+        session_key: str,
+    ) -> sqlite3.Row:
+        row = connection.execute(
+            "SELECT * FROM sessions WHERE session_key = ?", (session_key,)
+        ).fetchone()
+        if row is None:
+            raise StorageError(f"unknown session: {session_key}")
+        host = connection.execute(
+            "SELECT is_local FROM hosts WHERE host_id = ?", (host_id,)
+        ).fetchone()
+        if row["host_id"] != host_id or host is None or not bool(host["is_local"]):
+            raise StorageError("session is not owned by the local host")
+        return row
+
+    @staticmethod
+    def _validate_local_session_identity(host_id: str, session_key: str) -> None:
+        canonical_host = _canonical_host_id(host_id)
+        key = _canonical_session_key(session_key)
+        if key.host_id != HostId(canonical_host):
+            raise StorageError("session key belongs to a different host")
+
+    def read_session_detail(
+        self,
+        session_key: str,
+        *,
+        host_id: str,
+        handoff_limit: int = DEFAULT_HANDOFF_LIMIT,
+    ) -> SessionDetailRows:
+        """Read one local session and its newest bounded handoffs coherently."""
+
+        self._validate_local_session_identity(host_id, session_key)
+        if (
+            isinstance(handoff_limit, bool)
+            or not isinstance(handoff_limit, int)
+            or not 1 <= handoff_limit <= MAX_HANDOFF_LIMIT
+        ):
+            raise StorageError(
+                f"handoff_limit must be between 1 and {MAX_HANDOFF_LIMIT}"
+            )
+        with self.transaction() as connection:
+            session = self._local_session_row(
+                connection, host_id=host_id, session_key=session_key
+            )
+            rows = connection.execute(
+                """
+                SELECT * FROM handoffs
+                WHERE session_key = ?
+                ORDER BY sequence DESC, handoff_id
+                LIMIT ?
+                """,
+                (session_key, handoff_limit + 1),
+            ).fetchall()
+        return SessionDetailRows(
+            session=dict(session),
+            handoffs=tuple(dict(row) for row in rows[:handoff_limit]),
+            handoffs_truncated=len(rows) > handoff_limit,
+        )
+
+    def get_handoff(self, handoff_id: str) -> dict[str, Any] | None:
+        handoff_id = _canonical_uuid_id(handoff_id, HandoffId, "handoff_id")
+        return _row_dict(
+            self.connection.execute(
+                "SELECT * FROM handoffs WHERE handoff_id = ?", (handoff_id,)
+            ).fetchone()
+        )
+
+    def resolve_continuation_source(
+        self,
+        reference: str,
+        *,
+        host_id: str,
+    ) -> ContinuationSource:
+        """Resolve one retained local session or exact handoff for preparation."""
+
+        host_id = _canonical_host_id(host_id)
+        from_session = ":" in reference
+        if from_session:
+            session_key = str(_canonical_session_key(reference))
+            handoff_id = None
+        else:
+            session_key = None
+            handoff_id = _canonical_uuid_id(reference, HandoffId, "handoff_id")
+        with self.transaction() as connection:
+            if session_key is not None:
+                session = self._local_session_row(
+                    connection, host_id=host_id, session_key=session_key
+                )
+                handoff_id = session["latest_handoff_id"]
+                if handoff_id is None:
+                    raise ContinuationError(
+                        "continuation_handoff_missing",
+                        "The source session has no explicit handoff.",
+                    )
+                handoff = connection.execute(
+                    "SELECT * FROM handoffs WHERE handoff_id = ?",
+                    (handoff_id,),
+                ).fetchone()
+            else:
+                handoff = connection.execute(
+                    "SELECT * FROM handoffs WHERE handoff_id = ?",
+                    (handoff_id,),
+                ).fetchone()
+                if handoff is None:
+                    raise ContinuationError(
+                        "continuation_handoff_not_found",
+                        "The selected handoff is not retained.",
+                    )
+                session_key = str(handoff["session_key"])
+                session = self._local_session_row(
+                    connection, host_id=host_id, session_key=session_key
+                )
+            if handoff is None or handoff["session_key"] != session_key:
+                raise ContinuationError(
+                    "continuation_handoff_inconsistent",
+                    "The selected handoff is not bound to its source session.",
+                )
+            if handoff["source"] == "imported":
+                raise ContinuationError(
+                    "continuation_remote_not_supported",
+                    "Imported handoff continuation remains a remote-host feature.",
+                )
+            if not all(
+                isinstance(session[field], str) and session[field]
+                for field in ("project_id", "location_id", "cwd")
+            ):
+                raise ContinuationError(
+                    "continuation_location_missing",
+                    "The source session has no complete local project location.",
+                )
+        return ContinuationSource(dict(session), dict(handoff), from_session)
+
+    def list_handoffs(
+        self,
+        session_key: str,
+        *,
+        limit: int = DEFAULT_HANDOFF_LIMIT,
+        before_sequence: int | None = None,
+    ) -> list[dict[str, Any]]:
+        _canonical_session_key(session_key)
+        if (
+            isinstance(limit, bool)
+            or not isinstance(limit, int)
+            or not 1 <= limit <= MAX_HANDOFF_LIMIT
+        ):
+            raise StorageError(f"limit must be between 1 and {MAX_HANDOFF_LIMIT}")
+        if before_sequence is not None and (
+            isinstance(before_sequence, bool)
+            or not isinstance(before_sequence, int)
+            or before_sequence < 1
+        ):
+            raise StorageError("before_sequence must be a positive integer")
+        if before_sequence is None:
+            rows = self.connection.execute(
+                """
+                SELECT * FROM handoffs WHERE session_key = ?
+                ORDER BY sequence DESC, handoff_id LIMIT ?
+                """,
+                (session_key, limit),
+            ).fetchall()
+        else:
+            rows = self.connection.execute(
+                """
+                SELECT * FROM handoffs
+                WHERE session_key = ? AND sequence < ?
+                ORDER BY sequence DESC, handoff_id LIMIT ?
+                """,
+                (session_key, before_sequence, limit),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def set_session_name(
+        self,
+        session_key: str,
+        *,
+        host_id: str,
+        name: str | None,
+    ) -> dict[str, Any]:
+        """Set or clear one curated name without advancing observation time."""
+
+        self._validate_local_session_identity(host_id, session_key)
+        normalized = (
+            None
+            if name is None
+            else _normalize_curation_text(name, "session name", maximum=512)
+        )
+        with self.transaction(immediate=True) as connection:
+            session = self._local_session_row(
+                connection, host_id=host_id, session_key=session_key
+            )
+            if normalized is None:
+                provider_name = session["provider_name"]
+                connection.execute(
+                    """
+                    UPDATE sessions SET name = ?, name_source = ?
+                    WHERE session_key = ?
+                    """,
+                    (
+                        provider_name,
+                        "provider" if provider_name is not None else "unknown",
+                        session_key,
+                    ),
+                )
+            else:
+                connection.execute(
+                    """
+                    UPDATE sessions SET name = ?, name_source = 'curated'
+                    WHERE session_key = ?
+                    """,
+                    (normalized, session_key),
+                )
+            updated = connection.execute(
+                "SELECT * FROM sessions WHERE session_key = ?", (session_key,)
+            ).fetchone()
+        result = _row_dict(updated)
+        assert result is not None
+        return result
+
+    def set_session_purpose(
+        self,
+        session_key: str,
+        *,
+        host_id: str,
+        purpose: str | None,
+    ) -> dict[str, Any]:
+        """Set or clear one explicit purpose without changing runtime truth."""
+
+        self._validate_local_session_identity(host_id, session_key)
+        normalized = (
+            None
+            if purpose is None
+            else _normalize_curation_text(purpose, "session purpose", maximum=4096)
+        )
+        with self.transaction(immediate=True) as connection:
+            self._local_session_row(
+                connection, host_id=host_id, session_key=session_key
+            )
+            connection.execute(
+                "UPDATE sessions SET purpose = ? WHERE session_key = ?",
+                (normalized, session_key),
+            )
+            updated = connection.execute(
+                "SELECT * FROM sessions WHERE session_key = ?", (session_key,)
+            ).fetchone()
+        result = _row_dict(updated)
+        assert result is not None
+        return result
+
+    def set_session_pinned(
+        self,
+        session_key: str,
+        *,
+        host_id: str,
+        pinned: bool,
+    ) -> dict[str, Any]:
+        """Set one local pin without changing provider observation clocks."""
+
+        self._validate_local_session_identity(host_id, session_key)
+        if not isinstance(pinned, bool):
+            raise StorageError("pinned must be boolean")
+        with self.transaction(immediate=True) as connection:
+            self._local_session_row(
+                connection, host_id=host_id, session_key=session_key
+            )
+            connection.execute(
+                "UPDATE sessions SET pinned = ? WHERE session_key = ?",
+                (int(pinned), session_key),
+            )
+            updated = connection.execute(
+                "SELECT * FROM sessions WHERE session_key = ?", (session_key,)
+            ).fetchone()
+        result = _row_dict(updated)
+        assert result is not None
+        return result
+
+    def clear_session_wrapped(
+        self,
+        session_key: str,
+        *,
+        host_id: str,
+    ) -> dict[str, Any]:
+        """Clear only the wrapping marker after successful re-entry."""
+
+        self._validate_local_session_identity(host_id, session_key)
+        with self.transaction(immediate=True) as connection:
+            self._local_session_row(
+                connection, host_id=host_id, session_key=session_key
+            )
+            connection.execute(
+                "UPDATE sessions SET wrapped_at = NULL WHERE session_key = ?",
+                (session_key,),
+            )
+            updated = connection.execute(
+                "SELECT * FROM sessions WHERE session_key = ?", (session_key,)
+            ).fetchone()
+        result = _row_dict(updated)
+        assert result is not None
+        return result
+
     def read_host_snapshot(
         self,
         host_id: str,
@@ -1834,6 +2186,98 @@ class Registry:
             surfaces=surfaces,
         )
 
+    @staticmethod
+    def _append_handoff_row(
+        connection: sqlite3.Connection,
+        *,
+        session_key: str,
+        summary: str,
+        source: str,
+        source_host_id: str,
+        next_action: str,
+        handoff_id: str,
+        sequence: int | None,
+        created_at: int | None,
+        content_hash: str | None,
+    ) -> dict[str, Any]:
+        existing = connection.execute(
+            "SELECT * FROM handoffs WHERE handoff_id = ?", (handoff_id,)
+        ).fetchone()
+        if existing is not None:
+            timestamp = (
+                int(existing["created_at"]) if created_at is None else created_at
+            )
+            requested_sequence = (
+                int(existing["sequence"]) if sequence is None else sequence
+            )
+            calculated_hash = handoff_content_hash(summary, next_action)
+            if content_hash is not None and content_hash != calculated_hash:
+                raise IdentityConflict(
+                    "handoff content hash does not match canonical content"
+                )
+            immutable = {
+                "session_key": session_key,
+                "sequence": requested_sequence,
+                "summary": summary,
+                "next_action": next_action,
+                "source": source,
+                "source_host_id": source_host_id,
+                "created_at": timestamp,
+                "content_hash": calculated_hash,
+            }
+            if any(existing[field] != value for field, value in immutable.items()):
+                raise IdentityConflict(
+                    f"handoff ID {handoff_id!r} was reused for different content"
+                )
+            return dict(existing)
+
+        timestamp = now_ms() if created_at is None else created_at
+        if sequence is None:
+            sequence = int(
+                connection.execute(
+                    """
+                    SELECT COALESCE(MAX(sequence), 0) + 1
+                    FROM handoffs WHERE session_key = ?
+                    """,
+                    (session_key,),
+                ).fetchone()[0]
+            )
+        calculated_hash = handoff_content_hash(summary, next_action)
+        if content_hash is not None and content_hash != calculated_hash:
+            raise IdentityConflict(
+                "handoff content hash does not match canonical content"
+            )
+
+        connection.execute(
+            """
+            INSERT INTO handoffs(
+                handoff_id, session_key, sequence, summary, next_action,
+                source, source_host_id, created_at, content_hash
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                handoff_id,
+                session_key,
+                sequence,
+                summary,
+                next_action,
+                source,
+                source_host_id,
+                timestamp,
+                calculated_hash,
+            ),
+        )
+        connection.execute(
+            "UPDATE sessions SET latest_handoff_id = ? WHERE session_key = ?",
+            (handoff_id, session_key),
+        )
+        row = connection.execute(
+            "SELECT * FROM handoffs WHERE handoff_id = ?", (handoff_id,)
+        ).fetchone()
+        result = _row_dict(row)
+        assert result is not None
+        return result
+
     def append_handoff(
         self,
         *,
@@ -1849,91 +2293,83 @@ class Registry:
     ) -> dict[str, Any]:
         summary = normalize_handoff_text(summary, "summary")
         next_action = normalize_handoff_text(next_action, "next_action")
-        handoff_id = handoff_id or str(uuid.uuid4())
-        handoff_id = _canonical_uuid_id(handoff_id, HandoffId, "handoff_id")
+        handoff_id = _canonical_uuid_id(
+            handoff_id or str(uuid.uuid4()), HandoffId, "handoff_id"
+        )
         _canonical_session_key(session_key)
         _canonical_host_id(source_host_id)
 
         with self.transaction(immediate=True) as connection:
+            return self._append_handoff_row(
+                connection,
+                session_key=session_key,
+                summary=summary,
+                source=source,
+                source_host_id=source_host_id,
+                next_action=next_action,
+                handoff_id=handoff_id,
+                sequence=sequence,
+                created_at=created_at,
+                content_hash=content_hash,
+            )
+
+    def curate_session_handoff(
+        self,
+        session_key: str,
+        *,
+        host_id: str,
+        summary: str,
+        next_action: str,
+        handoff_id: str | None = None,
+        wrap: bool = False,
+        observed_at: int | None = None,
+    ) -> SessionCurationResult:
+        """Append a local user handoff and optionally wrap in one transaction."""
+
+        self._validate_local_session_identity(host_id, session_key)
+        summary = normalize_handoff_text(summary, "summary")
+        next_action = normalize_handoff_text(next_action, "next_action")
+        handoff_id = _canonical_uuid_id(
+            handoff_id or str(uuid.uuid4()), HandoffId, "handoff_id"
+        )
+        if not isinstance(wrap, bool):
+            raise StorageError("wrap must be boolean")
+        timestamp = (
+            now_ms()
+            if observed_at is None
+            else _nonnegative_integer(observed_at, "observed_at")
+        )
+        with self.transaction(immediate=True) as connection:
+            self._local_session_row(
+                connection, host_id=host_id, session_key=session_key
+            )
             existing = connection.execute(
-                "SELECT * FROM handoffs WHERE handoff_id = ?", (handoff_id,)
+                "SELECT created_at FROM handoffs WHERE handoff_id = ?",
+                (handoff_id,),
             ).fetchone()
-            if existing is not None:
-                timestamp = (
-                    int(existing["created_at"]) if created_at is None else created_at
-                )
-                requested_sequence = (
-                    int(existing["sequence"]) if sequence is None else sequence
-                )
-                calculated_hash = handoff_content_hash(summary, next_action)
-                if content_hash is not None and content_hash != calculated_hash:
-                    raise IdentityConflict(
-                        "handoff content hash does not match canonical content"
-                    )
-                immutable = {
-                    "session_key": session_key,
-                    "sequence": requested_sequence,
-                    "summary": summary,
-                    "next_action": next_action,
-                    "source": source,
-                    "source_host_id": source_host_id,
-                    "created_at": timestamp,
-                    "content_hash": calculated_hash,
-                }
-                if any(existing[field] != value for field, value in immutable.items()):
-                    raise IdentityConflict(
-                        f"handoff ID {handoff_id!r} was reused for different content"
-                    )
-                return dict(existing)
-
-            timestamp = now_ms() if created_at is None else created_at
-            if sequence is None:
-                sequence = int(
-                    connection.execute(
-                        """
-                        SELECT COALESCE(MAX(sequence), 0) + 1
-                        FROM handoffs WHERE session_key = ?
-                        """,
-                        (session_key,),
-                    ).fetchone()[0]
-                )
-            calculated_hash = handoff_content_hash(summary, next_action)
-            if content_hash is not None and content_hash != calculated_hash:
-                raise IdentityConflict(
-                    "handoff content hash does not match canonical content"
-                )
-
-            connection.execute(
-                """
-                INSERT INTO handoffs(
-                    handoff_id, session_key, sequence, summary, next_action,
-                    source, source_host_id, created_at, content_hash
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    handoff_id,
-                    session_key,
-                    sequence,
-                    summary,
-                    next_action,
-                    source,
-                    source_host_id,
-                    timestamp,
-                    calculated_hash,
-                ),
+            handoff = self._append_handoff_row(
+                connection,
+                session_key=session_key,
+                summary=summary,
+                source="user",
+                source_host_id=host_id,
+                next_action=next_action,
+                handoff_id=handoff_id,
+                sequence=None,
+                created_at=None if existing is not None else timestamp,
+                content_hash=None,
             )
-            connection.execute(
-                """
-                UPDATE sessions SET latest_handoff_id = ? WHERE session_key = ?
-                """,
-                (handoff_id, session_key),
-            )
-            row = connection.execute(
-                "SELECT * FROM handoffs WHERE handoff_id = ?", (handoff_id,)
+            if wrap and existing is None:
+                connection.execute(
+                    "UPDATE sessions SET wrapped_at = ? WHERE session_key = ?",
+                    (handoff["created_at"], session_key),
+                )
+            session = connection.execute(
+                "SELECT * FROM sessions WHERE session_key = ?", (session_key,)
             ).fetchone()
-        result = _row_dict(row)
+        result = _row_dict(session)
         assert result is not None
-        return result
+        return SessionCurationResult(result, handoff)
 
     def reserve_launch(
         self,
@@ -1945,14 +2381,15 @@ class Registry:
         expires_at: int,
         launch_id: str | None = None,
         created_at: int | None = None,
+        source_session_key: str | None = None,
     ) -> ReservationResult:
         """Reserve a launch under ``BEGIN IMMEDIATE`` with retry idempotency."""
 
+        request = dict(request)
         capability_hash = _require_hash(capability_hash, "capability_hash")
         if not isinstance(lease_owner, str) or not lease_owner.strip():
             raise StorageError("lease_owner must be a non-empty string")
         _reject_controls(lease_owner, "lease_owner")
-        fingerprint = launch_request_fingerprint(request)
         _canonical_host_id(request["host_id"])
         _canonical_provider(request["provider"])
         request_id = _canonical_plain_uuid(request_id, "request_id")
@@ -1970,6 +2407,12 @@ class Registry:
         target_session_key = request.get("target_session_key")
         if target_session_key is not None:
             _canonical_session_key(target_session_key)
+        if source_session_key is not None:
+            source_session_key = str(_canonical_session_key(source_session_key))
+            if request["action"] != "new":
+                raise StorageError(
+                    "source_session_key is valid only for a new continuation"
+                )
         _reject_controls(request.get("cwd"), "cwd")
         if request["action"] == "manage" and any(
             request.get(field) is not None
@@ -2004,6 +2447,76 @@ class Registry:
                 """,
                 (request["host_id"], request_id),
             ).fetchone()
+            if source_session_key is not None:
+                if existing_request is not None:
+                    exact_handoff_id = existing_request["source_handoff_id"]
+                    handoff = connection.execute(
+                        """
+                        SELECT * FROM handoffs
+                        WHERE handoff_id = ? AND session_key = ?
+                        """,
+                        (exact_handoff_id, source_session_key),
+                    ).fetchone()
+                    if handoff is None:
+                        raise RequestConflict(
+                            "request ID continuation source does not match"
+                        )
+                    request["source_handoff_id"] = exact_handoff_id
+                else:
+                    source = self._local_session_row(
+                        connection,
+                        host_id=request["host_id"],
+                        session_key=source_session_key,
+                    )
+                    exact_handoff_id = source["latest_handoff_id"]
+                    if exact_handoff_id is None:
+                        raise ContinuationError(
+                            "continuation_handoff_missing",
+                            "The source session has no explicit handoff.",
+                        )
+                    handoff = connection.execute(
+                        """
+                        SELECT * FROM handoffs
+                        WHERE handoff_id = ? AND session_key = ?
+                        """,
+                        (exact_handoff_id, source_session_key),
+                    ).fetchone()
+                    if handoff is None:
+                        raise ContinuationError(
+                            "continuation_handoff_inconsistent",
+                            "The source session's latest handoff is inconsistent.",
+                        )
+                    request["source_handoff_id"] = exact_handoff_id
+            if (
+                request.get("source_handoff_id") is not None
+                and existing_request is None
+            ):
+                handoff = connection.execute(
+                    "SELECT * FROM handoffs WHERE handoff_id = ?",
+                    (request["source_handoff_id"],),
+                ).fetchone()
+                if handoff is None:
+                    raise ContinuationError(
+                        "continuation_handoff_not_found",
+                        "The selected handoff is not retained.",
+                    )
+                source = self._local_session_row(
+                    connection,
+                    host_id=request["host_id"],
+                    session_key=str(handoff["session_key"]),
+                )
+                if handoff["source"] == "imported":
+                    raise ContinuationError(
+                        "continuation_remote_not_supported",
+                        "Imported handoff continuation remains a remote-host feature.",
+                    )
+                for field in ("project_id", "location_id", "cwd"):
+                    if source[field] != request.get(field):
+                        raise ContinuationError(
+                            "continuation_source_changed",
+                            "The source session's project location changed.",
+                        )
+            fingerprint = launch_request_fingerprint(request)
             if existing_request is not None:
                 if existing_request["request_fingerprint"] != fingerprint:
                     raise RequestConflict(
@@ -2325,6 +2838,8 @@ class Registry:
                     metadata_source="launch",
                     continued_from_handoff_id=launch["source_handoff_id"],
                 )
+            elif launch["action"] in {"resume", "attach", "history"}:
+                observed_session["wrapped_at"] = None
             stored_session = self._upsert_session_row(connection, observed_session)
 
             expected_session_key = launch["target_session_key"]
@@ -3825,6 +4340,17 @@ class Registry:
             ).fetchone()
             assert refreshed is not None
             session = refreshed
+        elif launch["action"] in {"resume", "attach", "history"}:
+            connection.execute(
+                "UPDATE sessions SET wrapped_at = NULL WHERE session_key = ?",
+                (session["session_key"],),
+            )
+            refreshed = connection.execute(
+                "SELECT * FROM sessions WHERE session_key = ?",
+                (session["session_key"],),
+            ).fetchone()
+            assert refreshed is not None
+            session = refreshed
         cls._bind_surface_row(
             connection,
             surface,
@@ -4607,9 +5133,12 @@ __all__ = [
     "CURRENT_SCHEMA_VERSION",
     "DEFAULT_BUSY_TIMEOUT_MS",
     "DEFAULT_EVENT_LIMIT",
+    "DEFAULT_HANDOFF_LIMIT",
     "DEFAULT_LIVENESS_OBSERVATION_LIMIT",
     "DEFAULT_SNAPSHOT_RUNTIME_LIMIT",
     "DEFAULT_SNAPSHOT_SESSION_LIMIT",
+    "ContinuationError",
+    "ContinuationSource",
     "HookIngestionResult",
     "HostSnapshotRows",
     "IdentityConflict",
@@ -4620,6 +5149,8 @@ __all__ = [
     "RequestConflict",
     "ReservationResult",
     "RuntimeObservationApplyResult",
+    "SessionCurationResult",
+    "SessionDetailRows",
     "StorageError",
     "connect_database",
     "handoff_content_hash",

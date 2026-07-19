@@ -536,9 +536,8 @@ class TmuxController:
             raise TmuxError("tmux returned non-UTF-8 client metadata") from error
         return clients.count(client) == 1
 
-    def current_client(self, environment: Mapping[str, str]) -> str | None:
-        """Resolve only the tmux client represented by the inherited context."""
-
+    @staticmethod
+    def _inherited_socket(environment: Mapping[str, str]) -> str | None:
         raw_tmux = environment.get("TMUX")
         if raw_tmux is None:
             return None
@@ -551,9 +550,31 @@ class TmuxController:
             or not Path(parts[0]).is_absolute()
         ):
             raise TmuxError("TMUX does not identify one bounded local server")
-        result = self._run(
-            self._tmux(parts[0], "display-message", "-p", "#{client_tty}")
-        )
+        return parts[0]
+
+    def current_pane(
+        self, environment: Mapping[str, str]
+    ) -> TmuxSurfaceObservation | None:
+        """Inspect only the exact pane inherited by the calling process."""
+
+        socket = self._inherited_socket(environment)
+        pane = environment.get("TMUX_PANE")
+        if socket is None and pane is None:
+            return None
+        if socket is None or pane is None:
+            raise TmuxError("TMUX and TMUX_PANE must identify the same context")
+        pane = _bounded_text(pane, "TMUX_PANE", maximum=256)
+        if not pane.startswith("%") or not pane[1:].isdigit():
+            raise TmuxError("TMUX_PANE does not use canonical pane ID syntax")
+        return self.inspect_pane(socket, pane)
+
+    def current_client(self, environment: Mapping[str, str]) -> str | None:
+        """Resolve only the tmux client represented by the inherited context."""
+
+        socket = self._inherited_socket(environment)
+        if socket is None:
+            return None
+        result = self._run(self._tmux(socket, "display-message", "-p", "#{client_tty}"))
         if not result.stdout.endswith(b"\n") or b"\n" in result.stdout[:-1]:
             raise TmuxError("tmux returned an invalid current client")
         try:

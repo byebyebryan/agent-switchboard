@@ -17,6 +17,7 @@ from .domain import (
     Attachment,
     BindingConfidence,
     HandoffId,
+    HandoffSource,
     HostId,
     LaunchId,
     LocationId,
@@ -31,6 +32,8 @@ from .domain import (
     SurfaceRole,
     Transport,
     ValidationError,
+    handoff_content_hash,
+    normalize_handoff_text,
 )
 
 SCHEMA_VERSION = 1
@@ -41,6 +44,7 @@ MAX_JSON_STRING_LENGTH = 64 * 1024
 MAX_JSON_ARRAY_ITEMS = 100_000
 MAX_JSON_OBJECT_KEYS = 256
 MAX_SNAPSHOT_RECORDS = 100_000
+MAX_SESSION_DETAIL_HANDOFFS = 100
 
 _SENSITIVE_KEY_PARTS = (
     "accesskey",
@@ -209,8 +213,14 @@ def _boolean(value: object, path: str) -> bool:
     return value
 
 
-def _versions(table: Mapping[str, Any]) -> None:
-    safe_table = _json_value(table, "envelope")
+def _versions(
+    table: Mapping[str, Any], *, allow_explicit_multiline: bool = False
+) -> None:
+    safe_table = _json_value(
+        table,
+        "envelope",
+        allow_explicit_multiline=allow_explicit_multiline,
+    )
     encoded = json.dumps(
         safe_table,
         ensure_ascii=False,
@@ -267,7 +277,13 @@ def _reject_sensitive_key(value: str, path: str) -> None:
         raise ProtocolError(f"{path} contains forbidden token field {value!r}")
 
 
-def _json_value(value: object, path: str, *, depth: int = 0) -> JsonValue:
+def _json_value(
+    value: object,
+    path: str,
+    *,
+    depth: int = 0,
+    allow_explicit_multiline: bool = False,
+) -> JsonValue:
     if depth > MAX_JSON_DEPTH:
         raise ProtocolError(f"{path} exceeds maximum JSON nesting depth")
     if value is None or isinstance(value, bool):
@@ -275,7 +291,11 @@ def _json_value(value: object, path: str, *, depth: int = 0) -> JsonValue:
     if isinstance(value, str):
         if len(value) > MAX_JSON_STRING_LENGTH:
             raise ProtocolError(f"{path} contains an oversized string")
-        if any(unicodedata.category(character) == "Cc" for character in value):
+        if any(
+            unicodedata.category(character) == "Cc"
+            and not (allow_explicit_multiline and character in "\n\t")
+            for character in value
+        ):
             raise ProtocolError(f"{path} contains terminal control characters")
         return value
     if isinstance(value, int) and not isinstance(value, bool):
@@ -288,7 +308,12 @@ def _json_value(value: object, path: str, *, depth: int = 0) -> JsonValue:
         if len(value) > MAX_JSON_ARRAY_ITEMS:
             raise ProtocolError(f"{path} contains too many array items")
         return [
-            _json_value(item, f"{path}[{index}]", depth=depth + 1)
+            _json_value(
+                item,
+                f"{path}[{index}]",
+                depth=depth + 1,
+                allow_explicit_multiline=allow_explicit_multiline,
+            )
             for index, item in enumerate(value)
         ]
     if isinstance(value, Mapping) and all(isinstance(key, str) for key in value):
@@ -297,7 +322,12 @@ def _json_value(value: object, path: str, *, depth: int = 0) -> JsonValue:
         for key in value:
             _reject_sensitive_key(key, path)
         return {
-            key: _json_value(item, f"{path}.{key}", depth=depth + 1)
+            key: _json_value(
+                item,
+                f"{path}.{key}",
+                depth=depth + 1,
+                allow_explicit_multiline=allow_explicit_multiline,
+            )
             for key, item in value.items()
         }
     raise ProtocolError(f"{path} contains a non-JSON value")
@@ -337,8 +367,14 @@ def _envelope(payload: dict[str, JsonValue]) -> dict[str, JsonValue]:
     }
 
 
-def _dump(value: Mapping[str, JsonValue]) -> str:
-    safe_value = _json_value(value, "envelope")
+def _dump(
+    value: Mapping[str, JsonValue], *, allow_explicit_multiline: bool = False
+) -> str:
+    safe_value = _json_value(
+        value,
+        "envelope",
+        allow_explicit_multiline=allow_explicit_multiline,
+    )
     assert isinstance(safe_value, dict)
     return json.dumps(
         safe_value,
@@ -676,6 +712,66 @@ def _session_record(
     _optional_uuid(result, table, "continuedFromHandoffId", path, HandoffId)
     _optional_boolean(result, table, "pinned", path)
     return result
+
+
+def _handoff_record(
+    value: object,
+    path: str,
+    *,
+    expected_session_key: SessionKey,
+) -> dict[str, JsonValue]:
+    table = _object(value, path)
+    if len(table) > MAX_JSON_OBJECT_KEYS:
+        raise ProtocolError(f"{path} contains too many object keys")
+    multiline_fields = {"summary", "nextAction"}
+    for key, item in table.items():
+        _reject_sensitive_key(key, path)
+        if key not in multiline_fields:
+            _json_value(item, f"{path}.{key}")
+    session_key = _session_key(
+        _required(table, "sessionKey", path), f"{path}.sessionKey"
+    )
+    if session_key != expected_session_key:
+        raise ProtocolError(f"{path} belongs to a different session")
+    raw_summary = _required(table, "summary", path)
+    raw_next_action = _required(table, "nextAction", path)
+    try:
+        summary = normalize_handoff_text(raw_summary, "summary")
+        next_action = normalize_handoff_text(raw_next_action, "nextAction")
+    except ValidationError as exc:
+        raise ProtocolError(f"{path}: {exc}") from exc
+    if summary != raw_summary or next_action != raw_next_action:
+        raise ProtocolError(f"{path} handoff text is not canonically normalized")
+    try:
+        source = HandoffSource(
+            _string(_required(table, "source", path), f"{path}.source", maximum=32)
+        )
+    except ValueError as exc:
+        raise ProtocolError(f"{path}.source is not supported") from exc
+    content_hash = _hash(_required(table, "contentHash", path), f"{path}.contentHash")
+    if content_hash != handoff_content_hash(summary, next_action):
+        raise ProtocolError(f"{path}.contentHash does not match handoff content")
+    return {
+        "handoffId": _uuid_text(
+            _required(table, "handoffId", path),
+            f"{path}.handoffId",
+            HandoffId,
+        ),
+        "sessionKey": str(session_key),
+        "sequence": _positive_integer(
+            _required(table, "sequence", path), f"{path}.sequence"
+        ),
+        "summary": summary,
+        "nextAction": next_action,
+        "source": source,
+        "sourceHostId": _uuid_text(
+            _required(table, "sourceHostId", path),
+            f"{path}.sourceHostId",
+            HostId,
+        ),
+        "createdAt": _integer(_required(table, "createdAt", path), f"{path}.createdAt"),
+        "contentHash": content_hash,
+    }
 
 
 def _runtime_record(
@@ -1429,6 +1525,107 @@ class SessionActionEnvelope:
 
     def to_json(self) -> str:
         return _dump(self.to_dict())
+
+
+@dataclass(frozen=True, slots=True)
+class SessionDetailEnvelope:
+    """One bounded local session projection and its newest immutable handoffs."""
+
+    generated_at: int
+    session: dict[str, JsonValue]
+    handoffs: tuple[dict[str, JsonValue], ...] = ()
+    handoffs_truncated: bool = False
+
+    @classmethod
+    def from_dict(cls, value: object) -> Self:
+        table = _object(value, "envelope")
+        _versions(table, allow_explicit_multiline=True)
+        known_envelope_fields = {
+            "schemaVersion",
+            "protocolVersion",
+            "generatedAt",
+            "session",
+            "handoffs",
+            "handoffsTruncated",
+        }
+        for key, item in table.items():
+            if key not in known_envelope_fields:
+                _json_value(item, f"envelope.{key}")
+        raw_session = _object(
+            _required(table, "session", "envelope"), "envelope.session"
+        )
+        host_id = _uuid(
+            _required(raw_session, "hostId", "envelope.session"),
+            "envelope.session.hostId",
+            HostId,
+        )
+        session = _session_record(
+            raw_session,
+            "envelope.session",
+            expected_host_id=host_id,
+        )
+        session_key = _session_key(session["sessionKey"], "envelope.session.sessionKey")
+        raw_handoffs = _array(
+            _required(table, "handoffs", "envelope"), "envelope.handoffs"
+        )
+        if len(raw_handoffs) > MAX_SESSION_DETAIL_HANDOFFS:
+            raise ProtocolError("envelope.handoffs contains too many records")
+        handoffs = tuple(
+            _handoff_record(
+                item,
+                f"envelope.handoffs[{index}]",
+                expected_session_key=session_key,
+            )
+            for index, item in enumerate(raw_handoffs)
+        )
+        handoff_ids = [str(item["handoffId"]) for item in handoffs]
+        sequences = [int(item["sequence"]) for item in handoffs]
+        if len(handoff_ids) != len(set(handoff_ids)):
+            raise ProtocolError("envelope.handoffs contains duplicate handoff IDs")
+        if len(sequences) != len(set(sequences)):
+            raise ProtocolError("envelope.handoffs contains duplicate sequences")
+        if sequences != sorted(sequences, reverse=True):
+            raise ProtocolError(
+                "envelope.handoffs must use newest-first sequence order"
+            )
+        latest_handoff_id = session.get("latestHandoffId")
+        if handoffs and latest_handoff_id != handoffs[0]["handoffId"]:
+            raise ProtocolError("envelope latest handoff pointer is inconsistent")
+        if not handoffs and latest_handoff_id is not None:
+            raise ProtocolError("envelope omits the retained latest handoff")
+        return cls(
+            generated_at=_integer(
+                _required(table, "generatedAt", "envelope"),
+                "envelope.generatedAt",
+            ),
+            session=session,
+            handoffs=handoffs,
+            handoffs_truncated=_boolean(
+                _required(table, "handoffsTruncated", "envelope"),
+                "envelope.handoffsTruncated",
+            ),
+        )
+
+    @classmethod
+    def from_json(cls, raw: str | bytes | bytearray) -> Self:
+        return cls.from_dict(_decode(raw))
+
+    def _raw_dict(self) -> dict[str, JsonValue]:
+        return _envelope(
+            {
+                "generatedAt": self.generated_at,
+                "session": self.session,
+                "handoffs": list(self.handoffs),
+                "handoffsTruncated": self.handoffs_truncated,
+            }
+        )
+
+    def to_dict(self) -> dict[str, JsonValue]:
+        normalized = type(self).from_dict(self._raw_dict())
+        return normalized._raw_dict()
+
+    def to_json(self) -> str:
+        return _dump(self.to_dict(), allow_explicit_multiline=True)
 
 
 @dataclass(frozen=True, slots=True)

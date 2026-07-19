@@ -227,6 +227,32 @@ def test_current_client_uses_only_the_inherited_tmux_server() -> None:
             controller.current_client({"TMUX": invalid})
 
 
+def test_current_pane_uses_only_the_inherited_exact_pane() -> None:
+    fake = FakeTmux()
+    fake.metadata.update(
+        {
+            "@agent_switchboard_surface_id": "surface-id",
+            "@agent_switchboard_session_key": "host:codex:session",
+            "@agent_switchboard_provider": "codex",
+            "@agent_switchboard_launch_id": None,
+            "@agent_switchboard_surface_role": "session",
+        }
+    )
+    controller = TmuxController(runner=fake, systemd_run=None)
+
+    assert controller.current_pane({}) is None
+    observed = controller.current_pane({"TMUX": f"{SOCKET},123,0", "TMUX_PANE": "%7"})
+    assert observed is not None
+    assert observed.locator == LOCATOR
+    assert observed.metadata.session_key == "host:codex:session"
+    assert fake.calls[-1][0][-3:] == ["-t", "%7", fake.calls[-1][0][-1]]
+
+    with pytest.raises(TmuxError, match="same context"):
+        controller.current_pane({"TMUX": f"{SOCKET},123,0"})
+    with pytest.raises(TmuxError, match="canonical pane"):
+        controller.current_pane({"TMUX": f"{SOCKET},123,0", "TMUX_PANE": "7"})
+
+
 def test_provider_exit_is_sent_only_to_the_revalidated_exact_pane() -> None:
     fake = FakeTmux()
     controller = TmuxController(runner=fake, systemd_run=None)
