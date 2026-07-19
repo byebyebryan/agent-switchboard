@@ -2,8 +2,9 @@
 
 Date: 2026-07-18
 
-Status: known-session resume and new-session increments implemented with
-provider/bridge live acceptance; live compositor focus/dedup acceptance remains
+Status: complete for local Claude known-session resume, new sessions, native
+history selection, graceful stop, and DMS parity; live compositor focus/dedup
+acceptance remains a cross-cutting desktop caveat
 
 ## Decision and boundary
 
@@ -24,7 +25,7 @@ Every managed Claude process additionally inherits
 even when the durable user setting is already correct. tmux, not a Claude
 daemon, keeps a detached interactive process alive.
 
-The first increment is deliberately smaller than all of Phase 3C:
+Phase 3C was delivered in four contract-locked increments:
 
 - open, focus, switch, attach, adopt, or resume a hook-known local Claude
   session;
@@ -33,8 +34,12 @@ The first increment is deliberately smaller than all of Phase 3C:
   reconciliation passes;
 - project known Claude sessions and capability truth through the separate DMS
   adapter, then route selection through the same public `prepare-open` action;
-- keep project-aware new Claude sessions, the unbound native history picker,
-  graceful stop, and remote hosts for later increments.
+- add project-aware new Claude sessions through the same unbound surface and
+  hook-binding lifecycle;
+- expose Claude's native history picker as exact `claude --resume` in an
+  unbound managed surface, without projecting picker rows;
+- stop only revalidated launch-owned Claude runtimes through orderly `/exit`
+  and a bounded exact-process-group fallback.
 
 No Phase 3C code may add a Claude daemon, call `claude agents`, parse private
 history, expose provider argv or tmux locators to DMS, or let DMS read the core
@@ -129,9 +134,8 @@ existing asynchronous opener. The bridge independently validates that key and
 delegates to `swbctl prepare-open`; QML still receives no provider argv, cwd,
 tmux locator, compositor ID, or terminal command.
 
-The legacy `agentSessions` plugin remains installed as the remote and untouched
-Claude-history fallback. Phase 3C does not disable or modify it during this
-increment.
+The legacy `agentSessions` plugin remains installed only as the remote-host
+fallback. Phase 3C does not disable or modify it.
 
 ## Second increment: new Claude session
 
@@ -154,24 +158,28 @@ lease revalidation, provider-attributed request identity, hook binding, DMS
 projection, provider-specific search/display, and shell-free action plumbing.
 Live start/bind/reopen evidence is retained below.
 
-## Later Phase 3C increments
+## Final Phase 3C increments
 
 ### Native history picker
 
-Add an explicit `Open Claude history` action that creates an unbound managed
-surface and execs `claude --resume`. The surface remains unbound until the
-picker selection produces a `SessionStart` UUID. Cancellation retires the
-surface without manufacturing a session. No picker rows or transcript metadata
-cross the core or DMS boundary.
+The explicit `Open Claude history` action creates an unbound managed surface
+and execs exact `claude --resume`. The surface remains unbound until picker
+selection produces a `SessionStart` UUID. Complete reconciliation retires a
+cancelled picker surface and records `surface_terminated` without manufacturing
+a session. No picker rows or transcript metadata cross the core or DMS
+boundary.
 
 ### Graceful stop
 
-Add an explicit stop command for a validated launch-owned Claude surface. It
-requests orderly interactive exit, waits a bounded grace period, and may then
-terminate only the launch-owned process group and surface. It never calls
+`swbctl stop-session` accepts one canonical Claude session key and returns a
+versioned action with `stopped`, `already_stopped`, or `blocked` status. It
+requires a confirmed current surface, matching bound launch, exact tmux
+identity, same-user PID and birth evidence, and a launch-owned process-group
+leader. It requests orderly interactive `/exit`, waits a bounded grace period,
+and may then terminate only that process group and surface. It never calls
 `claude rm`, deletes history, or kills an unmanaged process.
 
-## First-increment acceptance
+## Phase 3C acceptance
 
 Core acceptance requires:
 
@@ -180,6 +188,10 @@ Core acceptance requires:
 - existing-surface, live adoption, disabled-provider, duplicate-runtime,
   idempotency, request-conflict, lease-expiry, and attach revalidation tests for
   both providers where behavior is shared;
+- native history exact argv, selected-session binding, cancelled-surface cleanup,
+  and incomplete-scan preservation tests;
+- graceful stop idempotency, exact `/exit`, ownership disagreement, and bounded
+  process-group fallback tests; and
 - the full Python, Ruff, package, distribution, and diff gates.
 
 DMS acceptance requires:
@@ -190,18 +202,21 @@ DMS acceptance requires:
   providers remain rejected;
 - JavaScript validation, display, search, and selection behavior for Claude;
 - unchanged Codex project launch behavior and public-process boundary tests;
+- provider-native history and conservative `canStop` launcher projection, fixed
+  argv, action-envelope validation, and desktop-helper tests; and
 - the full Python, JavaScript, QML formatting, Ruff, Pyright, and diff gates.
 
 Live acceptance should use an isolated Switchboard state and a controlled
 Claude session UUID. It must prove one waiting tmux surface, exact resume argv,
 hook binding, same-session reopen without a duplicate runtime or window, Agent
-View daemon absence, and restoration of the user's pre-test desktop state.
+View daemon absence, native picker selection and cancellation, exact safe stop,
+and restoration of the user's pre-test desktop state.
 
 ## Implementation checkpoint
 
-The first 2026-07-18 checkpoint passed 469 core tests. The new-session increment
-passes 473 core tests, Ruff format/lint, compilation, whitespace checks, and
-reproducible wheel/sdist verification. The DMS adapter passes 116 Python tests,
+The first 2026-07-18 checkpoint passed 469 core tests. The completed Phase 3C
+core passes 483 tests, Ruff format/lint, compilation, whitespace checks, and
+reproducible wheel/sdist verification. The DMS adapter passes 122 Python tests,
 21 deterministic JavaScript behavior groups, QML formatting, Ruff, Pyright,
 and whitespace checks.
 
@@ -259,6 +274,27 @@ The pre-existing active Claude session remained alive throughout. No prompt was
 submitted and no model turn was requested. The new-session exercise did not
 open a Ghostty window, so it adds provider/bridge and same-surface dedup evidence
 without changing the remaining live niri focus/same-window acceptance item.
+
+The installed final-increment exercise then completed the remaining provider
+and adapter lifecycle:
+
+- the DMS bridge projected the controlled confirmed Claude session with
+  `canStop=true` while keeping provider argv and tmux identity private;
+- the core stop action sent exact interactive `/exit`, retired the controlled
+  surface, removed only its Claude process, and left the pre-existing active
+  Claude process alive;
+- `prepare-history` opened Claude Code 2.1.214's native resume picker with Agent
+  View disabled, selection rebound the same controlled UUID to the new managed
+  surface, and stop remained idempotently scoped to that launch-owned runtime;
+- cancelling a second native picker retired its unbound surface and recorded a
+  failed history launch with `surface_terminated` rather than creating a
+  session; and
+- the isolated registry and tmux server were removed, while the test-owned
+  transcript was moved to the desktop trash.
+
+No prompt was submitted and no model turn was requested during this final
+exercise. The earlier live niri focus/same-window observation gap is not a
+Phase 3C provider or bridge blocker, but it remains explicitly unclaimed.
 
 ## Stop conditions
 

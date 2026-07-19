@@ -12,7 +12,8 @@ status metadata, then hands the user back to the unmodified provider UI.
 
 The current checkout contains the Phase 1 core, the local Codex and Claude
 provider foundations from Phase 2, Phase 3A existing-session presentation, and
-the managed-tmux paths for new and existing Codex and Claude sessions:
+the complete local managed-tmux paths for new, existing, and history-selected
+Codex and Claude sessions:
 
 - Python package and finalized `swbctl` executable name
 - stable host identity and strict TOML configuration
@@ -47,16 +48,23 @@ the managed-tmux paths for new and existing Codex and Claude sessions:
 - atomic project/location/provider resolution and new-session preparation for
   Codex or Claude with an unbound waiting surface, attach-before-start
   bootstrap, exact hook/live identity binding, and same-request idempotency
+- provider-native Claude history selection through an unbound managed surface
+  running exact `claude --resume`, with hook binding after selection and
+  fail-closed surface retirement after cancellation
+- ownership-safe Claude stop actions that request exact interactive `/exit`,
+  wait a bounded grace period, and restrict fallback termination to the
+  revalidated launch-owned process group and tmux surface
 - versioned focus, switch, attach, and blocked presentation plans consumed by
   the separate DMS integration
 - unit, migration, concurrency, provider, protocol, and packaging tests
 
 Phase 3B implementation and live acceptance are complete in the core and
 separate DMS adapter. Phase 2B implementation, Agent View cutover, and live
-acceptance are also complete. Phase 3C now reuses the Codex managed-tmux
-lifecycle for known and new Claude sessions and projects both paths through the
-separate DMS adapter. Its contract, verification, and remaining live-acceptance
-caveats are recorded in [`docs/phase-3c-plan.md`](docs/phase-3c-plan.md).
+acceptance are also complete. Phase 3C reuses the Codex managed-tmux lifecycle
+for known, new, and provider-history-selected Claude sessions, adds safe stop,
+and projects those actions through the separate DMS adapter. Its completed
+contract, verification, and remaining compositor-only acceptance caveat are
+recorded in [`docs/phase-3c-plan.md`](docs/phase-3c-plan.md).
 The searchable TUI remains Phase 4 and remote SSH transport remains Phase 5. See
 [the design](docs/design.md), the
 [Phase 1 validation record](docs/phase-1-validation.md), and the
@@ -86,6 +94,9 @@ swbctl prepare-open <session-key> --request-id <uuid> \
 swbctl prepare-new --project <project-id> --location <location-id> \
   --provider codex|claude --request-id <uuid> \
   --can-focus-desktop --can-launch-terminal --json
+swbctl prepare-history --project <project-id> --location <location-id> \
+  --request-id <uuid> --can-focus-desktop --can-launch-terminal --json
+swbctl stop-session <claude-session-key> --json
 swbctl select-surface <surface-id> --client <tmux-client-id>
 swbctl attach-surface <surface-id>
 ```
@@ -145,6 +156,22 @@ location, working directory, transport, and surface immediately before `exec`,
 then renews a bounded five-minute identity binding grace; the first exact
 lifecycle hook or complete live tmux/process correlation atomically assigns the
 provider UUID and confirms the session/surface binding.
+
+`prepare-history` follows the same attach-before-start lifecycle but launches
+Claude's native `claude --resume` picker without supplying or discovering a
+session UUID. The picker remains entirely provider-owned. A selected
+conversation binds through its exact `SessionStart` UUID; a cancelled picker is
+detected by complete tmux reconciliation, which retires the unbound surface and
+fails the launch without manufacturing a session.
+
+`stop-session` is intentionally narrower than a generic process killer. It
+first performs live reconciliation and requires one confirmed active local
+Claude surface whose current session, bound launch, exact tmux locator, process
+birth, UID, and process-group ownership all agree. It sends an exact
+interactive `/exit`, waits a bounded grace period, and only then may signal that
+same launch-owned process group before retiring the exact surface. Already
+stopped sessions are idempotent; unmanaged or ambiguous runtimes return a
+structured blocked action. Claude history is never deleted.
 
 Snapshot assembly reads a bounded deterministic session candidate set and
 applies an actual UTF-8 byte budget. If sessions are omitted, the registry is

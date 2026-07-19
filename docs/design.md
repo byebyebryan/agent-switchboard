@@ -1867,7 +1867,7 @@ plan and owns niri/Ghostty execution. Exact evidence and the live acceptance
 result are recorded in
 [`docs/phase-3a-validation.md`](phase-3a-validation.md).
 
-The remaining Phase 3 work is split by dependency:
+Phase 3 delivery was split by dependency:
 
 #### Phase 3B: project-aware new local Codex sessions
 
@@ -1892,14 +1892,15 @@ acceptance evidence are recorded in
 - Extend DMS parity to Claude session and history actions only after Phase 2B
   hook capability and runtime identity are available.
 
-The known-resume and new-session portions are implemented in core and DMS. Both
-provider/bridge paths have live start, bind, reopen, and cleanup evidence.
-Native history, graceful stop, and the remaining compositor focus check stay
-open. Exact evidence is recorded in
+Phase 3C is implemented in core and DMS. Known resume, new session, native
+history selection, cancellation cleanup, and safe stop have installed live
+provider/bridge evidence. The remaining compositor focus observation gap is
+explicitly unclaimed but does not block the completed provider and adapter
+contract. Exact evidence is recorded in
 [`docs/phase-3c-plan.md`](phase-3c-plan.md).
 
-The existing DMS helper remains the Claude and remote fallback until these
-paths and, later, Phase 5 pass equivalent live tests.
+The existing legacy DMS helper remains only the remote fallback until Phase 5
+passes equivalent live tests.
 
 ### Phase 4: Curation, context, and TUI
 
@@ -2114,10 +2115,11 @@ Select before Phase 4. The framework must support asynchronous
 refresh, fuzzy filtering, deterministic model tests, status styling that does
 not rely on color alone, and clean suspension or tmux switching.
 
-### Legacy Claude history
+### Claude history discovery
 
-Keep the native history fallback unless Claude publishes a structured listing
-API. A one-time importer based on private files is out of scope by default.
+Keep the implemented provider-native history picker unless Claude publishes a
+structured listing API. A one-time importer based on private files is out of
+scope by default.
 
 ### Agent tool transport
 
