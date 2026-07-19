@@ -60,6 +60,9 @@ def test_readme_states_phase_and_license() -> None:
 def test_ci_smokes_wheel_and_source_distribution_installations() -> None:
     workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
     verifier = (ROOT / "scripts/verify_distributions.py").read_text(encoding="utf-8")
+    assert workflow.count("actions/checkout@v6") == 2
+    assert workflow.count("actions/setup-python@v6") == 2
+    assert "actions/upload-artifact@v7" in workflow
     assert "/tmp/switchboard-wheel-smoke/bin/python" in workflow
     assert "/tmp/switchboard-sdist-smoke/bin/python" in workflow
     assert "--no-deps /tmp/switchboard-build-a/*.tar.gz" in workflow
