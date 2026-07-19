@@ -19,7 +19,7 @@ from .domain import (
     StateConfidence,
     ValidationError,
 )
-from .protocol import ErrorScope, SnapshotEnvelope
+from .protocol import ErrorScope, SessionDetailEnvelope, SnapshotEnvelope
 from .state import DisplayStatus, HostReachability, SessionState, derive_display_status
 
 DEFAULT_STALE_AFTER_MS = 120_000
@@ -131,6 +131,9 @@ class SessionRow:
     last_activity_at: int | None
     recency_at: int
     pinned: bool
+    wrapped_at: int | None
+    latest_handoff_id: str | None
+    continued_from_handoff_id: str | None
     can_stop: bool
     issue_ids: tuple[str, ...]
     search_text: str = field(repr=False)
@@ -138,6 +141,68 @@ class SessionRow:
     @property
     def has_warnings(self) -> bool:
         return bool(self.issue_ids)
+
+
+@dataclass(frozen=True, slots=True)
+class HandoffView:
+    handoff_id: str
+    sequence: int
+    summary: str
+    next_action: str
+    source: str
+    created_at: int
+
+
+@dataclass(frozen=True, slots=True)
+class SessionDetailView:
+    session_key: str
+    generated_at: int
+    name: str | None
+    purpose: str | None
+    pinned: bool
+    wrapped_at: int | None
+    latest_handoff_id: str | None
+    continued_from_handoff_id: str | None
+    handoffs: tuple[HandoffView, ...]
+    handoffs_truncated: bool
+
+    @classmethod
+    def from_envelope(cls, envelope: SessionDetailEnvelope) -> Self:
+        session = envelope.session
+        return cls(
+            session_key=str(session["sessionKey"]),
+            generated_at=envelope.generated_at,
+            name=None if session.get("name") is None else str(session["name"]),
+            purpose=(
+                None if session.get("purpose") is None else str(session["purpose"])
+            ),
+            pinned=bool(session.get("pinned", False)),
+            wrapped_at=(
+                None if session.get("wrappedAt") is None else int(session["wrappedAt"])
+            ),
+            latest_handoff_id=(
+                None
+                if session.get("latestHandoffId") is None
+                else str(session["latestHandoffId"])
+            ),
+            continued_from_handoff_id=(
+                None
+                if session.get("continuedFromHandoffId") is None
+                else str(session["continuedFromHandoffId"])
+            ),
+            handoffs=tuple(
+                HandoffView(
+                    handoff_id=str(handoff["handoffId"]),
+                    sequence=int(handoff["sequence"]),
+                    summary=str(handoff["summary"]),
+                    next_action=str(handoff["nextAction"]),
+                    source=str(handoff["source"]),
+                    created_at=int(handoff["createdAt"]),
+                )
+                for handoff in envelope.handoffs
+            ),
+            handoffs_truncated=envelope.handoffs_truncated,
+        )
 
 
 def _enum_values[T: StrEnum](enum_type: type[T], values: object) -> frozenset[T]:
@@ -244,9 +309,11 @@ class FrontendModel:
     launch_targets: tuple[LaunchTarget, ...]
     capabilities: tuple[ProviderCapability, ...]
     issues: tuple[FrontendIssue, ...]
+    details: tuple[SessionDetailView, ...]
     filters: ViewFilters
     selected_session_key: str | None
     ignored_snapshot_count: int = 0
+    ignored_detail_count: int = 0
 
     @classmethod
     def from_snapshot(
@@ -266,7 +333,9 @@ class FrontendModel:
             selected_session_key=selected_session_key,
             previous_visible=(),
             frontend_issues=(),
+            details=(),
             ignored_snapshot_count=0,
+            ignored_detail_count=0,
         )
 
     @property
@@ -276,6 +345,17 @@ class FrontendModel:
                 row
                 for row in self.visible_rows
                 if row.session_key == self.selected_session_key
+            ),
+            None,
+        )
+
+    @property
+    def selected_detail(self) -> SessionDetailView | None:
+        return next(
+            (
+                detail
+                for detail in self.details
+                if detail.session_key == self.selected_session_key
             ),
             None,
         )
@@ -310,6 +390,48 @@ class FrontendModel:
         if not any(row.session_key == session_key for row in self.visible_rows):
             raise ValidationError("selected session is not visible")
         return replace(self, selected_session_key=session_key)
+
+    def with_detail(self, envelope: SessionDetailEnvelope) -> Self:
+        """Retain one validated detail without allowing an older result to win."""
+
+        detail = SessionDetailView.from_envelope(envelope)
+        if str(envelope.session["hostId"]) != self.host_id:
+            raise ValidationError("session detail belongs to another host")
+        if not any(row.session_key == detail.session_key for row in self.rows):
+            raise ValidationError("session detail is not present in the snapshot")
+        existing = next(
+            (item for item in self.details if item.session_key == detail.session_key),
+            None,
+        )
+        if existing is not None and detail.generated_at < existing.generated_at:
+            return replace(
+                self.with_frontend_error(
+                    "stale_detail_ignored",
+                    "An older session-detail result was ignored.",
+                    retryable=True,
+                    observed_at=max(self.generated_at, existing.generated_at),
+                ),
+                ignored_detail_count=self.ignored_detail_count + 1,
+            )
+        details = tuple(
+            sorted(
+                (
+                    *(
+                        item
+                        for item in self.details
+                        if item.session_key != detail.session_key
+                    ),
+                    detail,
+                ),
+                key=lambda item: item.session_key,
+            )
+        )
+        issues = tuple(
+            issue
+            for issue in self.issues
+            if issue.issue_id != "frontend:stale_detail_ignored"
+        )
+        return replace(self, details=details, issues=issues)
 
     def with_frontend_error(
         self,
@@ -380,7 +502,9 @@ class FrontendModel:
             selected_session_key=self.selected_session_key,
             previous_visible=self.visible_rows,
             frontend_issues=(),
+            details=self.details,
             ignored_snapshot_count=self.ignored_snapshot_count,
+            ignored_detail_count=self.ignored_detail_count,
         )
 
 
@@ -733,6 +857,21 @@ def _session_rows(
                 ),
                 recency_at=recency_at,
                 pinned=bool(session.get("pinned", False)),
+                wrapped_at=(
+                    None
+                    if session.get("wrappedAt") is None
+                    else int(session["wrappedAt"])
+                ),
+                latest_handoff_id=(
+                    None
+                    if session.get("latestHandoffId") is None
+                    else str(session["latestHandoffId"])
+                ),
+                continued_from_handoff_id=(
+                    None
+                    if session.get("continuedFromHandoffId") is None
+                    else str(session["continuedFromHandoffId"])
+                ),
                 can_stop=can_stop,
                 issue_ids=row_issue_ids,
                 search_text=_search_text(
@@ -776,7 +915,9 @@ def _build_model(
     selected_session_key: str | None,
     previous_visible: tuple[SessionRow, ...],
     frontend_issues: tuple[FrontendIssue, ...],
+    details: tuple[SessionDetailView, ...],
     ignored_snapshot_count: int,
+    ignored_detail_count: int,
 ) -> FrontendModel:
     stale_after_ms = _timestamp(stale_after_ms, "staleness interval")
     if stale_after_ms == 0:
@@ -790,6 +931,7 @@ def _build_model(
         visible,
         selected_session_key,
     )
+    retained_session_keys = {row.session_key for row in rows}
     return FrontendModel(
         generated_at=snapshot.generated_at,
         snapshot_age_ms=age,
@@ -802,9 +944,13 @@ def _build_model(
         launch_targets=_launch_targets(snapshot),
         capabilities=capabilities,
         issues=source_issues + frontend_issues,
+        details=tuple(
+            detail for detail in details if detail.session_key in retained_session_keys
+        ),
         filters=filters,
         selected_session_key=selected,
         ignored_snapshot_count=ignored_snapshot_count,
+        ignored_detail_count=ignored_detail_count,
     )
 
 
@@ -815,9 +961,11 @@ __all__ = [
     "CapabilityStatus",
     "FrontendIssue",
     "FrontendModel",
+    "HandoffView",
     "IssueSource",
     "LaunchTarget",
     "ProviderCapability",
+    "SessionDetailView",
     "SessionRow",
     "ViewFilters",
 ]

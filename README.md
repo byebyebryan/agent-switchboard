@@ -72,13 +72,16 @@ session/launch-target model in place. Its Textual view provides responsive
 session navigation, search, filters, details, issues, help, and refresh. It can
 open known sessions, start configured Codex or Claude sessions, enter Claude's
 native history picker, and request confirmed safe stop through the existing
-versioned core commands. Successful routing selects only the inherited tmux
-client or replaces the restored plain terminal with `attach-surface`; installed
-no-model acceptance for the provider contracts, plain terminal, dedicated tmux
-manager, popup, and complete action matrix is recorded in
-[`docs/phase-4a-plan.md`](docs/phase-4a-plan.md). The audited next increment
-exposes the already-seeded local curation, immutable handoff, wrapping, pinning,
-and exact continuation contracts; its boundary and sequence are recorded in
+versioned core commands. Phase 4B now adds on-demand immutable handoff detail,
+name and purpose editing, pinning, explicit handoff and wrap forms, and
+continuation from the selected exact latest handoff. Successful routing selects
+only the inherited tmux client or replaces the restored plain terminal with
+`attach-surface`; installed no-model acceptance for the Phase 4A provider
+contracts, plain terminal, dedicated tmux manager, popup, and complete action
+matrix is recorded in
+[`docs/phase-4a-plan.md`](docs/phase-4a-plan.md). The next loop is Phase 4B.5
+installed isolated acceptance; the implemented boundary and remaining sequence
+are recorded in
 [`docs/phase-4b-plan.md`](docs/phase-4b-plan.md). Agent-authorized tools and
 memory remain Phase 4C, while remote SSH transport remains Phase 5. See
 [the design](docs/design.md), the
@@ -106,6 +109,7 @@ swbctl session purpose <session-key> <purpose> --json
 swbctl session pin <session-key> [--off] --json
 swbctl session handoff <session-key> --json-stdin --json
 swbctl session wrap <session-key> --json-stdin --json
+swbctl tui
 swbctl hooks install --provider codex --dry-run
 swbctl hooks uninstall --provider codex --dry-run
 swbctl hooks install --provider claude --dry-run
@@ -217,6 +221,13 @@ assign immutable sequence and hash state atomically, and support an optional
 client-generated UUID for safe retry. `current` and mutation `--current`
 resolve only an exact confirmed session surface inherited from the caller's
 tmux pane; plain terminals, manager panes, and stale bindings fail closed.
+
+`swbctl tui` exposes those operations through the optional Textual frontend.
+It loads handoff bodies only for the selected session, keeps the last-good list
+and detail on failures, and uses fixed installed commands rather than importing
+registry or provider internals. Press `a`/`p` to edit name or purpose, `v` to
+pin, `g` to record a handoff, `w` to wrap, `c` to continue from the displayed
+latest immutable handoff, and `d` to reload detail.
 
 ## Requirements and development setup
 

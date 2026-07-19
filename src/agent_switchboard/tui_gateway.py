@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import signal
 import subprocess
@@ -14,24 +15,37 @@ from pathlib import Path
 from typing import Protocol, TypeVar
 from uuid import UUID
 
-from .domain import PresentationContext, ProviderId, SessionKey, ValidationError
+from .domain import (
+    MAX_HANDOFF_FIELD_BYTES,
+    PresentationContext,
+    ProviderId,
+    SessionKey,
+    ValidationError,
+    normalize_handoff_text,
+)
 from .protocol import (
     MAX_JSON_BYTES,
     PresentationPlanEnvelope,
     ProtocolError,
     SessionActionEnvelope,
+    SessionDetailEnvelope,
     SnapshotEnvelope,
 )
 from .tmux import TmuxController
 
 MAX_STDOUT_BYTES = MAX_JSON_BYTES + 1
 MAX_STDERR_BYTES = 64 * 1024
+MAX_STDIN_BYTES = 2 * MAX_HANDOFF_FIELD_BYTES + 8 * 1024
 READ_CHUNK_BYTES = 64 * 1024
 DEFAULT_TIMEOUT_SECONDS = 15.0
 PROCESS_REAP_SECONDS = 1.0
 
 Envelope = TypeVar(
-    "Envelope", SnapshotEnvelope, PresentationPlanEnvelope, SessionActionEnvelope
+    "Envelope",
+    SnapshotEnvelope,
+    PresentationPlanEnvelope,
+    SessionActionEnvelope,
+    SessionDetailEnvelope,
 )
 EnvelopeParser = Callable[[str | bytes | bytearray], Envelope]
 
@@ -59,7 +73,9 @@ class CommandOutput:
     exit_code: int
 
 
-AsyncCommandRunner = Callable[[Sequence[str], float], Awaitable[CommandOutput]]
+AsyncCommandRunner = Callable[
+    [Sequence[str], float, bytes | None], Awaitable[CommandOutput]
+]
 
 
 class TmuxClientResolver(Protocol):
@@ -97,9 +113,25 @@ async def _kill_process_group(
             await asyncio.wait_for(process.wait(), timeout=PROCESS_REAP_SECONDS)
 
 
+async def _write_bounded_input(
+    stream: asyncio.StreamWriter,
+    payload: bytes,
+) -> None:
+    try:
+        stream.write(payload)
+        await stream.drain()
+    except (BrokenPipeError, ConnectionResetError):
+        pass
+    finally:
+        stream.close()
+        with suppress(BrokenPipeError, ConnectionResetError):
+            await stream.wait_closed()
+
+
 async def run_bounded_command(
     argv: Sequence[str],
     timeout_seconds: float,
+    stdin: bytes | None = None,
 ) -> CommandOutput:
     """Run one shell-free argv with bounded streams and group cleanup."""
 
@@ -110,10 +142,16 @@ async def run_bounded_command(
             "The Switchboard command is empty.",
             retryable=False,
         )
+    if stdin is not None and len(stdin) > MAX_STDIN_BYTES:
+        raise GatewayError(
+            "stdin_overflow",
+            "The Switchboard command input is too large.",
+            retryable=False,
+        )
     try:
         process = await asyncio.create_subprocess_exec(
             *command,
-            stdin=subprocess.DEVNULL,
+            stdin=subprocess.PIPE if stdin is not None else subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             start_new_session=True,
@@ -145,10 +183,26 @@ async def run_bounded_command(
         _read_bounded(process.stderr, limit=MAX_STDERR_BYTES, name="stderr")
     )
     wait_task = asyncio.create_task(process.wait())
-    tasks = (stdout_task, stderr_task, wait_task)
+    if stdin is not None:
+        assert process.stdin is not None
+    input_task = (
+        None
+        if stdin is None
+        else asyncio.create_task(
+            _write_bounded_input(
+                process.stdin,
+                stdin,
+            )
+        )
+    )
+    tasks = tuple(
+        task
+        for task in (stdout_task, stderr_task, wait_task, input_task)
+        if task is not None
+    )
     try:
         async with asyncio.timeout(timeout_seconds):
-            stdout, stderr, exit_code = await asyncio.gather(*tasks)
+            results = await asyncio.gather(*tasks)
     except BaseException as error:
         for task in tasks:
             task.cancel()
@@ -167,6 +221,10 @@ async def run_bounded_command(
                 retryable=False,
             ) from error
         raise
+    stdout, stderr, exit_code = results[:3]
+    assert isinstance(stdout, bytes)
+    assert isinstance(stderr, bytes)
+    assert isinstance(exit_code, int)
     return CommandOutput(stdout, stderr, exit_code)
 
 
@@ -213,6 +271,28 @@ def _uuid_argument(value: object, field: str) -> str:
         ) from error
 
 
+def _session_argument(value: object) -> str:
+    try:
+        return str(SessionKey.parse(value))
+    except ValidationError as error:
+        raise GatewayError(
+            "argument_invalid",
+            "Session key is invalid.",
+            retryable=False,
+        ) from error
+
+
+def _curation_value(value: object, field: str, *, maximum: int) -> str:
+    text = _bounded_argument(value, field, maximum=maximum).strip()
+    if not text:
+        raise GatewayError(
+            "argument_invalid",
+            f"{field} must not be empty.",
+            retryable=False,
+        )
+    return text
+
+
 class SwbctlGateway:
     """Invoke only the installed, versioned public Switchboard commands."""
 
@@ -244,10 +324,13 @@ class SwbctlGateway:
         self,
         arguments: Sequence[str],
         parser: EnvelopeParser[Envelope],
+        *,
+        stdin: bytes | None = None,
     ) -> Envelope:
         output = await self._runner(
             (self.executable, *arguments),
             self.timeout_seconds,
+            stdin,
         )
         if output.exit_code != 0:
             raise GatewayError(
@@ -291,6 +374,7 @@ class SwbctlGateway:
         output = await self._runner(
             (self.executable, *arguments),
             self.timeout_seconds,
+            None,
         )
         if output.exit_code != 0:
             raise GatewayError(
@@ -350,14 +434,7 @@ class SwbctlGateway:
         request_id: str,
         context: PresentationContext,
     ) -> PresentationPlanEnvelope:
-        try:
-            canonical_key = str(SessionKey.parse(session_key))
-        except ValidationError as error:
-            raise GatewayError(
-                "argument_invalid",
-                "Session key is invalid.",
-                retryable=False,
-            ) from error
+        canonical_key = _session_argument(session_key)
         envelope = await self._json(
             (
                 "prepare-open",
@@ -410,6 +487,29 @@ class SwbctlGateway:
         self._validate_plan(envelope, context)
         return envelope
 
+    async def prepare_continuation(
+        self,
+        handoff_id: str,
+        *,
+        request_id: str,
+        context: PresentationContext,
+    ) -> PresentationPlanEnvelope:
+        canonical_handoff_id = _uuid_argument(handoff_id, "handoff ID")
+        envelope = await self._json(
+            (
+                "prepare-new",
+                "--from",
+                canonical_handoff_id,
+                "--request-id",
+                _uuid_argument(request_id, "request ID"),
+                *self._context_arguments(context),
+                "--json",
+            ),
+            PresentationPlanEnvelope.from_json,
+        )
+        self._validate_plan(envelope, context)
+        return envelope
+
     async def prepare_history(
         self,
         project_id: str,
@@ -433,14 +533,7 @@ class SwbctlGateway:
         return envelope
 
     async def stop_session(self, session_key: str) -> SessionActionEnvelope:
-        try:
-            canonical_key = str(SessionKey.parse(session_key))
-        except ValidationError as error:
-            raise GatewayError(
-                "argument_invalid",
-                "Session key is invalid.",
-                retryable=False,
-            ) from error
+        canonical_key = _session_argument(session_key)
         envelope = await self._json(
             ("stop-session", canonical_key, "--json"),
             SessionActionEnvelope.from_json,
@@ -451,6 +544,153 @@ class SwbctlGateway:
                 "The Switchboard command emitted an incompatible response.",
                 retryable=False,
             )
+        return envelope
+
+    async def session_detail(
+        self,
+        session_key: str,
+        *,
+        handoff_limit: int = 20,
+    ) -> SessionDetailEnvelope:
+        canonical_key = _session_argument(session_key)
+        if (
+            isinstance(handoff_limit, bool)
+            or not isinstance(handoff_limit, int)
+            or not 1 <= handoff_limit <= 100
+        ):
+            raise GatewayError(
+                "argument_invalid",
+                "Handoff limit must be between 1 and 100.",
+                retryable=False,
+            )
+        envelope = await self._json(
+            (
+                "show",
+                canonical_key,
+                "--handoff-limit",
+                str(handoff_limit),
+                "--json",
+            ),
+            SessionDetailEnvelope.from_json,
+        )
+        self._validate_detail(envelope, canonical_key)
+        return envelope
+
+    async def set_session_name(
+        self,
+        session_key: str,
+        value: str | None,
+    ) -> SessionDetailEnvelope:
+        return await self._edit_session(
+            "name",
+            session_key,
+            None
+            if value is None
+            else _curation_value(value, "Session name", maximum=512),
+        )
+
+    async def set_session_purpose(
+        self,
+        session_key: str,
+        value: str | None,
+    ) -> SessionDetailEnvelope:
+        return await self._edit_session(
+            "purpose",
+            session_key,
+            None
+            if value is None
+            else _curation_value(value, "Session purpose", maximum=4096),
+        )
+
+    async def _edit_session(
+        self,
+        action: str,
+        session_key: str,
+        value: str | None,
+    ) -> SessionDetailEnvelope:
+        canonical_key = _session_argument(session_key)
+        arguments = ["session", action, canonical_key]
+        arguments.extend(("--clear",) if value is None else (value,))
+        arguments.append("--json")
+        envelope = await self._json(arguments, SessionDetailEnvelope.from_json)
+        self._validate_detail(envelope, canonical_key)
+        return envelope
+
+    async def set_session_pinned(
+        self,
+        session_key: str,
+        *,
+        pinned: bool,
+    ) -> SessionDetailEnvelope:
+        if type(pinned) is not bool:
+            raise GatewayError(
+                "argument_invalid",
+                "Pinned state must be boolean.",
+                retryable=False,
+            )
+        canonical_key = _session_argument(session_key)
+        arguments = ["session", "pin", canonical_key]
+        if not pinned:
+            arguments.append("--off")
+        arguments.append("--json")
+        envelope = await self._json(arguments, SessionDetailEnvelope.from_json)
+        self._validate_detail(envelope, canonical_key)
+        return envelope
+
+    async def append_session_handoff(
+        self,
+        session_key: str,
+        *,
+        handoff_id: str,
+        summary: str,
+        next_action: str,
+        wrap: bool,
+    ) -> SessionDetailEnvelope:
+        if type(wrap) is not bool:
+            raise GatewayError(
+                "argument_invalid",
+                "Wrap state must be boolean.",
+                retryable=False,
+            )
+        canonical_key = _session_argument(session_key)
+        try:
+            normalized_summary = normalize_handoff_text(summary, "summary")
+            normalized_next_action = normalize_handoff_text(next_action, "next action")
+        except ValidationError as error:
+            raise GatewayError(
+                "argument_invalid",
+                str(error),
+                retryable=False,
+            ) from error
+        payload = json.dumps(
+            {
+                "handoffId": _uuid_argument(handoff_id, "handoff ID"),
+                "summary": normalized_summary,
+                "nextAction": normalized_next_action,
+            },
+            ensure_ascii=False,
+            allow_nan=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+        if len(payload) > MAX_STDIN_BYTES:
+            raise GatewayError(
+                "stdin_overflow",
+                "The Switchboard command input is too large.",
+                retryable=False,
+            )
+        envelope = await self._json(
+            (
+                "session",
+                "wrap" if wrap else "handoff",
+                canonical_key,
+                "--json-stdin",
+                "--json",
+            ),
+            SessionDetailEnvelope.from_json,
+            stdin=payload,
+        )
+        self._validate_detail(envelope, canonical_key)
         return envelope
 
     async def select_surface(self, surface_id: str, *, client: str) -> None:
@@ -487,6 +727,18 @@ class SwbctlGateway:
                 "The Switchboard plan is incompatible with this terminal.",
                 retryable=False,
             ) from error
+
+    @staticmethod
+    def _validate_detail(
+        envelope: SessionDetailEnvelope,
+        session_key: str,
+    ) -> None:
+        if envelope.session["sessionKey"] != session_key:
+            raise GatewayError(
+                "response_invalid",
+                "The Switchboard command emitted an incompatible response.",
+                retryable=False,
+            )
 
 
 class SnapshotSource:

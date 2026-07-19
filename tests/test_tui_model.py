@@ -12,8 +12,13 @@ from agent_switchboard.domain import (
     ProviderId,
     RuntimePresence,
     ValidationError,
+    handoff_content_hash,
 )
-from agent_switchboard.protocol import MAX_JSON_BYTES, SnapshotEnvelope
+from agent_switchboard.protocol import (
+    MAX_JSON_BYTES,
+    SessionDetailEnvelope,
+    SnapshotEnvelope,
+)
 from agent_switchboard.state import DisplayStatus
 from agent_switchboard.tui_model import (
     AttentionRank,
@@ -35,6 +40,42 @@ def _snapshot(value: dict[str, object]) -> SnapshotEnvelope:
     raw = json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode()
     assert len(raw) <= MAX_JSON_BYTES
     return SnapshotEnvelope.from_json(raw)
+
+
+def _detail(
+    value: dict[str, object],
+    *,
+    generated_at: int,
+    handoff_id: str = "77777777-7777-4777-8777-777777777777",
+    summary: str = "Review the completed vertical slice.",
+    next_action: str = "Run installed acceptance.",
+) -> SessionDetailEnvelope:
+    session = copy.deepcopy(value["sessions"][0])  # type: ignore[index]
+    assert isinstance(session, dict)
+    session["latestHandoffId"] = handoff_id
+    session_key = str(session["sessionKey"])
+    return SessionDetailEnvelope.from_dict(
+        {
+            "schemaVersion": 1,
+            "protocolVersion": 1,
+            "generatedAt": generated_at,
+            "session": session,
+            "handoffs": [
+                {
+                    "handoffId": handoff_id,
+                    "sessionKey": session_key,
+                    "sequence": 1,
+                    "summary": summary,
+                    "nextAction": next_action,
+                    "source": "user",
+                    "sourceHostId": session["hostId"],
+                    "createdAt": generated_at,
+                    "contentHash": handoff_content_hash(summary, next_action),
+                }
+            ],
+            "handoffsTruncated": False,
+        }
+    )
 
 
 def _session(
@@ -174,6 +215,102 @@ def test_snapshot_projects_rows_launch_targets_and_capabilities() -> None:
         _snapshot(undeclared_value), now_ms=snapshot.generated_at
     )
     assert undeclared.launch_targets == ()
+
+
+def test_snapshot_projects_curation_and_continuation_cues() -> None:
+    value = _value()
+    session = value["sessions"][0]  # type: ignore[index]
+    assert isinstance(session, dict)
+    session.update(
+        {
+            "purpose": "Finish the TUI vertical slice",
+            "pinned": True,
+            "wrappedAt": int(value["generatedAt"]) - 10,
+            "latestHandoffId": "77777777-7777-4777-8777-777777777777",
+            "continuedFromHandoffId": "88888888-8888-4888-8888-888888888888",
+        }
+    )
+
+    snapshot = _snapshot(value)
+    row = FrontendModel.from_snapshot(
+        snapshot,
+        now_ms=snapshot.generated_at,
+    ).rows[0]
+
+    assert row.purpose == "Finish the TUI vertical slice"
+    assert row.pinned is True
+    assert row.wrapped_at == int(value["generatedAt"]) - 10
+    assert row.latest_handoff_id == "77777777-7777-4777-8777-777777777777"
+    assert row.continued_from_handoff_id == "88888888-8888-4888-8888-888888888888"
+
+
+def test_detail_cache_is_bounded_to_snapshot_and_ignores_older_results() -> None:
+    value = _value()
+    snapshot = _snapshot(value)
+    model = FrontendModel.from_snapshot(snapshot, now_ms=snapshot.generated_at)
+    first = _detail(value, generated_at=snapshot.generated_at + 10)
+
+    detailed = model.with_detail(first)
+    assert detailed.selected_detail is not None
+    assert detailed.selected_detail.latest_handoff_id == str(
+        first.handoffs[0]["handoffId"]
+    )
+    assert detailed.selected_detail.handoffs[0].summary == (
+        "Review the completed vertical slice."
+    )
+    assert detailed.selected_detail.handoffs[0].next_action == (
+        "Run installed acceptance."
+    )
+
+    older = _detail(
+        value,
+        generated_at=snapshot.generated_at + 9,
+        summary="An older result must not win.",
+    )
+    retained = detailed.with_detail(older)
+    assert retained.selected_detail == detailed.selected_detail
+    assert retained.ignored_detail_count == 1
+    assert retained.issue("frontend:stale_detail_ignored").retryable is True
+
+    refreshed_value = copy.deepcopy(value)
+    refreshed_value["generatedAt"] = snapshot.generated_at + 20
+    refreshed = retained.apply_snapshot(
+        _snapshot(refreshed_value),
+        now_ms=snapshot.generated_at + 20,
+    )
+    assert refreshed.selected_detail == detailed.selected_detail
+    assert all(issue.source is not IssueSource.FRONTEND for issue in refreshed.issues)
+
+    removed_value = copy.deepcopy(refreshed_value)
+    removed_value["generatedAt"] = snapshot.generated_at + 30
+    removed_value["sessions"] = []
+    removed_value["runtimes"] = []
+    removed_value["surfaces"] = []
+    removed = refreshed.apply_snapshot(
+        _snapshot(removed_value),
+        now_ms=snapshot.generated_at + 30,
+    )
+    assert removed.details == ()
+    assert removed.selected_detail is None
+
+
+def test_detail_must_belong_to_the_snapshot_host_and_session() -> None:
+    value = _value()
+    snapshot = _snapshot(value)
+    model = FrontendModel.from_snapshot(snapshot, now_ms=snapshot.generated_at)
+
+    other_value = copy.deepcopy(value)
+    other_session = other_value["sessions"][0]  # type: ignore[index]
+    assert isinstance(other_session, dict)
+    other_session["hostId"] = "99999999-9999-4999-8999-999999999999"
+    other_session["sessionKey"] = (
+        "99999999-9999-4999-8999-999999999999:codex:"
+        "55555555-5555-4555-8555-555555555555"
+    )
+    detail = _detail(other_value, generated_at=snapshot.generated_at)
+
+    with pytest.raises(ValidationError, match="another host"):
+        model.with_detail(detail)
 
 
 def test_attention_order_filters_and_selection_are_widget_independent() -> None:

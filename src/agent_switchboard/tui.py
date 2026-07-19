@@ -7,6 +7,7 @@ import os
 import sys
 import time
 from collections.abc import Callable, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from uuid import UUID, uuid4
 
@@ -27,11 +28,17 @@ from textual.widgets import (
 )
 from textual.widgets.option_list import Option
 
-from .domain import PresentationContext, ProviderId, ValidationError
+from .domain import (
+    PresentationContext,
+    ProviderId,
+    ValidationError,
+    normalize_handoff_text,
+)
 from .protocol import (
     PresentationPlanEnvelope,
     PresentationPlanKind,
     SessionActionStatus,
+    SessionDetailEnvelope,
 )
 from .tui_gateway import (
     GatewayError,
@@ -46,6 +53,8 @@ MIN_TERMINAL_HEIGHT = 20
 WIDE_LAYOUT_WIDTH = 100
 ISSUE_DISPLAY_LIMIT = 20
 ROW_ISSUE_DISPLAY_LIMIT = 10
+HANDOFF_DISPLAY_LIMIT = 5
+HANDOFF_TEXT_DISPLAY_CHARS = 500
 _UNASSIGNED_PROJECT = "__unassigned__"
 
 _STATUS_CUES = {
@@ -171,8 +180,177 @@ class StopConfirmation(ModalScreen[bool]):
         self.dismiss(False)
 
 
+@dataclass(frozen=True, slots=True)
+class EditResult:
+    value: str | None
+
+
+class TextEditScreen(ModalScreen[EditResult | None]):
+    """Edit or explicitly clear one bounded single-line curation value."""
+
+    BINDINGS = (
+        Binding("ctrl+s", "submit", "Save"),
+        Binding("ctrl+d", "clear", "Clear", priority=True),
+        Binding("escape", "cancel", "Cancel"),
+    )
+    CSS = """
+    TextEditScreen {
+        align: center middle;
+    }
+
+    #edit-dialog {
+        width: 72;
+        max-width: 94%;
+        height: 12;
+        border: round $accent;
+        background: $surface;
+        padding: 1 2;
+    }
+
+    #edit-title {
+        text-style: bold;
+    }
+
+    #edit-error {
+        color: $error;
+        height: 1;
+    }
+    """
+
+    def __init__(
+        self,
+        title: str,
+        *,
+        value: str | None,
+        maximum: int,
+    ) -> None:
+        super().__init__()
+        self.title = title
+        self.value = "" if value is None else value
+        self.maximum = maximum
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="edit-dialog"):
+            yield Static(self.title, id="edit-title", markup=False)
+            yield Input(value=self.value, id="edit-value")
+            yield Static("", id="edit-error", markup=False)
+            yield Static(
+                "Enter/Ctrl+S saves · Ctrl+D clears · Esc cancels",
+                markup=False,
+            )
+
+    def on_mount(self) -> None:
+        self.query_one("#edit-value", Input).focus()
+
+    def on_input_submitted(self, _event: Input.Submitted) -> None:
+        self.action_submit()
+
+    def action_submit(self) -> None:
+        value = self.query_one("#edit-value", Input).value.strip()
+        error = self.query_one("#edit-error", Static)
+        if not value:
+            error.update("Value must not be empty; use Ctrl+D to clear it.")
+            return
+        if len(value) > self.maximum:
+            error.update(f"Value exceeds {self.maximum} characters.")
+            return
+        self.dismiss(EditResult(value))
+
+    def action_clear(self) -> None:
+        self.dismiss(EditResult(None))
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
+@dataclass(frozen=True, slots=True)
+class HandoffDraft:
+    summary: str
+    next_action: str
+
+
+class HandoffEditor(ModalScreen[HandoffDraft | None]):
+    """Collect one explicit bounded summary and concrete next action."""
+
+    BINDINGS = (
+        Binding("ctrl+s", "submit", "Save"),
+        Binding("escape", "cancel", "Cancel"),
+    )
+    CSS = """
+    HandoffEditor {
+        align: center middle;
+    }
+
+    #handoff-dialog {
+        width: 80;
+        max-width: 96%;
+        height: 18;
+        border: round $accent;
+        background: $surface;
+        padding: 1 2;
+    }
+
+    .handoff-label {
+        text-style: bold;
+        height: 1;
+    }
+
+    #handoff-error {
+        color: $error;
+        height: 2;
+    }
+    """
+
+    def __init__(
+        self,
+        title: str,
+        *,
+        draft: HandoffDraft | None = None,
+    ) -> None:
+        super().__init__()
+        self.title = title
+        self.draft = draft
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="handoff-dialog"):
+            yield Static(self.title, classes="handoff-label", markup=False)
+            yield Static("Summary", classes="handoff-label", markup=False)
+            yield Input(
+                value="" if self.draft is None else self.draft.summary,
+                id="handoff-summary",
+            )
+            yield Static("Next action", classes="handoff-label", markup=False)
+            yield Input(
+                value="" if self.draft is None else self.draft.next_action,
+                id="handoff-next-action",
+            )
+            yield Static("", id="handoff-error", markup=False)
+            yield Static("Ctrl+S saves · Esc cancels", markup=False)
+
+    def on_mount(self) -> None:
+        self.query_one("#handoff-summary", Input).focus()
+
+    def action_submit(self) -> None:
+        try:
+            summary = normalize_handoff_text(
+                self.query_one("#handoff-summary", Input).value,
+                "summary",
+            )
+            next_action = normalize_handoff_text(
+                self.query_one("#handoff-next-action", Input).value,
+                "next action",
+            )
+        except ValidationError as error:
+            self.query_one("#handoff-error", Static).update(str(error))
+            return
+        self.dismiss(HandoffDraft(summary, next_action))
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
 class SwitchboardApp(App[tuple[str, ...] | None]):
-    """Phase 4A terminal session index and validated action router."""
+    """Local session index, curation surface, and validated action router."""
 
     TITLE = "Switchboard"
     SUB_TITLE = "Terminal session router"
@@ -182,9 +360,16 @@ class SwitchboardApp(App[tuple[str, ...] | None]):
         Binding("n", "new_session", "New"),
         Binding("h", "history", "History"),
         Binding("x", "stop_session", "Stop"),
+        Binding("a", "edit_name", "Name"),
+        Binding("p", "edit_purpose", "Purpose"),
+        Binding("v", "toggle_pin", "Pin"),
+        Binding("g", "handoff", "Handoff"),
+        Binding("w", "wrap", "Wrap"),
+        Binding("c", "continue_session", "Continue"),
+        Binding("d", "reload_detail", "Detail"),
         Binding("r", "refresh", "Refresh"),
         Binding("ctrl+l", "clear_filters", "Clear filters"),
-        Binding("e", "focus_issues", "Issues"),
+        Binding("i", "focus_issues", "Issues"),
         Binding("?", "toggle_help", "Help"),
         Binding("escape", "focus_sessions", "Sessions", show=False),
         Binding("q", "quit", "Quit"),
@@ -281,6 +466,7 @@ class SwitchboardApp(App[tuple[str, ...] | None]):
         terminal_context: PresentationContext,
         now_ms: Callable[[], int] | None = None,
         request_id_factory: Callable[[], UUID] = uuid4,
+        handoff_id_factory: Callable[[], UUID] = uuid4,
     ) -> None:
         super().__init__()
         self.gateway = gateway
@@ -293,14 +479,19 @@ class SwitchboardApp(App[tuple[str, ...] | None]):
         self.action_label: str | None = None
         self.action_message: str | None = None
         self.action_error: GatewayError | None = None
+        self.detail_error: GatewayError | None = None
+        self.detail_loading_key: str | None = None
         self._now_ms = (lambda: int(time.time() * 1000)) if now_ms is None else now_ms
         self._request_id_factory = request_id_factory
+        self._handoff_id_factory = handoff_id_factory
         self._snapshot_request_id = 0
+        self._detail_request_id = 0
         self._filter_request_id = 0
         self._snapshot_mode = "retained"
         self._rendering_table = False
         self._help_visible = False
         self._initial_snapshot_rendered = False
+        self._handoff_drafts: dict[tuple[str, bool], tuple[str, HandoffDraft]] = {}
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
@@ -379,7 +570,8 @@ class SwitchboardApp(App[tuple[str, ...] | None]):
                     yield Static("No current issues.", id="issues", markup=False)
             yield Static(
                 "/ search · arrows navigate · Enter/o open · n new · h Claude history\n"
-                "x safe stop · r refresh · Ctrl+L clear filters · e issues · "
+                "a name · p purpose · v pin · g handoff · w wrap · c continue\n"
+                "x safe stop · d detail · r refresh · Ctrl+L clear · i issues · "
                 "? help · q quit",
                 id="help",
                 markup=False,
@@ -388,7 +580,7 @@ class SwitchboardApp(App[tuple[str, ...] | None]):
 
     def on_mount(self) -> None:
         table = self.query_one("#sessions", DataTable)
-        table.add_column("Status", key="status", width=14)
+        table.add_column("Status", key="status", width=22)
         table.add_column("Session", key="session", width=24)
         table.add_column("Project", key="project", width=18)
         table.add_column("Provider", key="provider", width=8)
@@ -567,6 +759,54 @@ class SwitchboardApp(App[tuple[str, ...] | None]):
         self.model = filtered
         self._render_rows()
 
+    def _request_selected_detail(self, *, force: bool = False) -> None:
+        model = self.model
+        row = None if model is None else model.selected_row
+        if row is None:
+            return
+        if not force and model.selected_detail is not None:
+            return
+        if self.detail_loading_key == row.session_key:
+            return
+        self._detail_request_id += 1
+        request_id = self._detail_request_id
+        self.detail_loading_key = row.session_key
+        self.detail_error = None
+        self._render_details()
+        self._render_issues()
+        self._render_status()
+        self._load_detail(row.session_key, request_id)
+
+    @work(exclusive=True, group="detail", exit_on_error=False)
+    async def _load_detail(self, session_key: str, request_id: int) -> None:
+        try:
+            envelope = await self.gateway.session_detail(
+                session_key,
+                handoff_limit=20,
+            )
+            if request_id != self._detail_request_id or self.model is None:
+                return
+            self.model = await asyncio.to_thread(self.model.with_detail, envelope)
+            self.detail_error = None
+        except GatewayError as error:
+            if request_id != self._detail_request_id:
+                return
+            self.detail_error = error
+        except ValidationError:
+            if request_id != self._detail_request_id:
+                return
+            self.detail_error = GatewayError(
+                "frontend_detail_invalid",
+                "The validated session detail could not be displayed.",
+                retryable=False,
+            )
+        finally:
+            if request_id == self._detail_request_id:
+                self.detail_loading_key = None
+                self._render_details()
+                self._render_issues()
+                self._render_status()
+
     def _render_rows(self) -> None:
         table = self.query_one("#sessions", DataTable)
         model = self.model
@@ -576,7 +816,7 @@ class SwitchboardApp(App[tuple[str, ...] | None]):
             if model is not None:
                 for row in model.visible_rows:
                     table.add_row(
-                        Text(_status_cue(row)),
+                        Text(_row_cue(row)),
                         Text(row.label),
                         Text(row.project_name or "Unassigned"),
                         Text(row.provider.value),
@@ -596,6 +836,7 @@ class SwitchboardApp(App[tuple[str, ...] | None]):
         self._render_details()
         self._render_issues()
         self._render_status()
+        self._request_selected_detail()
 
     def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
         if not self.is_running or self._rendering_table or self.model is None:
@@ -608,6 +849,7 @@ class SwitchboardApp(App[tuple[str, ...] | None]):
         except ValidationError:
             return
         self._render_details()
+        self._request_selected_detail()
 
     def on_data_table_row_selected(self, _event: DataTable.RowSelected) -> None:
         self.action_open_session()
@@ -624,6 +866,19 @@ class SwitchboardApp(App[tuple[str, ...] | None]):
             else:
                 details.update("No sessions match the current search and filters.")
             return
+        detail = model.selected_detail
+        name = row.name if detail is None else detail.name
+        purpose = row.purpose if detail is None else detail.purpose
+        pinned = row.pinned if detail is None else detail.pinned
+        wrapped_at = row.wrapped_at if detail is None else detail.wrapped_at
+        latest_handoff_id = (
+            row.latest_handoff_id if detail is None else detail.latest_handoff_id
+        )
+        continued_from_handoff_id = (
+            row.continued_from_handoff_id
+            if detail is None
+            else detail.continued_from_handoff_id
+        )
         project = row.project_name or "Unassigned"
         location = row.location_name or row.location_path or "Unassigned"
         working_directory = row.cwd or row.location_path or "Unknown"
@@ -636,18 +891,47 @@ class SwitchboardApp(App[tuple[str, ...] | None]):
                 f"- … {len(row.issue_ids) - ROW_ISSUE_DISPLAY_LIMIT} more issue(s)"
             )
         warning_text = "\n".join(warning_lines) if warning_lines else "None"
+        if detail is None:
+            handoff_text = (
+                "Loading…"
+                if self.detail_loading_key == row.session_key
+                else "Not loaded; press d to retry."
+            )
+        elif not detail.handoffs:
+            handoff_text = "None"
+        else:
+            handoff_lines: list[str] = []
+            for handoff in detail.handoffs[:HANDOFF_DISPLAY_LIMIT]:
+                handoff_lines.extend(
+                    (
+                        f"- #{handoff.sequence} [{handoff.source}] "
+                        f"{_bounded_display(handoff.summary)}",
+                        f"  Next: {_bounded_display(handoff.next_action)}",
+                    )
+                )
+            omitted = len(detail.handoffs) - HANDOFF_DISPLAY_LIMIT
+            if omitted > 0 or detail.handoffs_truncated:
+                handoff_lines.append("- … additional older handoffs omitted")
+            handoff_text = "\n".join(handoff_lines)
         details.update(
-            f"{row.label}\n"
-            f"Status: {_status_cue(row)}\n"
+            f"{name or row.label}\n"
+            f"Status: {_row_cue(row)}\n"
             f"Runtime: {row.runtime_presence.value}\n"
             f"Attachment: {row.attachment.value}\n"
             f"Provider: {row.provider.value}\n"
             f"Project: {project}\n"
             f"Location: {location}\n"
             f"Working directory: {working_directory}\n"
+            f"Purpose: {purpose or 'None'}\n"
+            f"Pinned: {'yes' if pinned else 'no'}\n"
+            f"Wrapped: {'yes' if wrapped_at is not None else 'no'}\n"
+            "Continued from handoff: "
+            f"{continued_from_handoff_id or 'None'}\n"
+            f"Latest handoff: {latest_handoff_id or 'None'}\n"
             f"Last activity: {_format_age(row.recency_at, self._now_ms())}\n"
             f"Safe stop eligibility: {'eligible' if row.can_stop else 'not eligible'}\n"
             f"Session key: {row.session_key}\n\n"
+            f"Handoffs:\n{handoff_text}\n\n"
             f"Warnings:\n{warning_text}"
         )
 
@@ -656,7 +940,9 @@ class SwitchboardApp(App[tuple[str, ...] | None]):
         model = self.model
         issues = () if model is None else model.issues
         command_errors = tuple(
-            error for error in (self.action_error, self.last_error) if error is not None
+            error
+            for error in (self.action_error, self.detail_error, self.last_error)
+            if error is not None
         )
         if not issues and not command_errors:
             widget.update("No current issues.")
@@ -720,6 +1006,10 @@ class SwitchboardApp(App[tuple[str, ...] | None]):
             )
         if self.last_error is not None:
             parts.append(f"ERROR {self.last_error.code}")
+        if self.detail_loading_key is not None:
+            parts.append("DETAIL loading…")
+        elif self.detail_error is not None:
+            parts.append(f"DETAIL ERROR {self.detail_error.code}")
         if self.action_busy:
             parts.append(f"ACTION {self.action_label or 'working'}…")
         elif self.action_error is not None:
@@ -993,6 +1283,254 @@ class SwitchboardApp(App[tuple[str, ...] | None]):
         finally:
             self._finish_action()
 
+    def _selected_row_for_action(self, action: str) -> SessionRow | None:
+        row = None if self.model is None else self.model.selected_row
+        if row is None:
+            self._publish_action_error(
+                "session_not_selected",
+                f"Select a known session before {action}.",
+                retryable=False,
+            )
+        return row
+
+    def action_reload_detail(self) -> None:
+        if self._selected_row_for_action("loading its detail") is not None:
+            self._request_selected_detail(force=True)
+
+    def action_edit_name(self) -> None:
+        if self.action_busy:
+            return
+        row = self._selected_row_for_action("editing its name")
+        if row is None:
+            return
+        detail = None if self.model is None else self.model.selected_detail
+        value = row.name if detail is None else detail.name
+        self.push_screen(
+            TextEditScreen("Edit session name", value=value, maximum=512),
+            lambda result: self._on_edit_result(row, "name", result),
+        )
+
+    def action_edit_purpose(self) -> None:
+        if self.action_busy:
+            return
+        row = self._selected_row_for_action("editing its purpose")
+        if row is None:
+            return
+        detail = None if self.model is None else self.model.selected_detail
+        value = row.purpose if detail is None else detail.purpose
+        self.push_screen(
+            TextEditScreen("Edit session purpose", value=value, maximum=4096),
+            lambda result: self._on_edit_result(row, "purpose", result),
+        )
+
+    def _on_edit_result(
+        self,
+        row: SessionRow,
+        field: str,
+        result: EditResult | None,
+    ) -> None:
+        if result is None:
+            return
+        if self._begin_action(f"updating {field} for {row.label}"):
+            self._edit_session(row.session_key, field, result.value)
+
+    @work(exclusive=False, group="action", exit_on_error=False)
+    async def _edit_session(
+        self,
+        session_key: str,
+        field: str,
+        value: str | None,
+    ) -> None:
+        try:
+            envelope = (
+                await self.gateway.set_session_name(session_key, value)
+                if field == "name"
+                else await self.gateway.set_session_purpose(session_key, value)
+            )
+            self._accept_curation(envelope, f"Session {field} updated")
+        except GatewayError as error:
+            self._publish_action_error(
+                error.code,
+                error.message,
+                retryable=error.retryable,
+            )
+        finally:
+            self._finish_action()
+
+    def action_toggle_pin(self) -> None:
+        if self.action_busy:
+            return
+        row = self._selected_row_for_action("changing its pin")
+        if row is None:
+            return
+        detail = None if self.model is None else self.model.selected_detail
+        pinned = row.pinned if detail is None else detail.pinned
+        if self._begin_action(("unpinning " if pinned else "pinning ") + row.label):
+            self._set_pin(row.session_key, not pinned)
+
+    @work(exclusive=False, group="action", exit_on_error=False)
+    async def _set_pin(self, session_key: str, pinned: bool) -> None:
+        try:
+            envelope = await self.gateway.set_session_pinned(
+                session_key,
+                pinned=pinned,
+            )
+            self._accept_curation(
+                envelope,
+                "Session pinned" if pinned else "Session unpinned",
+            )
+        except GatewayError as error:
+            self._publish_action_error(
+                error.code,
+                error.message,
+                retryable=error.retryable,
+            )
+        finally:
+            self._finish_action()
+
+    def action_handoff(self) -> None:
+        self._open_handoff_editor(wrap=False)
+
+    def action_wrap(self) -> None:
+        self._open_handoff_editor(wrap=True)
+
+    def _open_handoff_editor(self, *, wrap: bool) -> None:
+        if self.action_busy:
+            return
+        row = self._selected_row_for_action(
+            "wrapping it" if wrap else "recording a handoff"
+        )
+        if row is None:
+            return
+        retained = self._handoff_drafts.get((row.session_key, wrap))
+        self.push_screen(
+            HandoffEditor(
+                "Wrap session with handoff" if wrap else "Record session handoff",
+                draft=None if retained is None else retained[1],
+            ),
+            lambda draft: self._on_handoff_draft(row, wrap, draft),
+        )
+
+    def _on_handoff_draft(
+        self,
+        row: SessionRow,
+        wrap: bool,
+        draft: HandoffDraft | None,
+    ) -> None:
+        if draft is None:
+            return
+        key = (row.session_key, wrap)
+        retained = self._handoff_drafts.get(key)
+        handoff_id = (
+            retained[0]
+            if retained is not None and retained[1] == draft
+            else str(self._handoff_id_factory())
+        )
+        self._handoff_drafts[key] = (handoff_id, draft)
+        label = "wrapping" if wrap else "recording handoff for"
+        if self._begin_action(f"{label} {row.label}"):
+            self._submit_handoff(row.session_key, handoff_id, draft, wrap)
+
+    @work(exclusive=False, group="action", exit_on_error=False)
+    async def _submit_handoff(
+        self,
+        session_key: str,
+        handoff_id: str,
+        draft: HandoffDraft,
+        wrap: bool,
+    ) -> None:
+        try:
+            envelope = await self.gateway.append_session_handoff(
+                session_key,
+                handoff_id=handoff_id,
+                summary=draft.summary,
+                next_action=draft.next_action,
+                wrap=wrap,
+            )
+            self._handoff_drafts.pop((session_key, wrap), None)
+            self._accept_curation(
+                envelope,
+                "Session wrapped" if wrap else "Handoff recorded",
+            )
+        except GatewayError as error:
+            self._publish_action_error(
+                error.code,
+                error.message,
+                retryable=error.retryable,
+            )
+        finally:
+            self._finish_action()
+
+    def _accept_curation(
+        self,
+        envelope: SessionDetailEnvelope,
+        message: str,
+    ) -> None:
+        if self.model is None:
+            raise GatewayError(
+                "frontend_model_missing",
+                "The session list is no longer available.",
+                retryable=True,
+            )
+        # A mutation response is authoritative for its committed state. Invalidate
+        # any older on-demand read so an equal-millisecond detail cannot overwrite it.
+        self._detail_request_id += 1
+        self.detail_loading_key = None
+        try:
+            self.model = self.model.with_detail(envelope)
+        except ValidationError as error:
+            raise GatewayError(
+                "response_invalid",
+                "The Switchboard command emitted an incompatible response.",
+                retryable=False,
+            ) from error
+        self.detail_error = None
+        self.action_message = message
+        self._render_details()
+        self._request_snapshot(full=False)
+
+    def action_continue_session(self) -> None:
+        if self.action_busy:
+            return
+        row = self._selected_row_for_action("continuing from it")
+        if row is None:
+            return
+        detail = None if self.model is None else self.model.selected_detail
+        latest_handoff_id = (
+            row.latest_handoff_id if detail is None else detail.latest_handoff_id
+        )
+        if latest_handoff_id is None:
+            self._publish_action_error(
+                "continuation_handoff_missing",
+                "The selected session has no explicit handoff to continue from.",
+                retryable=False,
+            )
+            return
+        if self._begin_action(f"continuing from {row.label}"):
+            self._prepare_continuation(latest_handoff_id, self._new_request_id())
+
+    @work(exclusive=False, group="action", exit_on_error=False)
+    async def _prepare_continuation(
+        self,
+        handoff_id: str,
+        request_id: str,
+    ) -> None:
+        try:
+            envelope = await self.gateway.prepare_continuation(
+                handoff_id,
+                request_id=request_id,
+                context=self.terminal_context,
+            )
+            await self._apply_plan(envelope)
+        except GatewayError as error:
+            self._publish_action_error(
+                error.code,
+                error.message,
+                retryable=error.retryable,
+            )
+        finally:
+            self._finish_action()
+
     def action_focus_search(self) -> None:
         search = self.query_one("#search", Input)
         if not search.disabled:
@@ -1024,6 +1562,25 @@ class SwitchboardApp(App[tuple[str, ...] | None]):
 
 def _status_cue(row: SessionRow) -> str:
     return _STATUS_CUES[row.status.value]
+
+
+def _row_cue(row: SessionRow) -> str:
+    cues = []
+    if row.pinned:
+        cues.append("pin")
+    if row.wrapped_at is not None:
+        cues.append("wrap")
+    if row.continued_from_handoff_id is not None:
+        cues.append("cont")
+    suffix = "" if not cues else f" [{' '.join(cues)}]"
+    return f"{_status_cue(row)}{suffix}"
+
+
+def _bounded_display(value: str) -> str:
+    normalized = " ".join(value.split())
+    if len(normalized) <= HANDOFF_TEXT_DISPLAY_CHARS:
+        return normalized
+    return f"{normalized[: HANDOFF_TEXT_DISPLAY_CHARS - 1]}…"
 
 
 def _target_label(target: LaunchTarget) -> str:
@@ -1088,8 +1645,12 @@ def run_tui(*, swbctl_executable: str | Path) -> int:
 __all__ = [
     "MIN_TERMINAL_HEIGHT",
     "MIN_TERMINAL_WIDTH",
+    "EditResult",
+    "HandoffDraft",
+    "HandoffEditor",
     "StopConfirmation",
     "SwitchboardApp",
     "TargetPicker",
+    "TextEditScreen",
     "run_tui",
 ]

@@ -2,7 +2,7 @@
 
 Date: 2026-07-19
 
-Status: 4B.1-4B.3 core, CLI, and continuation implemented; 4B.4 next
+Status: 4B.1-4B.4 core, CLI, continuation, and TUI implemented; 4B.5 next
 
 ## Decision and sequencing
 
@@ -29,9 +29,19 @@ The first implementation loop completed 4B.1 through 4B.3 as one vertical
 core slice. It adds atomic local curation, a bounded versioned detail contract,
 explicit and exact-tmux-current CLI operations, wrap/re-entry lifecycle rules,
 and exact handoff continuation through launch reservation and binding. The
-Snapshot v1 and provider-native no-prompt boundary remain unchanged. TUI
-integration and installed isolated acceptance remain separate 4B.4 and 4B.5
-loops.
+Snapshot v1 and provider-native no-prompt boundary remain unchanged. At that
+checkpoint, TUI integration and installed isolated acceptance remained
+separate 4B.4 and 4B.5 loops.
+
+The second implementation loop completed 4B.4. The pure frontend now retains
+bounded per-session detail and rejects stale results, while the installed
+command gateway validates session-detail envelopes and sends strict bounded
+JSON stdin. The Textual surface exposes name, purpose, pin, handoff, wrap, and
+exact-handoff continuation operations without importing storage, provider, or
+tmux implementation internals. Mutations apply their validated detail response
+before a retained snapshot refresh, and detail or mutation failure preserves
+the last-good list and cached detail. Installed isolated acceptance remains
+the separate 4B.5 loop.
 
 ## 4B.0 substrate audit
 
@@ -282,6 +292,21 @@ Phase 4B does not add:
 - Add bounded detail loading, forms, pin/wrap actions, and continuation.
 - Exercise keyboard, resize, cancellation, stale detail, malformed output,
   concurrent refresh, and terminal handoff paths headlessly.
+
+Implemented checkpoint:
+
+- Snapshot rows expose purpose, pin, wrapped, latest-handoff, and continuation
+  lineage cues; handoff bodies remain in an on-demand bounded detail cache.
+- The gateway uses only fixed public argv, validates the complete returned
+  detail for the requested session, and bounds both subprocess input and
+  output with timeout/cancellation process-group cleanup.
+- Edit and handoff modals validate locally, cancel without a command, and keep
+  one client handoff UUID across an unchanged failed retry.
+- Continuation passes the selected immutable latest handoff ID, so the launch
+  cannot silently move to a concurrently appended handoff.
+- Headless coverage proves row/detail rendering, keyboard and resize behavior,
+  clear/cancel paths, pin/handoff/wrap operations, stale and failed detail
+  retention, concurrent refresh, and plain-terminal continuation handoff.
 
 ### 4B.5: installed local acceptance
 

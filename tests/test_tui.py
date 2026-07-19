@@ -32,6 +32,10 @@ REQUEST_IDS = (
     UUID("99999999-9999-4999-8999-999999999992"),
     UUID("99999999-9999-4999-8999-999999999993"),
 )
+HANDOFF_IDS = (
+    UUID("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1"),
+    UUID("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa2"),
+)
 
 
 def _value() -> dict[str, Any]:
@@ -225,6 +229,72 @@ def _stop_action(status: str, *, blocked: bool = False) -> Any:
     )
 
 
+def _detail(snapshot: Any, session_key: str) -> Any:
+    value = snapshot.to_dict()
+    session = next(
+        session for session in value["sessions"] if session["sessionKey"] == session_key
+    )
+    return protocol_module.SessionDetailEnvelope.from_dict(
+        {
+            "schemaVersion": 1,
+            "protocolVersion": 1,
+            "generatedAt": value["generatedAt"],
+            "session": session,
+            "handoffs": [],
+            "handoffsTruncated": False,
+        }
+    )
+
+
+def _curated_detail(
+    snapshot: Any,
+    session_key: str,
+    *,
+    generated_at: int | None = None,
+    session_updates: dict[str, Any] | None = None,
+    handoffs: tuple[tuple[str, int, str, str], ...] = (),
+    truncated: bool = False,
+) -> Any:
+    value = snapshot.to_dict()
+    session = copy.deepcopy(
+        next(
+            session
+            for session in value["sessions"]
+            if session["sessionKey"] == session_key
+        )
+    )
+    if session_updates is not None:
+        session.update(session_updates)
+    if handoffs:
+        session["latestHandoffId"] = handoffs[0][0]
+    records = [
+        {
+            "handoffId": handoff_id,
+            "sessionKey": session_key,
+            "sequence": sequence,
+            "summary": summary,
+            "nextAction": next_action,
+            "source": "user",
+            "sourceHostId": session["hostId"],
+            "createdAt": int(value["generatedAt"]) + sequence,
+            "contentHash": domain_module.handoff_content_hash(summary, next_action),
+        }
+        for handoff_id, sequence, summary, next_action in handoffs
+    ]
+    return protocol_module.SessionDetailEnvelope.from_dict(
+        {
+            "schemaVersion": 1,
+            "protocolVersion": 1,
+            "generatedAt": (
+                int(value["generatedAt"]) if generated_at is None else generated_at
+            ),
+            "session": session,
+            "handoffs": records,
+            "handoffsTruncated": truncated,
+        }
+    )
+
+
 class FakeGateway:
     def __init__(
         self,
@@ -238,6 +308,8 @@ class FakeGateway:
         prepare_started: asyncio.Event | None = None,
         prepare_release: asyncio.Event | None = None,
         prepare_cancelled: asyncio.Event | None = None,
+        detail: Any | None = None,
+        mutation_detail: Any | None = None,
     ) -> None:
         self.retained = retained
         self.full = [] if full is None else list(full)
@@ -250,8 +322,22 @@ class FakeGateway:
         self.prepare_started = prepare_started
         self.prepare_release = prepare_release
         self.prepare_cancelled = prepare_cancelled
+        self.detail = detail
+        self.mutation_detail = mutation_detail
         self.calls: list[str] = []
+        self.detail_calls: list[str] = []
         self.action_calls: list[tuple[Any, ...]] = []
+
+    @staticmethod
+    def _result(configured: Any, fallback: Callable[[], Any]) -> Any:
+        if isinstance(configured, list):
+            result = configured.pop(0) if configured else None
+        else:
+            result = configured
+        result = fallback() if result is None else result
+        if isinstance(result, BaseException):
+            raise result
+        return result
 
     async def snapshot(self, *, reconcile: str) -> Any:
         self.calls.append(reconcile)
@@ -319,9 +405,75 @@ class FakeGateway:
         )
         return await self._prepare()
 
+    async def prepare_continuation(
+        self,
+        handoff_id: str,
+        *,
+        request_id: str,
+        context: Any,
+    ) -> Any:
+        self.action_calls.append(("continue", handoff_id, request_id, context))
+        return await self._prepare()
+
     async def stop_session(self, session_key: str) -> Any:
         self.action_calls.append(("stop", session_key))
         return self.stop_action
+
+    async def session_detail(
+        self,
+        session_key: str,
+        *,
+        handoff_limit: int = 20,
+    ) -> Any:
+        self.detail_calls.append(session_key)
+        return self._result(
+            self.detail,
+            lambda: _detail(self.retained, session_key),
+        )
+
+    async def set_session_name(self, session_key: str, value: str | None) -> Any:
+        self.action_calls.append(("name", session_key, value))
+        return self._result(
+            self.mutation_detail,
+            lambda: _detail(self.retained, session_key),
+        )
+
+    async def set_session_purpose(self, session_key: str, value: str | None) -> Any:
+        self.action_calls.append(("purpose", session_key, value))
+        return self._result(
+            self.mutation_detail,
+            lambda: _detail(self.retained, session_key),
+        )
+
+    async def set_session_pinned(self, session_key: str, *, pinned: bool) -> Any:
+        self.action_calls.append(("pin", session_key, pinned))
+        return self._result(
+            self.mutation_detail,
+            lambda: _detail(self.retained, session_key),
+        )
+
+    async def append_session_handoff(
+        self,
+        session_key: str,
+        *,
+        handoff_id: str,
+        summary: str,
+        next_action: str,
+        wrap: bool,
+    ) -> Any:
+        self.action_calls.append(
+            (
+                "wrap" if wrap else "handoff",
+                session_key,
+                handoff_id,
+                summary,
+                next_action,
+            )
+        )
+        return self._result(
+            self.mutation_detail,
+            lambda: _detail(self.retained, session_key),
+        )
 
     async def select_surface(self, surface_id: str, *, client: str) -> None:
         self.action_calls.append(("select", surface_id, client))
@@ -336,8 +488,10 @@ def _app(
     *,
     tmux_client: str | None = None,
     request_ids: tuple[UUID, ...] = REQUEST_IDS,
+    handoff_ids: tuple[UUID, ...] = HANDOFF_IDS,
 ) -> Any:
     ids = iter(request_ids)
+    handoffs = iter(handoff_ids)
     return tui_module.SwitchboardApp(
         gateway=gateway,
         terminal_context=domain_module.PresentationContext(
@@ -348,6 +502,7 @@ def _app(
         ),
         now_ms=lambda: NOW_MS,
         request_id_factory=lambda: next(ids),
+        handoff_id_factory=lambda: next(handoffs),
     )
 
 
@@ -406,7 +561,7 @@ def test_application_renders_status_navigation_details_and_help() -> None:
 
             await pilot.press("?")
             assert app.query_one("#help", widgets_module.Static).display is True
-            await pilot.press("e")
+            await pilot.press("i")
             assert app.query_one("#side-panel").has_focus
             await pilot.press("q")
             await pilot.pause()
@@ -916,6 +1071,454 @@ def test_blocked_stop_stays_in_tui_with_stable_reason() -> None:
             )
 
     asyncio.run(exercise())
+
+
+def test_detail_loading_renders_curation_lineage_and_bounded_handoffs() -> None:
+    async def exercise() -> None:
+        value = _mixed_snapshot().to_dict()
+        session = value["sessions"][1]
+        session_key = str(session["sessionKey"])
+        session.update(
+            {
+                "purpose": "Finish the terminal curation slice",
+                "pinned": True,
+                "wrappedAt": NOW_MS - 1_000,
+                "latestHandoffId": str(HANDOFF_IDS[0]),
+                "continuedFromHandoffId": str(HANDOFF_IDS[1]),
+            }
+        )
+        snapshot = protocol_module.SnapshotEnvelope.from_dict(value)
+        detail = _curated_detail(
+            snapshot,
+            session_key,
+            handoffs=(
+                (
+                    str(HANDOFF_IDS[0]),
+                    1,
+                    "The vertical slice is ready for review.\nNo transcript needed.",
+                    "Run the installed acceptance loop.",
+                ),
+            ),
+        )
+        gateway = FakeGateway(retained=snapshot, detail=detail)
+        app = _app(gateway)
+
+        async with app.run_test(size=(120, 32)) as pilot:
+            await _wait_until(
+                pilot,
+                lambda: app.model is not None and app.model.selected_detail is not None,
+                message="selected detail did not load",
+            )
+            table = app.query_one("#sessions", widgets_module.DataTable)
+            assert "[pin wrap cont]" in str(table.get_row_at(0)[0])
+            rendered = str(app.query_one("#details", widgets_module.Static).content)
+            assert "Purpose: Finish the terminal curation slice" in rendered
+            assert "Pinned: yes" in rendered
+            assert "Wrapped: yes" in rendered
+            assert f"Continued from handoff: {HANDOFF_IDS[1]}" in rendered
+            assert "The vertical slice is ready for review. No transcript needed." in (
+                rendered
+            )
+            assert "Next: Run the installed acceptance loop." in rendered
+            assert gateway.detail_calls == [session_key]
+
+    asyncio.run(exercise())
+
+
+def test_name_purpose_and_pin_flows_apply_detail_then_refresh_last_good() -> None:
+    async def exercise() -> None:
+        snapshot = _mixed_snapshot()
+        session_key = str(snapshot.sessions[1]["sessionKey"])
+        initial = _detail(snapshot, session_key)
+        curated = _curated_detail(
+            snapshot,
+            session_key,
+            session_updates={"name": "Curated Claude"},
+        )
+        cleared = _curated_detail(
+            snapshot,
+            session_key,
+            session_updates={"name": "Curated Claude", "purpose": None},
+        )
+        pinned = _curated_detail(
+            snapshot,
+            session_key,
+            session_updates={
+                "name": "Curated Claude",
+                "purpose": None,
+                "pinned": True,
+            },
+        )
+        gateway = FakeGateway(
+            retained=snapshot,
+            detail=initial,
+            mutation_detail=[curated, cleared, pinned],
+        )
+        app = _app(gateway)
+
+        async with app.run_test(size=(110, 30)) as pilot:
+            await _wait_until(
+                pilot,
+                lambda: app.model is not None and app.model.selected_detail is not None,
+                message="initial detail did not load",
+            )
+
+            await pilot.press("a")
+            assert isinstance(app.screen, tui_module.TextEditScreen)
+            app.screen.query_one(
+                "#edit-value", widgets_module.Input
+            ).value = "  Curated Claude  "
+            await pilot.press("enter")
+            await _wait_until(
+                pilot,
+                lambda: len(gateway.action_calls) == 1 and not app.action_busy,
+                message="name mutation did not complete",
+            )
+
+            await pilot.press("p")
+            assert isinstance(app.screen, tui_module.TextEditScreen)
+            await pilot.press("ctrl+d")
+            await _wait_until(
+                pilot,
+                lambda: len(gateway.action_calls) == 2 and not app.action_busy,
+                message="purpose clear did not complete",
+            )
+
+            await pilot.press("v")
+            await _wait_until(
+                pilot,
+                lambda: len(gateway.action_calls) == 3 and not app.action_busy,
+                message="pin mutation did not complete",
+            )
+            assert gateway.action_calls == [
+                ("name", session_key, "Curated Claude"),
+                ("purpose", session_key, None),
+                ("pin", session_key, True),
+            ]
+            assert gateway.calls == ["none", "none", "none", "none"]
+            rendered = str(app.query_one("#details", widgets_module.Static).content)
+            assert rendered.startswith("Curated Claude\n")
+            assert "Purpose: None" in rendered
+            assert "Pinned: yes" in rendered
+            assert app.action_message == "Session pinned"
+
+    asyncio.run(exercise())
+
+
+def test_mutation_detail_wins_an_equal_timestamp_inflight_read() -> None:
+    async def exercise() -> None:
+        started = asyncio.Event()
+        release = asyncio.Event()
+        snapshot = _mixed_snapshot()
+        session_key = str(snapshot.sessions[1]["sessionKey"])
+        old_detail = _detail(snapshot, session_key)
+        pinned_detail = _curated_detail(
+            snapshot,
+            session_key,
+            session_updates={"pinned": True},
+        )
+
+        class DelayedDetailGateway(FakeGateway):
+            async def session_detail(
+                self,
+                requested_key: str,
+                *,
+                handoff_limit: int = 20,
+            ) -> Any:
+                self.detail_calls.append(requested_key)
+                started.set()
+                await release.wait()
+                return old_detail
+
+        gateway = DelayedDetailGateway(
+            retained=snapshot,
+            mutation_detail=pinned_detail,
+        )
+        app = _app(gateway)
+        async with app.run_test(size=(100, 28)) as pilot:
+            await started.wait()
+            assert app.model is not None
+            await pilot.press("v")
+            await _wait_until(
+                pilot,
+                lambda: not app.action_busy and app.model.selected_detail is not None,
+                message="pin mutation did not publish detail",
+            )
+            release.set()
+            await pilot.pause()
+            assert app.model.selected_detail.pinned is True
+            assert gateway.action_calls == [("pin", session_key, True)]
+
+    asyncio.run(exercise())
+
+
+def test_handoff_and_wrap_forms_validate_cancel_and_reuse_retry_id() -> None:
+    async def exercise() -> None:
+        snapshot = _mixed_snapshot()
+        session_key = str(snapshot.sessions[1]["sessionKey"])
+        failure = gateway_module.GatewayError(
+            "command_timeout",
+            "The handoff command exceeded its deadline.",
+            retryable=True,
+        )
+        handoff_detail = _curated_detail(
+            snapshot,
+            session_key,
+            handoffs=(
+                (
+                    str(HANDOFF_IDS[0]),
+                    1,
+                    "Slice complete",
+                    "Run acceptance",
+                ),
+            ),
+        )
+        wrap_detail = _curated_detail(
+            snapshot,
+            session_key,
+            session_updates={"wrappedAt": NOW_MS},
+            handoffs=(
+                (
+                    str(HANDOFF_IDS[1]),
+                    2,
+                    "Work paused",
+                    "Resume after review",
+                ),
+            ),
+        )
+        gateway = FakeGateway(
+            retained=snapshot,
+            mutation_detail=[failure, handoff_detail, wrap_detail],
+        )
+        app = _app(gateway)
+
+        async with app.run_test(size=(110, 30)) as pilot:
+            await _wait_until(
+                pilot,
+                lambda: app.model is not None and app.model.selected_detail is not None,
+                message="initial detail did not load",
+            )
+
+            await pilot.press("g")
+            assert isinstance(app.screen, tui_module.HandoffEditor)
+            await pilot.press("escape")
+            await pilot.pause()
+            assert gateway.action_calls == []
+
+            await pilot.press("g")
+            await pilot.press("ctrl+s")
+            assert isinstance(app.screen, tui_module.HandoffEditor)
+            assert "must not be empty" in str(
+                app.screen.query_one("#handoff-error", widgets_module.Static).content
+            )
+            app.screen.query_one(
+                "#handoff-summary", widgets_module.Input
+            ).value = "  Slice complete  "
+            app.screen.query_one(
+                "#handoff-next-action", widgets_module.Input
+            ).value = "Run acceptance"
+            await pilot.press("ctrl+s")
+            await _wait_until(
+                pilot,
+                lambda: app.action_error is not None and not app.action_busy,
+                message="failed handoff did not remain visible",
+            )
+
+            await pilot.press("g")
+            assert isinstance(app.screen, tui_module.HandoffEditor)
+            assert (
+                app.screen.query_one("#handoff-summary", widgets_module.Input).value
+                == "Slice complete"
+            )
+            await pilot.press("ctrl+s")
+            await _wait_until(
+                pilot,
+                lambda: len(gateway.action_calls) == 2 and not app.action_busy,
+                message="handoff retry did not complete",
+            )
+
+            await pilot.press("w")
+            assert isinstance(app.screen, tui_module.HandoffEditor)
+            app.screen.query_one(
+                "#handoff-summary", widgets_module.Input
+            ).value = "Work paused"
+            app.screen.query_one(
+                "#handoff-next-action", widgets_module.Input
+            ).value = "Resume after review"
+            await pilot.press("ctrl+s")
+            await _wait_until(
+                pilot,
+                lambda: len(gateway.action_calls) == 3 and not app.action_busy,
+                message="wrap did not complete",
+            )
+
+            first, retry, wrapped = gateway.action_calls
+            assert (
+                first
+                == retry
+                == (
+                    "handoff",
+                    session_key,
+                    str(HANDOFF_IDS[0]),
+                    "Slice complete",
+                    "Run acceptance",
+                )
+            )
+            assert wrapped == (
+                "wrap",
+                session_key,
+                str(HANDOFF_IDS[1]),
+                "Work paused",
+                "Resume after review",
+            )
+            assert app.action_message == "Session wrapped"
+            assert "Wrapped: yes" in str(
+                app.query_one("#details", widgets_module.Static).content
+            )
+
+    asyncio.run(exercise())
+
+
+def test_detail_reload_failure_preserves_last_good_and_retry_replaces_it() -> None:
+    async def exercise() -> None:
+        snapshot = _mixed_snapshot()
+        session_key = str(snapshot.sessions[1]["sessionKey"])
+        first = _curated_detail(
+            snapshot,
+            session_key,
+            generated_at=snapshot.generated_at + 1,
+            handoffs=(
+                (
+                    str(HANDOFF_IDS[0]),
+                    1,
+                    "Last good detail",
+                    "Retry detail loading",
+                ),
+            ),
+        )
+        failure = gateway_module.GatewayError(
+            "command_timeout",
+            "Detail loading timed out.",
+            retryable=True,
+        )
+        replacement = _curated_detail(
+            snapshot,
+            session_key,
+            generated_at=snapshot.generated_at + 2,
+            handoffs=(
+                (
+                    str(HANDOFF_IDS[1]),
+                    2,
+                    "Replacement detail",
+                    "Continue with curation",
+                ),
+            ),
+        )
+        gateway = FakeGateway(retained=snapshot, detail=[first, failure, replacement])
+        app = _app(gateway)
+
+        async with app.run_test(size=(110, 30)) as pilot:
+            await _wait_until(
+                pilot,
+                lambda: app.model is not None and app.model.selected_detail is not None,
+                message="initial detail did not load",
+            )
+            await pilot.press("d")
+            await _wait_until(
+                pilot,
+                lambda: app.detail_error is not None,
+                message="detail failure was not published",
+            )
+            rendered = str(app.query_one("#details", widgets_module.Static).content)
+            assert "Last good detail" in rendered
+            assert "DETAIL ERROR command_timeout" in str(
+                app.query_one("#status", widgets_module.Static).content
+            )
+
+            await pilot.press("d")
+            await _wait_until(
+                pilot,
+                lambda: (
+                    app.detail_error is None
+                    and app.model.selected_detail.latest_handoff_id
+                    == str(HANDOFF_IDS[1])
+                ),
+                message="detail retry did not replace the cache",
+            )
+            assert "Replacement detail" in str(
+                app.query_one("#details", widgets_module.Static).content
+            )
+            assert gateway.detail_calls == [session_key, session_key, session_key]
+
+    asyncio.run(exercise())
+
+
+def test_continuation_requires_a_handoff_and_uses_terminal_plan_path() -> None:
+    async def exercise_missing() -> None:
+        snapshot = _mixed_snapshot()
+        gateway = FakeGateway(retained=snapshot)
+        app = _app(gateway)
+        async with app.run_test(size=(100, 28)) as pilot:
+            await _wait_until(
+                pilot,
+                lambda: app.model is not None and app.model.selected_detail is not None,
+                message="initial detail did not load",
+            )
+            await pilot.press("c")
+            assert app.action_error.code == "continuation_handoff_missing"
+            assert gateway.action_calls == []
+
+    async def exercise_attach() -> None:
+        context = domain_module.PresentationContext(True, None, False, False)
+        snapshot = _mixed_snapshot()
+        session_key = str(snapshot.sessions[1]["sessionKey"])
+        detail = _curated_detail(
+            snapshot,
+            session_key,
+            handoffs=(
+                (
+                    str(HANDOFF_IDS[0]),
+                    1,
+                    "Continue this work",
+                    "Open a fresh provider session",
+                ),
+            ),
+        )
+        gateway = FakeGateway(
+            retained=snapshot,
+            detail=detail,
+            plan=_plan("attach"),
+        )
+        app = _app(gateway)
+        async with app.run_test(size=(100, 28)) as pilot:
+            await _wait_until(
+                pilot,
+                lambda: app.model is not None and app.model.selected_detail is not None,
+                message="continuation detail did not load",
+            )
+            await pilot.press("c")
+            await _wait_until(
+                pilot,
+                lambda: not app.is_running,
+                message="continuation attach plan did not exit",
+            )
+            assert gateway.action_calls == [
+                (
+                    "continue",
+                    str(HANDOFF_IDS[0]),
+                    str(REQUEST_IDS[0]),
+                    context,
+                ),
+                ("attach", SURFACE_ID),
+            ]
+            assert app.return_value == (
+                "/fake/swbctl",
+                "attach-surface",
+                SURFACE_ID,
+            )
+
+    asyncio.run(exercise_missing())
+    asyncio.run(exercise_attach())
 
 
 def test_terminal_handoff_exec_is_exact_and_failure_is_restored(

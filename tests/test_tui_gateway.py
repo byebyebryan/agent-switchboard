@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import sys
 import time
 from collections.abc import Sequence
@@ -14,9 +15,11 @@ from agent_switchboard.protocol import (
     SessionAction,
     SessionActionEnvelope,
     SessionActionStatus,
+    SessionDetailEnvelope,
     SnapshotEnvelope,
 )
 from agent_switchboard.tui_gateway import (
+    MAX_STDIN_BYTES,
     MAX_STDOUT_BYTES,
     CommandOutput,
     GatewayError,
@@ -39,7 +42,12 @@ TMUX_CLIENT = "/dev/pts/7"
 
 
 def _record(
-    envelope: SnapshotEnvelope | PresentationPlanEnvelope | SessionActionEnvelope,
+    envelope: (
+        SnapshotEnvelope
+        | PresentationPlanEnvelope
+        | SessionActionEnvelope
+        | SessionDetailEnvelope
+    ),
 ) -> bytes:
     return envelope.to_json().encode("utf-8") + b"\n"
 
@@ -55,21 +63,41 @@ ACTION_RECORD = _record(
         )
     )
 )
+_snapshot_value = json.loads(SNAPSHOT_FIXTURE.read_text(encoding="utf-8"))
+_detail_session = _snapshot_value["sessions"][0]
+_detail_session["latestHandoffId"] = None
+DETAIL_RECORD = _record(
+    SessionDetailEnvelope.from_dict(
+        {
+            "schemaVersion": 1,
+            "protocolVersion": 1,
+            "generatedAt": _snapshot_value["generatedAt"],
+            "session": _detail_session,
+            "handoffs": [],
+            "handoffsTruncated": False,
+        }
+    )
+)
 
 
 class RecordingRunner:
     def __init__(self) -> None:
         self.calls: list[tuple[tuple[str, ...], float]] = []
+        self.inputs: list[bytes | None] = []
 
     async def __call__(
         self,
         argv: Sequence[str],
         timeout_seconds: float,
+        stdin: bytes | None,
     ) -> CommandOutput:
         command = tuple(argv)
         self.calls.append((command, timeout_seconds))
+        self.inputs.append(stdin)
         records = {
             "snapshot": SNAPSHOT_RECORD,
+            "show": DETAIL_RECORD,
+            "session": DETAIL_RECORD,
             "prepare-open": PLAN_RECORD,
             "prepare-new": PLAN_RECORD,
             "prepare-history": PLAN_RECORD,
@@ -230,6 +258,189 @@ def test_gateway_uses_exact_public_argv_and_reuses_request_id(tmp_path: Path) ->
     )
 
 
+def test_gateway_curation_uses_exact_public_argv_and_bounded_json_stdin(
+    tmp_path: Path,
+) -> None:
+    executable = tmp_path / "swbctl"
+    executable.touch(mode=0o755)
+    runner = RecordingRunner()
+    gateway = SwbctlGateway(executable, timeout_seconds=3, runner=runner)
+    context = PresentationContext(True, TMUX_CLIENT, False, False)
+    handoff_id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+
+    async def exercise() -> None:
+        await gateway.session_detail(CODEX_SESSION_KEY, handoff_limit=7)
+        await gateway.set_session_name(CODEX_SESSION_KEY, "  Curated name  ")
+        await gateway.set_session_name(CODEX_SESSION_KEY, None)
+        await gateway.set_session_purpose(CODEX_SESSION_KEY, "Ship the slice")
+        await gateway.set_session_purpose(CODEX_SESSION_KEY, None)
+        await gateway.set_session_pinned(CODEX_SESSION_KEY, pinned=True)
+        await gateway.set_session_pinned(CODEX_SESSION_KEY, pinned=False)
+        await gateway.append_session_handoff(
+            CODEX_SESSION_KEY,
+            handoff_id=handoff_id,
+            summary="  Stable summary  ",
+            next_action="Run the acceptance loop",
+            wrap=False,
+        )
+        await gateway.append_session_handoff(
+            CODEX_SESSION_KEY,
+            handoff_id=handoff_id,
+            summary="Stable summary",
+            next_action="Run the acceptance loop",
+            wrap=True,
+        )
+        await gateway.prepare_continuation(
+            handoff_id,
+            request_id=REQUEST_ID,
+            context=context,
+        )
+
+    asyncio.run(exercise())
+
+    prefix = str(executable)
+    assert [call for call, _timeout in runner.calls] == [
+        (
+            prefix,
+            "show",
+            CODEX_SESSION_KEY,
+            "--handoff-limit",
+            "7",
+            "--json",
+        ),
+        (
+            prefix,
+            "session",
+            "name",
+            CODEX_SESSION_KEY,
+            "Curated name",
+            "--json",
+        ),
+        (prefix, "session", "name", CODEX_SESSION_KEY, "--clear", "--json"),
+        (
+            prefix,
+            "session",
+            "purpose",
+            CODEX_SESSION_KEY,
+            "Ship the slice",
+            "--json",
+        ),
+        (prefix, "session", "purpose", CODEX_SESSION_KEY, "--clear", "--json"),
+        (prefix, "session", "pin", CODEX_SESSION_KEY, "--json"),
+        (prefix, "session", "pin", CODEX_SESSION_KEY, "--off", "--json"),
+        (
+            prefix,
+            "session",
+            "handoff",
+            CODEX_SESSION_KEY,
+            "--json-stdin",
+            "--json",
+        ),
+        (
+            prefix,
+            "session",
+            "wrap",
+            CODEX_SESSION_KEY,
+            "--json-stdin",
+            "--json",
+        ),
+        (
+            prefix,
+            "prepare-new",
+            "--from",
+            handoff_id,
+            "--request-id",
+            REQUEST_ID,
+            "--has-current-terminal",
+            "--current-tmux-client",
+            TMUX_CLIENT,
+            "--json",
+        ),
+    ]
+    expected_input = {
+        "handoffId": handoff_id,
+        "nextAction": "Run the acceptance loop",
+        "summary": "Stable summary",
+    }
+    assert runner.inputs == [
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        json.dumps(
+            expected_input,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode(),
+        json.dumps(
+            expected_input,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode(),
+        None,
+    ]
+
+
+def test_gateway_curation_rejects_invalid_arguments_before_execution(
+    tmp_path: Path,
+) -> None:
+    executable = tmp_path / "swbctl"
+    executable.touch(mode=0o755)
+    runner = RecordingRunner()
+    gateway = SwbctlGateway(executable, runner=runner)
+    context = PresentationContext(True, None, False, False)
+
+    async def exercise() -> None:
+        invalid_calls = (
+            gateway.session_detail(CODEX_SESSION_KEY, handoff_limit=0),
+            gateway.set_session_name(CODEX_SESSION_KEY, "  "),
+            gateway.set_session_purpose(CODEX_SESSION_KEY, "bad\nvalue"),
+            gateway.set_session_pinned(CODEX_SESSION_KEY, pinned=1),  # type: ignore[arg-type]
+            gateway.append_session_handoff(
+                CODEX_SESSION_KEY,
+                handoff_id="not-a-uuid",
+                summary="Summary",
+                next_action="Next",
+                wrap=False,
+            ),
+            gateway.append_session_handoff(
+                CODEX_SESSION_KEY,
+                handoff_id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+                summary="",
+                next_action="Next",
+                wrap=False,
+            ),
+            gateway.prepare_continuation(
+                "invalid",
+                request_id=REQUEST_ID,
+                context=context,
+            ),
+        )
+        for call in invalid_calls:
+            with pytest.raises(GatewayError) as failure:
+                await call
+            assert failure.value.code == "argument_invalid"
+
+    asyncio.run(exercise())
+    assert runner.calls == []
+
+
+def test_gateway_rejects_detail_for_a_different_session(tmp_path: Path) -> None:
+    executable = tmp_path / "swbctl"
+    executable.touch(mode=0o755)
+    runner = RecordingRunner()
+    gateway = SwbctlGateway(executable, runner=runner)
+
+    with pytest.raises(GatewayError) as failure:
+        asyncio.run(gateway.session_detail(CLAUDE_SESSION_KEY))
+    assert failure.value.code == "response_invalid"
+
+
 @pytest.mark.parametrize(
     ("output", "code"),
     [
@@ -248,7 +459,9 @@ def test_gateway_failures_are_small_and_do_not_expose_command_output(
     executable = tmp_path / "swbctl"
     executable.touch(mode=0o755)
 
-    async def runner(_argv: Sequence[str], _timeout: float) -> CommandOutput:
+    async def runner(
+        _argv: Sequence[str], _timeout: float, _stdin: bytes | None
+    ) -> CommandOutput:
         return output
 
     gateway = SwbctlGateway(executable, runner=runner)
@@ -314,7 +527,9 @@ def test_select_surface_requires_silent_success(
     executable = tmp_path / "swbctl"
     executable.touch(mode=0o755)
 
-    async def runner(_argv: Sequence[str], _timeout: float) -> CommandOutput:
+    async def runner(
+        _argv: Sequence[str], _timeout: float, _stdin: bytes | None
+    ) -> CommandOutput:
         return output
 
     gateway = SwbctlGateway(executable, runner=runner)
@@ -363,7 +578,9 @@ def test_gateway_rejects_stop_response_for_a_different_session(
         )
     )
 
-    async def runner(_argv: Sequence[str], _timeout: float) -> CommandOutput:
+    async def runner(
+        _argv: Sequence[str], _timeout: float, _stdin: bytes | None
+    ) -> CommandOutput:
         return CommandOutput(response, b"", 0)
 
     gateway = SwbctlGateway(executable, runner=runner)
@@ -387,7 +604,9 @@ def test_snapshot_source_coalesces_refresh_and_preserves_last_good(
         ]
         calls = 0
 
-        async def runner(_argv: Sequence[str], _timeout: float) -> CommandOutput:
+        async def runner(
+            _argv: Sequence[str], _timeout: float, _stdin: bytes | None
+        ) -> CommandOutput:
             nonlocal calls
             calls += 1
             if calls == 1:
@@ -441,6 +660,32 @@ def test_bounded_runner_captures_success_and_rejects_overflow() -> None:
             )
         )
     assert failure.value.code == "stdout_overflow"
+
+
+def test_bounded_runner_writes_exact_bounded_stdin() -> None:
+    payload = "Résumé 東京\nnext".encode()
+    output = asyncio.run(
+        run_bounded_command(
+            (
+                sys.executable,
+                "-c",
+                "import sys; sys.stdout.buffer.write(sys.stdin.buffer.read())",
+            ),
+            2,
+            payload,
+        )
+    )
+    assert output == CommandOutput(payload, b"", 0)
+
+    with pytest.raises(GatewayError) as failure:
+        asyncio.run(
+            run_bounded_command(
+                (sys.executable, "-c", "raise SystemExit"),
+                2,
+                b"x" * (MAX_STDIN_BYTES + 1),
+            )
+        )
+    assert failure.value.code == "stdin_overflow"
 
 
 def _wait_for_pid_file(path: Path, *, timeout: float = 2) -> int:
