@@ -2,7 +2,7 @@
 
 Date: 2026-07-19
 
-Status: 4A.0 through 4A.2 complete; 4A.3 through 4A.5 planned
+Status: 4A.0 through 4A.3 complete; 4A.4 and 4A.5 planned
 
 ## Decision and sequencing
 
@@ -236,10 +236,16 @@ complete:
   display-status precedence, then recency and session-key ordering; filtering,
   Unicode token search, selection retention, snapshot staleness, and stale-race
   rejection remain independent of Textual widgets.
+- The read-only Textual application loads retained state and explicit full
+  refreshes through asynchronous workers, moves model/filter projection to
+  worker threads, and renders non-color-only status cues, search, provider,
+  project, activity, runtime, and attachment filters, stable row selection,
+  details, issues, refresh state, and help. Its responsive wide/narrow contract
+  is headlessly tested down to a documented minimum of 72 columns by 20 rows.
 
-Widgets, user actions, terminal handoff, and installed live acceptance remain
-in 4A.3 through 4A.5. This checkpoint made no provider calls and did not attach,
-start, stop, or focus any session.
+User actions, terminal handoff, and installed live acceptance remain in 4A.4
+and 4A.5. This checkpoint made no provider calls and did not attach, start,
+stop, or focus any session.
 
 ## Acceptance gates
 
