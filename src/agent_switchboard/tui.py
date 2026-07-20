@@ -878,6 +878,35 @@ class SwitchboardApp(App[tuple[str, ...] | None]):
         self._render_status()
         self._load_detail(row.session_key, request_id)
 
+    def _ensure_view_selection(self) -> None:
+        model = self.model
+        if model is None:
+            return
+        if self._view_mode() == "inbox":
+            candidates = tuple(row for row in model.visible_rows if row.task_id is None)
+            selected = (
+                model.selected_session_key
+                if any(
+                    row.session_key == model.selected_session_key for row in candidates
+                )
+                else (None if not candidates else candidates[0].session_key)
+            )
+            self._selected_task_id = None
+        else:
+            tasks = self._visible_tasks()
+            task = next(
+                (item for item in tasks if item.task_id == self._selected_task_id),
+                None if not tasks else tasks[0],
+            )
+            self._selected_task_id = None if task is None else task.task_id
+            selected = None if task is None else task.current_session_key
+            if selected is not None and not any(
+                row.session_key == selected for row in model.visible_rows
+            ):
+                selected = None
+        if model.selected_session_key != selected:
+            self.model = model.with_selection(selected)
+
     @work(exclusive=True, group="detail", exit_on_error=False)
     async def _load_detail(self, session_key: str, request_id: int) -> None:
         try:
@@ -910,6 +939,7 @@ class SwitchboardApp(App[tuple[str, ...] | None]):
 
     def _render_rows(self) -> None:
         table = self.query_one("#sessions", DataTable)
+        self._ensure_view_selection()
         model = self.model
         self._rendering_table = True
         try:
