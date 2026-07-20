@@ -128,12 +128,13 @@ def audit_contents(wheel: Path, sdist: Path) -> dict[str, object]:
             "docs/phase-4a-plan.md",
             "docs/phase-4b-plan.md",
             "docs/phase-4c-plan.md",
+            "docs/phase-4d-plan.md",
             "pyproject.toml",
         )
     }
     wheel_content = wheel_files(wheel)
     sdist_root, sdist_content = sdist_files(sdist)
-    dist_info = "agent_switchboard-0.1.0.dist-info"
+    dist_info = "agent_switchboard-0.2.0.dist-info"
     expected_wheel = set(package_files) | {
         f"{dist_info}/METADATA",
         f"{dist_info}/RECORD",
@@ -178,7 +179,7 @@ def audit_contents(wheel: Path, sdist: Path) -> dict[str, object]:
     metadata = wheel_content[f"{dist_info}/METADATA"].decode("utf-8")
     for expected in (
         "Name: agent-switchboard",
-        "Version: 0.1.0",
+        "Version: 0.2.0",
         "License-Expression: MIT",
         "License-File: LICENSE",
         "Requires-Python: >=3.12",
@@ -201,6 +202,8 @@ def audit_contents(wheel: Path, sdist: Path) -> dict[str, object]:
         "agent_switchboard/migrations/v0004_runtime_truth_ordering.py",
         "agent_switchboard/migrations/v0005_history_launch.py",
         "agent_switchboard/migrations/v0006_agent_tools.py",
+        "agent_switchboard/migrations/v0007_repository_checkouts.py",
+        "agent_switchboard/migrations/v0008_tasks.py",
     }
     if not required_migrations <= set(wheel_content):
         raise DistributionError("wheel is missing migration modules")

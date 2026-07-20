@@ -170,12 +170,12 @@ remaining as a wrapper. Provider-native MCP servers or plugins may expose
 Switchboard tools from inside the normal TUI; they do not replace that TUI.
 
 Switchboard is the expected launch entry point once installed. This is how a
-session receives its project, location, launch intent, and stable surface token
-before the provider starts. Provider-native parked history remains resumable;
+session receives its project, checkout, task, launch intent, and stable surface
+token before the provider starts. Provider-native parked history remains resumable;
 an arbitrary live process started elsewhere is only a best-effort observation.
 
 ```text
-                         prepare open/new action
+                         prepare open/task action
                                   |
                  reserve or reuse exact tmux surface
                            /              \
@@ -192,8 +192,9 @@ case, Switchboard leaves the interaction path after the handoff.
 
 ### One logical model, provider-specific actions
 
-Frontends see one `AgentSession` model. Provider adapters decide how to
-discover, resume, attach, and reconcile each kind of session.
+Frontends see one Snapshot v2 project/repository/checkout/task/session model.
+Provider adapters decide how to discover, resume, attach, and reconcile each
+kind of provider session; tasks remain provider-neutral.
 
 ### Projects, repositories, checkouts, and tasks are separate identities
 
@@ -1099,7 +1100,7 @@ prepare_launch(LaunchRequest, PresentationContext, request_id)
 
 `LaunchRequest` selects `open`, `new`, `history`, or the reserved generic
 `manage` action. An open request contains a target session key. A new request
-contains provider, project, concrete location, and an optional source handoff.
+contains provider, task, project, concrete checkout, and an optional source handoff.
 A Claude history request starts the provider-native resume picker with no target
 session and becomes bound only after its `SessionStart` hook identifies the
 user's selection. A manage request selects a future provider workspace action
@@ -1204,26 +1205,22 @@ the frontend.
 
 ## Command Interface
 
-The canonical executable is `swbctl`. Its command surface grows in phases
-toward these stable operations:
+The canonical executable is `swbctl`. The current local v2 management and
+presentation surface is:
 
 ```text
 swbctl list [filters] [--refresh] [--json]
 swbctl show <session-key> [--json]
-swbctl project list [--json]
-swbctl project show <project-id> [--json]
-swbctl project add --name <name> --location <path> [--id <uuid>]
-                     [--print-config]
-swbctl project context <project-id> [--query <text>] [--json]
-swbctl reconcile [--host <host>]
-swbctl refresh [--host <host>]
-swbctl new [--project <project-id>] [--location <location-id>]
-             [--provider <provider>] [--cwd <path>]
-swbctl new --from <handoff-id>|<session-key> [--provider <provider>]
-swbctl prepare-new [--project <project-id>] [--location <location-id>]
-                     [--provider <provider>]
-                     [--from <handoff-id>|<session-key>]
-                     --request-id <uuid> --json
+swbctl config migrate-v2 --input <path> --print
+swbctl task list [--project <project-id>] [--status open|closed] [--json]
+swbctl task show <task-id> [--json]
+swbctl task create --task-id <uuid> --project <project-id> --title <text>
+                     [--checkout <checkout-id>] [--provider codex|claude] [--json]
+swbctl task adopt <session-key> (--task <task-id> | --task-id <uuid> --title <text>)
+                     [--project <project-id>] [--checkout <checkout-id>] [--json]
+swbctl task title|purpose|pin ...
+swbctl task handoff|close <task-id> --json-stdin [--json]
+swbctl task reopen <task-id> [--json]
 swbctl current [--json]
 swbctl session name [<session-key>|--current] (<name>|--clear) [--json]
 swbctl session purpose [<session-key>|--current] (<purpose>|--clear) [--json]
@@ -1231,9 +1228,13 @@ swbctl session handoff [<session-key>|--current] --json-stdin [--json]
 swbctl session wrap [<session-key>|--current] --json-stdin [--json]
 swbctl session pin [<session-key>|--current] [--off] [--json]
 swbctl prepare-open <session-key> --request-id <uuid> --json
-swbctl open <session-key> [--transport tmux]
-swbctl prepare-workspace <provider> --request-id <uuid> --json
-swbctl workspace open <provider>
+swbctl prepare-task <task-id> [--provider codex|claude]
+                     --request-id <uuid> --json
+swbctl prepare-task <task-id> --create --project <project-id> --title <text>
+                     [--checkout <checkout-id>] --provider codex|claude
+                     --request-id <uuid> --json
+swbctl prepare-history --project <project-id> --checkout <checkout-id>
+                     --request-id <uuid> --json
 swbctl select-surface <surface-id> --client <tmux-client-id>
 swbctl attach-surface <surface-id>
 swbctl event --provider <provider>
@@ -1244,10 +1245,8 @@ swbctl doctor
 ```
 
 `bootstrap` and launch-intent cleanup are internal commands, not normal user
-entry points. `open`, `new`, and `workspace open` combine their prepare
-operation with terminal-local presentation; desktop integrations call the
-corresponding prepare command and perform only the returned focus, switch, or
-attach action.
+entry points. The TUI and desktop integrations call the prepare commands and
+perform only the returned focus, switch, or attach action.
 Every prepare operation receives the versioned `PresentationContext` described
 above. Combined terminal-local commands may derive it from their process and
 tmux environment; integrations send it as structured request data. The exact
@@ -1302,7 +1301,8 @@ provider argv or credentials. Project records with the same globally stable ID
 are merged only after conflict validation.
 
 Snapshot and cache validation is fail-closed at the privacy boundary. Known
-project, location, session, runtime, and surface records require their stable
+project, repository, checkout, task, session, runtime, and surface records
+require their stable
 identity fields and must agree with the envelope host and cross-record
 references. Incompatible schema or protocol versions, prompts, transcripts,
 raw provider or hook payloads, raw argv, credentials, authentication tokens,
@@ -1608,19 +1608,22 @@ New-session and other future mutating actions follow the same rule: send an
 explicit command to the owning host, validate there, and return structured
 errors. They do not mutate cached remote rows locally.
 
-For cross-host `new --from`, the initiating host resolves an exact immutable
-handoff and sends a bounded JSON envelope on SSH standard input to the target.
+For cross-host task continuation, the initiating host resolves an exact
+immutable handoff and sends a bounded JSON envelope on SSH standard input to
+the target.
 The envelope contains the handoff ID, source session/host, project ID, summary,
 next action, timestamp, and content hash. SSH authenticates the caller; the
-target validates size, schema, hash, and that it has a configured location for
-the project before recording an imported handoff and launch intent. No target
+target validates size, schema, hash, and that it has a configured checkout for
+the project before creating a target-host task linked by the imported handoff.
+No target
 host reaches back to the source and no transcript content is transferred.
 
 ```text
-ssh <target> swbctl prepare-new --request-id <uuid> --json-stdin --json
+ssh <target> swbctl prepare-task <task-id> --create --request-id <uuid> \
+  --json-stdin --json
 ```
 
-The request envelope also selects the target's configured location. A local
+The request envelope also selects the target's configured checkout. A local
 frontend then presents the returned surface through the same
 `attach-surface` path used by remote open.
 
@@ -1813,10 +1816,10 @@ are retained under their owning hosts but are not merged. Frontends show a
 configuration error with both sources. Session data is never discarded to
 resolve the conflict.
 
-### Missing project location
+### Missing project checkout
 
 Retain the project and its known sessions, but reject a new launch on a host
-where no configured location currently exists. Do not guess a checkout path or
+where no configured checkout currently exists. Do not guess a checkout path or
 clone a repository automatically.
 
 ### Memory provider unavailable
@@ -1872,8 +1875,8 @@ Migration should preserve those behaviors while moving ownership in stages.
 ### Phase 1: Domain, configuration, and storage
 
 - Add the stable host-ID file and configuration parser.
-- Add globally stable configured projects and host-local locations. Phase 4D
-  replaces this v1 boundary with repositories and checkouts.
+- Historical Phase 1 used host-local locations. Phase 4D replaced that v1
+  boundary with globally stable repositories and host-local checkouts.
 - Add the SQLite schema and migrations for sessions, immutable handoffs,
   launch intents, runtime observations, surfaces, events, and remote cache.
 - Define versioned snapshot, capability, error, and presentation-plan fixtures.
@@ -1896,7 +1899,8 @@ artifact evidence are recorded in
 
 The implemented Phase 2 slice completes this phase for local Codex `0.144.4`.
 It provides bounded app-server discovery, privacy-safe normalization, atomic
-complete-scan reconciliation, configured-location assignment, retained reads,
+complete-scan reconciliation, the historical configured-location assignment,
+retained reads,
 canonical JSON, hook ingestion with launch binding and deterministic ordering,
 bounded process/tmux reconciliation, explicit ownership-safe hook management,
 and effective trust/path/source/latency diagnostics. Provider or probe failure
@@ -1919,7 +1923,8 @@ The **Phase 2B provider-expansion implementation is complete**:
 - added identifiable Claude hook management and atomic lifecycle ingestion;
 - reconciled native processes, tmux surfaces, and retained resumability without
   treating foreground turn completion as child-task completion; and
-- validated native resume fallback plus canonical Snapshot v1 output.
+- validated native resume fallback plus the then-current Snapshot v1 output,
+  now superseded by Snapshot v2.
 
 Phase 2B ends at trustworthy Claude runtime truth. It does not add Claude DMS
 actions or tmux presentation policy.
@@ -1944,8 +1949,10 @@ Phase 3 delivery was split by dependency:
 
 #### Phase 3B: project-aware new local Codex sessions
 
-- Implement provider-neutral `prepare-new` contracts and project/location/cwd
-  selection.
+This historical v1 phase implemented `prepare-new` and project/location/cwd
+selection; Phase 4D removes that public surface.
+
+- Implement the historical provider-neutral new-session selection contract.
 - Prove the first new-session path with local Codex, including leased waiting
   surfaces, hook or exact-live identity binding, rollback, and idempotency.
 - Extend DMS action parity to the validated new-Codex presentation plans.
@@ -2000,7 +2007,7 @@ optional external-memory MCP adapter are recorded in
 - Cut core, TUI, agent tools, Snapshot, and DMS to the coordinated v2 contract.
 - Discover existing Git worktrees without creating or mutating them.
 
-The accepted contract and migration/rollout gates are in
+The implemented contract and migration/rollout gates are in
 [`docs/phase-4d-plan.md`](phase-4d-plan.md). Phase 5 builds directly on v2.
 
 ### Phase 5: Remote hosts
@@ -2028,8 +2035,9 @@ tests.
 ### Unit tests
 
 - Session identity and merge rules
-- Global project identity, cross-host conflict detection, location selection,
-  canonical path containment, ambiguous matches, and session assignment
+- Global project and repository identity, cross-host conflict detection,
+  checkout selection, canonical path containment, ambiguous matches, and
+  session assignment
 - Launch-intent transitions, lease expiry, idempotent retries, binding, and
   recovery after missed hooks
 - Immutable handoff, wrapping, pinning, import, and continuation semantics
@@ -2108,8 +2116,8 @@ Use an isolated tmux server/socket to verify:
 ### Manually launched live sessions
 
 Switchboard is expected to be the entry point for new managed Codex and Claude
-Code sessions. Launching through Switchboard establishes the project, location,
-launch intent, and stable tmux surface before the provider starts.
+Code sessions. Launching through Switchboard establishes the task, project,
+checkout, launch intent, and stable tmux surface before the provider starts.
 
 Sessions launched manually outside Switchboard may still be discovered through
 provider-native queries or hooks. Provider-native parked history remains
@@ -2228,8 +2236,8 @@ not another transport or authorization layer.
 
 ### Project context sources
 
-Phase 4C reads only explicitly configured project-relative UTF-8 text files
-or directories under the caller's exact configured location, plus bounded
+Phase 4D reads only explicitly configured repository-relative UTF-8 text files
+or directories under the caller's exact routed checkout, plus bounded
 same-project host-local session metadata and latest explicit handoffs. File,
 byte, directory-traversal, session, handoff, and issue counts are fixed and
 parser-enforced. It does not guess files or include Git diffs, provider

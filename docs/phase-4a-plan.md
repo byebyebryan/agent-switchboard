@@ -1,5 +1,8 @@
 # Phase 4A Plan: Terminal-native TUI Vertical Slice
 
+> Historical v1 plan and evidence. Phase 4D replaces its session-first view,
+> location launch targets, and Snapshot v1 contract with task-first v2 behavior.
+
 Date: 2026-07-19
 
 Status: Complete through 4A.5

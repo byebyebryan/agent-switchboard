@@ -1,5 +1,8 @@
 # Phase 3A Validation: Existing Local Codex Presentation
 
+> Historical v1 record. Phase 4D supersedes its location and Snapshot v1
+> public contract while retaining its tmux presentation evidence.
+
 Date: 2026-07-16
 
 ## Status and boundary

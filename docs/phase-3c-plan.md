@@ -1,5 +1,8 @@
 # Phase 3C Plan: Claude Managed-tmux and DMS Parity
 
+> Historical v1 plan and evidence. Phase 4D supersedes its location and
+> Snapshot v1 frontend contract; its Claude/tmux evidence remains valid.
+
 Date: 2026-07-18
 
 Status: complete for local Claude known-session resume, new sessions, native

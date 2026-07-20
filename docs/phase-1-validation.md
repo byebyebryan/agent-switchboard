@@ -1,5 +1,8 @@
 # Phase 1 Validation
 
+> Historical v1 record. Phase 4D replaces its location and Snapshot v1
+> contracts with repositories, checkouts, tasks, and Snapshot v2.
+
 Date: 2026-07-15
 
 ## Status and boundary

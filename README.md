@@ -45,9 +45,12 @@ Codex and Claude sessions:
   with forced disabled Agent View and exact `claude --resume` execution
 - exact process/session/tmux correlation that can atomically finish a pending
   resume when Codex omits the expected start hook
-- atomic project/location/provider resolution and new-session preparation for
-  Codex or Claude with an unbound waiting surface, attach-before-start
-  bootstrap, exact hook/live identity binding, and same-request idempotency
+- explicit projects with stable repository memberships, host-local main or
+  linked-worktree checkouts, and bounded read-only Git discovery
+- first-class open and closed tasks with one current top-level provider
+  session, retained session history, explicit adoption, and checkout claims
+- atomic task creation and Codex or Claude launch reservation with an unbound
+  waiting surface, attach-before-start bootstrap, and same-request idempotency
 - provider-native Claude history selection through an unbound managed surface
   running exact `claude --resume`, with hook binding after selection and
   fail-closed surface retirement after cancellation
@@ -58,8 +61,8 @@ Codex and Claude sessions:
   the separate DMS integration
 - random per-launch Codex and Claude agent capabilities stored only as digests, with
   exact current-pane/launch/surface/session authorization
-- bounded configured-file and same-project context, project-scoped retained
-  reads/search, and current-session-only name, handoff, and wrap commands
+- repository-owned bounded context, project-scoped retained reads/search, and
+  current-task-only title, purpose, pin, handoff, and close commands
 - a thin dependency-free stdio MCP projection of the same authorized service,
   plus an explicit, disabled-by-default bounded memory MCP adapter
 - unit, migration, concurrency, provider, protocol, and packaging tests
@@ -93,7 +96,10 @@ current-project context and retained-state search, current-session curation, a
 thin stdio MCP transport, and an optional external memory MCP adapter. Its
 contract and isolated installed evidence are recorded in
 [`docs/phase-4c-plan.md`](docs/phase-4c-plan.md). Remote SSH transport remains
-Phase 5. See
+Phase 5. Phase 4D is the clean `0.2.0` local-management cutover: Snapshot v2,
+configuration v2, repositories/checkouts, explicit tasks, and the task-first
+TUI are implemented in core. Its accepted contract and acceptance checklist
+are recorded in [`docs/phase-4d-plan.md`](docs/phase-4d-plan.md). See
 [the design](docs/design.md), the
 [Phase 1 validation record](docs/phase-1-validation.md), and the
 [Phase 2 validation record](docs/phase-2-validation.md), the
@@ -121,18 +127,27 @@ swbctl session handoff <session-key> --json-stdin --json
 swbctl session wrap <session-key> --json-stdin --json
 swbctl agent current --json
 swbctl agent context --json
-swbctl agent sessions --json
-swbctl agent show <session-key> --json
+swbctl agent tasks --json
+swbctl agent task --json
 swbctl agent handoff-read <handoff-id> --json
-swbctl agent handoffs <session-key> [--limit 20] --json
+swbctl agent handoffs [--limit 20] --json
 swbctl agent search <query> [--limit 20] --json
 swbctl agent memory <query> [--limit 20] --json
-swbctl agent name <name> --json
-swbctl agent name --clear --json
+swbctl agent update [--title <title>] [--purpose <purpose>] [--pin on|off] --json
 swbctl agent handoff --json-stdin --json
-swbctl agent wrap --json-stdin --json
+swbctl agent close --json-stdin --json
 swbctl agent-mcp
 swbctl tui
+swbctl config migrate-v2 --input <legacy-config> --print
+swbctl task list [--project <project-id>] [--status open|closed] --json
+swbctl task create --task-id <uuid> --project <project-id> --title <title> --json
+swbctl task adopt <session-key> --task <task-id> --json
+swbctl task show <task-id> --json
+swbctl task title <task-id> <title> --json
+swbctl task purpose <task-id> <purpose> --json
+swbctl task pin <task-id> [--off] --json
+swbctl task close <task-id> --json-stdin --json
+swbctl task reopen <task-id> --json
 swbctl hooks install --provider codex --dry-run
 swbctl hooks uninstall --provider codex --dry-run
 swbctl hooks install --provider claude --dry-run
@@ -140,12 +155,12 @@ swbctl hooks uninstall --provider claude --dry-run
 swbctl doctor
 swbctl prepare-open <session-key> --request-id <uuid> \
   --can-focus-desktop --can-launch-terminal --json
-swbctl prepare-new --project <project-id> --location <location-id> \
-  --provider codex|claude --request-id <uuid> \
+swbctl prepare-task <task-id> --create --project <project-id> --title <title> \
+  --checkout <checkout-id> --provider codex|claude --request-id <uuid> \
   --can-focus-desktop --can-launch-terminal --json
-swbctl prepare-new --from <handoff-id-or-session-key> --request-id <uuid> \
+swbctl prepare-task <task-id> --request-id <uuid> \
   --can-focus-desktop --can-launch-terminal --json
-swbctl prepare-history --project <project-id> --location <location-id> \
+swbctl prepare-history --project <project-id> --checkout <checkout-id> \
   --request-id <uuid> --can-focus-desktop --can-launch-terminal --json
 swbctl stop-session <claude-session-key> --json
 swbctl select-surface <surface-id> --client <tmux-client-id>
@@ -200,22 +215,21 @@ duplicated. Frontends receive only versioned presentation fields and stable
 surface IDs. `select-surface` and `attach-surface` revalidate registry and tmux
 identity instead of accepting raw frontend tmux targets.
 
-`prepare-new` loads the current validated host configuration, resolves the
-selected project, local location, and Codex or Claude provider, then creates an
-unbound leased tmux surface. The provider starts without shell interpolation
-only after a client attaches. Claude launches additionally force
-`CLAUDE_CODE_DISABLE_AGENT_VIEW=1`. The bootstrap revalidates the project,
-location, working directory, transport, and surface immediately before `exec`,
-then renews a bounded five-minute identity binding grace; the first exact
-lifecycle hook or complete live tmux/process correlation atomically assigns the
-provider UUID and confirms the session/surface binding.
+`prepare-task` loads configuration v2, resolves the task's project and local
+checkout, and either opens its current unwrapped session or creates the next
+Codex or Claude session from the exact wrapped handoff. New-task preparation
+creates the task and launch reservation in one transaction. The provider
+starts without shell interpolation only after a client attaches. Claude
+launches additionally force `CLAUDE_CODE_DISABLE_AGENT_VIEW=1`. Bootstrap
+revalidates task, repository, checkout, working directory, transport, and
+surface immediately before `exec`; the first exact lifecycle hook or complete
+live tmux/process correlation assigns the provider UUID and advances the
+task's current session atomically.
 
-`prepare-new --from` continues from an immutable handoff without reading a
-transcript or injecting provider prompt text. A handoff ID is exact; a session
-key resolves its latest handoff in the same transaction that reserves the
-launch. Project and location derive from the local source session, the source
-provider is the default, and an explicit provider may switch between Codex and
-Claude while preserving the exact lineage.
+Continuation never reads a transcript or injects provider prompt text. A task
+may switch providers only after its current session has an explicit handoff and
+is wrapped. Closing a task appends that handoff and wraps the session in the
+same transaction, but deliberately leaves the runtime and tmux surface alone.
 
 `prepare-history` follows the same attach-before-start lifecycle but launches
 Claude's native `claude --resume` picker without supplying or discovering a
@@ -240,7 +254,7 @@ retained and emitted counts.
 
 `show` and the `session` command family expose local human curation through a
 separate bounded session-detail envelope; handoff bodies remain outside
-Snapshot v1. Name, purpose, and pin changes do not masquerade as provider
+Snapshot v2. Name, purpose, and pin changes do not masquerade as provider
 observations. Handoff and wrap accept one strict bounded JSON object on stdin,
 assign immutable sequence and hash state atomically, and support an optional
 client-generated UUID for safe retry. `current` and mutation `--current`
@@ -252,10 +266,12 @@ exact `resume` surfaces. Every invocation requires the exact
 inherited tmux pane, bound launch/surface/session identities, and a random
 per-launch capability whose raw value exists only in that surface environment;
 SQLite retains only its SHA-256 digest. The caller cannot provide a session or
-project identity for authorization. Reads and search are then restricted to
-the caller's configured local project; search covers only curated names,
-purposes, and explicit handoffs. `context` additionally reads only explicitly
-configured project-relative text sources. Mutations always target the caller.
+project identity for authorization. Reads and search are restricted to the
+caller's configured local project and current task; search covers only curated
+titles, purposes, sessions, and explicit handoffs. `context` reads only
+repository-relative configured text sources. Mutations can update only the
+current task or append its exact handoff. Task creation, adoption, checkout
+routing, provider preference, and reopening remain human-only operations.
 Agent commands never reconcile providers, read transcripts, call a model, or
 enter the DMS path.
 
@@ -278,12 +294,13 @@ child, accepts text content only, and returns an unavailable envelope on
 absence, timeout, or protocol/tool failure. Switchboard never reads the
 adapter's private databases or provider transcripts.
 
-`swbctl tui` exposes those operations through the optional Textual frontend.
-It loads handoff bodies only for the selected session, keeps the last-good list
-and detail on failures, and uses fixed installed commands rather than importing
-registry or provider internals. Press `a`/`p` to edit name or purpose, `v` to
-pin, `g` to record a handoff, `w` to wrap, `c` to continue from the displayed
-latest immutable handoff, and `d` to reload detail.
+`swbctl tui` is the complete local task-management frontend. Open tasks are the
+default view; `1`, `2`, and `3` switch between Open, Inbox, and Closed. It can
+create and launch a titled task, adopt an Inbox session, edit task title or
+purpose, pin, close with an explicit handoff, reopen, continue, inspect task
+session history, open exact Inbox sessions, and request safe Claude stop. It
+uses only fixed installed commands and validated Snapshot v2 data rather than
+importing registry or provider internals.
 
 ## Requirements and development setup
 
@@ -307,7 +324,7 @@ git diff --check
 
 To replace the dogfood installation with the current checkout, including the
 TUI extra, force a fresh local build. `--force` alone may reuse an older cached
-artifact while development commits still share version `0.1.0`:
+artifact while development commits still share version `0.2.0`:
 
 ```sh
 uv tool install --force --no-cache '.[tui]'

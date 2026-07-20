@@ -2,7 +2,8 @@
 
 Date: 2026-07-19
 
-Status: accepted design; implementation pending
+Status: implementation complete; deterministic acceptance passed in core and
+the separate DMS adapter, guarded installed rollout pending
 
 ## Decision
 
@@ -345,6 +346,16 @@ or gain provider/tmux ownership. Existing abnormal-exit process-group cleanup
 and fault-injection coverage remain required.
 
 ## Acceptance and rollout
+
+The implementation checkpoint is split into core contract/lifecycle commit
+`803f0f8`, core task-first TUI commit `b98ff30`, DMS bridge/model commit
+`ff980f4`, and DMS launcher/category commit `d5ca3b2`. Core passes 603 tests,
+including the separate Textual lane, plus Ruff formatting/lint and reproducible
+wheel/sdist content verification. DMS passes 90 Python tests, 13 deterministic
+JavaScript behavior groups, Qt 6 QML formatting, Ruff, package Pyright, and
+whitespace checks. The reviewer pass also covers provisional legacy repository
+kind correction, Snapshot task byte/count truncation, strict Git worktree
+identity parsing, and DMS whole-model byte budgeting.
 
 Automated acceptance uses temporary Git repositories with main and linked
 worktrees, private XDG roots, private tmux servers, and fake providers. It does

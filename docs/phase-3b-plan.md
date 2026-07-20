@@ -1,5 +1,8 @@
 # Phase 3B Plan: Project-Aware New Local Codex Sessions
 
+> Historical v1 plan and evidence. Phase 4D removes `prepare-new`, locations,
+> and Snapshot v1 in favor of task-aware preparation and Snapshot v2.
+
 Date: 2026-07-16
 
 Status: Core, DMS implementation, and live acceptance complete

@@ -1,5 +1,8 @@
 # Phase 4B Plan: Local Curation and Immutable Handoffs
 
+> Historical v1 plan and evidence. Phase 4D moves continuation and primary
+> curation to explicit tasks while retaining immutable session handoffs.
+
 Date: 2026-07-19
 
 Status: complete; 4B.1-4B.5 implemented and accepted

@@ -1,5 +1,8 @@
 # Open-source Product Landscape
 
+> Prior-art research record. Phase 4D's project/repository/checkout/task model
+> supersedes the early location-oriented product-shape suggestions below.
+
 Status: Research snapshot
 
 Last updated: 2026-07-15

@@ -1,5 +1,8 @@
 # Phase 2B Plan: Trustworthy Local Claude Runtime Truth
 
+> Historical v1 plan and evidence. Phase 4D supersedes its location and
+> Snapshot v1 frontend contract; its provider lifecycle evidence remains valid.
+
 Date: 2026-07-17
 
 Status: core, DMS implementation, user-profile cutover, and live acceptance

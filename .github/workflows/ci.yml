@@ -107,6 +107,7 @@ jobs:
           import agent_switchboard.providers.codex
           import agent_switchboard.providers.claude
           import agent_switchboard.reconcile
+          import agent_switchboard.repository_discovery
           import agent_switchboard.snapshot
           import agent_switchboard.state
           import agent_switchboard.tui_gateway
@@ -124,6 +125,8 @@ jobs:
               "migrations/v0004_runtime_truth_ordering.py",
               "migrations/v0005_history_launch.py",
               "migrations/v0006_agent_tools.py",
+              "migrations/v0007_repository_checkouts.py",
+              "migrations/v0008_tasks.py",
           ):
               assert package.joinpath(migration).is_file()
           with TemporaryDirectory() as directory:
@@ -140,7 +143,7 @@ jobs:
           do
             python="$environment/bin/python"
             swbctl="$environment/bin/swbctl"
-            test "$("$swbctl" --version)" = "swbctl 0.1.0"
+            test "$("$swbctl" --version)" = "swbctl 0.2.0"
             "$swbctl" --help | \
               grep -F "Inspect and route provider-native coding-agent sessions."
             "$swbctl" snapshot --help | grep -F -- "--reconcile {none,live,full}"
@@ -150,11 +153,13 @@ jobs:
             "$swbctl" session --help | grep -F "usage: swbctl session"
             "$swbctl" agent --help | grep -F "usage: swbctl agent"
             "$swbctl" agent context --help | grep -F -- "--json"
-            "$swbctl" agent sessions --help | grep -F -- "--json"
+            "$swbctl" agent tasks --help | grep -F -- "--json"
+            "$swbctl" agent task --help | grep -F -- "--json"
             "$swbctl" agent search --help | grep -F -- "--limit LIMIT"
             "$swbctl" agent memory --help | grep -F -- "--limit LIMIT"
             "$swbctl" agent-mcp --help | grep -F "usage: swbctl agent-mcp"
-            "$swbctl" prepare-new --help | grep -F -- "--from SOURCE_REF"
+            "$swbctl" task --help | grep -F "usage: swbctl task"
+            "$swbctl" prepare-task --help | grep -F -- "--create"
             "$swbctl" hooks install --help | grep -F -- "--dry-run"
             "$swbctl" hooks uninstall --help | grep -F -- "--dry-run"
             "$swbctl" doctor --help | grep -F "usage: swbctl doctor"

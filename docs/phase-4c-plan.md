@@ -1,5 +1,8 @@
 # Phase 4C: Session-Scoped Agent Context and Tools
 
+> Historical v1 plan and evidence. Phase 4D narrows mutation from the current
+> session to the current task and replaces location context with repository context.
+
 Date: 2026-07-19
 
 Status: accepted

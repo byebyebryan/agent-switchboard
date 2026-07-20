@@ -43,6 +43,7 @@ def test_static_pep_621_metadata_and_stdlib_runtime() -> None:
         "docs/phase-4a-plan.md",
         "docs/phase-4b-plan.md",
         "docs/phase-4c-plan.md",
+        "docs/phase-4d-plan.md",
     ]
     assert metadata["tool"]["pytest"]["ini_options"]["pythonpath"] == ["src"]
 
@@ -89,6 +90,7 @@ def test_ci_smokes_wheel_and_source_distribution_installations() -> None:
         "agent_switchboard.providers.codex",
         "agent_switchboard.providers.claude",
         "agent_switchboard.reconcile",
+        "agent_switchboard.repository_discovery",
         "agent_switchboard.snapshot",
         "agent_switchboard.tui_gateway",
         "agent_switchboard.tui_model",
@@ -97,6 +99,8 @@ def test_ci_smokes_wheel_and_source_distribution_installations() -> None:
     assert "migrations/v0003_name_provenance_runtime_index.py" in workflow
     assert "migrations/v0004_runtime_truth_ordering.py" in workflow
     assert "migrations/v0005_history_launch.py" in workflow
+    assert "migrations/v0007_repository_checkouts.py" in workflow
+    assert "migrations/v0008_tasks.py" in workflow
     assert 'snapshot --help | grep -F -- "--reconcile {none,live,full}"' in workflow
     assert 'list --help | grep -F -- "--refresh"' in workflow
     assert 'show --help | grep -F -- "--handoff-limit"' in workflow
@@ -104,11 +108,13 @@ def test_ci_smokes_wheel_and_source_distribution_installations() -> None:
     assert 'session --help | grep -F "usage: swbctl session"' in workflow
     assert 'agent --help | grep -F "usage: swbctl agent"' in workflow
     assert 'agent context --help | grep -F -- "--json"' in workflow
-    assert 'agent sessions --help | grep -F -- "--json"' in workflow
+    assert 'agent tasks --help | grep -F -- "--json"' in workflow
+    assert 'agent task --help | grep -F -- "--json"' in workflow
     assert 'agent search --help | grep -F -- "--limit LIMIT"' in workflow
     assert 'agent memory --help | grep -F -- "--limit LIMIT"' in workflow
     assert 'agent-mcp --help | grep -F "usage: swbctl agent-mcp"' in workflow
-    assert 'prepare-new --help | grep -F -- "--from SOURCE_REF"' in workflow
+    assert 'task --help | grep -F "usage: swbctl task"' in workflow
+    assert 'prepare-task --help | grep -F -- "--create"' in workflow
     assert 'hooks install --help | grep -F -- "--dry-run"' in workflow
     assert 'hooks uninstall --help | grep -F -- "--dry-run"' in workflow
     assert 'doctor --help | grep -F "usage: swbctl doctor"' in workflow
@@ -132,6 +138,8 @@ def test_ci_smokes_wheel_and_source_distribution_installations() -> None:
     assert '"agent_switchboard/migrations/v0004_runtime_truth_ordering.py"' in verifier
     assert '"agent_switchboard/migrations/v0005_history_launch.py"' in verifier
     assert '"agent_switchboard/migrations/v0006_agent_tools.py"' in verifier
+    assert '"agent_switchboard/migrations/v0007_repository_checkouts.py"' in verifier
+    assert '"agent_switchboard/migrations/v0008_tasks.py"' in verifier
 
 
 def test_cli_help_and_version(capsys: pytest.CaptureFixture[str]) -> None:
