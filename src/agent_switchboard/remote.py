@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 import time
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
@@ -16,7 +17,9 @@ from .protocol import (
     FleetHost,
     FleetReachability,
     FleetSource,
+    PresentationPlanEnvelope,
     ProtocolError,
+    SessionActionEnvelope,
     SnapshotEnvelope,
 )
 from .storage import IdentityConflict, Registry, StorageError
@@ -25,9 +28,27 @@ from .tui_gateway import CommandOutput, GatewayError, run_bounded_command
 SSH_CONNECT_TIMEOUT_SECONDS = 5
 REMOTE_SNAPSHOT_TIMEOUT_SECONDS = 20.0
 MAX_CONCURRENT_SSH = 4
+REMOTE_ACTION_TIMEOUT_SECONDS = 20.0
+_REMOTE_COMMAND_TOKEN = re.compile(r"[A-Za-z0-9_./:@%+,=-]+\Z")
+_REMOTE_COMMAND_OPTIONS = frozenset(
+    {
+        "--can-focus-desktop",
+        "--can-launch-terminal",
+        "--checkout",
+        "--client",
+        "--create",
+        "--has-current-terminal",
+        "--json",
+        "--json-stdin",
+        "--project",
+        "--provider",
+        "--request-id",
+    }
+)
 
 Clock = Callable[[], int]
 AsyncRunner = Callable[[Sequence[str], float, bytes | None], Awaitable[CommandOutput]]
+type RemoteParser[T] = Callable[[str | bytes | bytearray], T]
 
 
 class RemoteError(RuntimeError):
@@ -76,6 +97,59 @@ def snapshot_ssh_argv(
     )
 
 
+def _remote_command_token(value: object) -> str:
+    if (
+        not isinstance(value, str)
+        or not value
+        or len(value) > 4096
+        or _REMOTE_COMMAND_TOKEN.fullmatch(value) is None
+        or (value.startswith("-") and value not in _REMOTE_COMMAND_OPTIONS)
+    ):
+        raise RemoteError(
+            "remote_argument_invalid",
+            "A remote command argument is not a safe bounded token.",
+            retryable=False,
+        )
+    return value
+
+
+def action_ssh_argv(
+    remote: RemoteConfig,
+    arguments: Sequence[str],
+    *,
+    ssh_executable: str = "ssh",
+) -> tuple[str, ...]:
+    return (
+        ssh_executable,
+        "-T",
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        f"ConnectTimeout={SSH_CONNECT_TIMEOUT_SECONDS}",
+        "--",
+        remote.ssh_target,
+        "swbctl",
+        *(_remote_command_token(argument) for argument in arguments),
+    )
+
+
+def attach_ssh_argv(
+    remote: RemoteConfig,
+    surface_id: str,
+    *,
+    ssh_executable: str = "ssh",
+) -> tuple[str, ...]:
+    return (
+        ssh_executable,
+        "-tt",
+        "--",
+        remote.ssh_target,
+        "swbctl",
+        "attach-surface",
+        _remote_command_token(surface_id),
+    )
+
+
 def _gateway_remote_error(error: GatewayError) -> RemoteError:
     codes = {
         "command_timeout": "ssh_timeout",
@@ -96,6 +170,131 @@ def _gateway_remote_error(error: GatewayError) -> RemoteError:
         "ssh_failed": "The remote snapshot request failed.",
     }
     return RemoteError(code, messages[code], retryable=error.retryable)
+
+
+def resolve_remote_host(
+    registry: Registry,
+    config: SwitchboardConfig,
+    host_id: HostId,
+) -> RemoteConfig:
+    """Resolve one declared, pinned endpoint without exposing its target."""
+
+    materialize_remote_endpoints(registry, config, observed_at=_clock_ms())
+    configured = {remote.alias: remote for remote in config.remotes}
+    matches = [
+        row
+        for row in registry.list_remotes(declared_only=True)
+        if row.get("remote_host_id") == str(host_id)
+        and str(row["remote_name"]) in configured
+    ]
+    if not matches:
+        raise RemoteError(
+            "remote_host_unknown",
+            "The requested host has no declared pinned remote endpoint.",
+            retryable=False,
+        )
+    if len(matches) != 1:
+        raise RemoteError(
+            "remote_host_ambiguous",
+            "The requested host resolves to more than one remote endpoint.",
+            retryable=False,
+        )
+    return configured[str(matches[0]["remote_name"])]
+
+
+async def invoke_remote_json[T: PresentationPlanEnvelope | SessionActionEnvelope](
+    remote: RemoteConfig,
+    arguments: Sequence[str],
+    parser: RemoteParser[T],
+    *,
+    stdin: bytes | None = None,
+    runner: AsyncRunner = run_bounded_command,
+    ssh_executable: str = "ssh",
+) -> T:
+    """Run one bounded noninteractive remote action and validate one envelope."""
+
+    try:
+        output = await runner(
+            action_ssh_argv(
+                remote,
+                arguments,
+                ssh_executable=ssh_executable,
+            ),
+            REMOTE_ACTION_TIMEOUT_SECONDS,
+            stdin,
+        )
+    except GatewayError as error:
+        raise _gateway_remote_error(error) from error
+    if output.exit_code != 0:
+        raise RemoteError(
+            "remote_action_failed",
+            "The remote action command exited unsuccessfully.",
+            retryable=True,
+        )
+    if output.stderr:
+        raise RemoteError(
+            "remote_action_invalid",
+            "The remote action emitted unexpected diagnostics.",
+            retryable=False,
+        )
+    if (
+        not output.stdout.endswith(b"\n")
+        or b"\n" in output.stdout[:-1]
+        or b"\r" in output.stdout
+    ):
+        raise RemoteError(
+            "remote_action_invalid",
+            "The remote action did not emit one JSON record.",
+            retryable=False,
+        )
+    payload = output.stdout[:-1]
+    if not payload or payload[:1].isspace() or payload[-1:].isspace():
+        raise RemoteError(
+            "remote_action_invalid",
+            "The remote action emitted invalid JSON framing.",
+            retryable=False,
+        )
+    try:
+        return parser(payload)
+    except (ProtocolError, ValidationError, ValueError) as error:
+        raise RemoteError(
+            "remote_action_invalid",
+            "The remote action returned an incompatible response.",
+            retryable=False,
+        ) from error
+
+
+async def invoke_remote_empty(
+    remote: RemoteConfig,
+    arguments: Sequence[str],
+    *,
+    runner: AsyncRunner = run_bounded_command,
+    ssh_executable: str = "ssh",
+) -> None:
+    try:
+        output = await runner(
+            action_ssh_argv(
+                remote,
+                arguments,
+                ssh_executable=ssh_executable,
+            ),
+            REMOTE_ACTION_TIMEOUT_SECONDS,
+            None,
+        )
+    except GatewayError as error:
+        raise _gateway_remote_error(error) from error
+    if output.exit_code != 0:
+        raise RemoteError(
+            "remote_action_failed",
+            "The remote action command exited unsuccessfully.",
+            retryable=True,
+        )
+    if output.stdout or output.stderr:
+        raise RemoteError(
+            "remote_action_invalid",
+            "The remote action emitted unexpected output.",
+            retryable=False,
+        )
 
 
 async def fetch_remote_snapshot(
@@ -421,13 +620,19 @@ def build_fleet_envelope(
 __all__ = [
     "FLEET_VERSION",
     "MAX_CONCURRENT_SSH",
+    "REMOTE_ACTION_TIMEOUT_SECONDS",
     "REMOTE_SNAPSHOT_TIMEOUT_SECONDS",
     "RemoteError",
     "RemoteSnapshotResult",
+    "action_ssh_argv",
+    "attach_ssh_argv",
     "build_fleet_envelope",
     "fetch_remote_snapshot",
     "fetch_remote_snapshots",
+    "invoke_remote_empty",
+    "invoke_remote_json",
     "materialize_remote_endpoints",
     "refresh_remote_cache",
+    "resolve_remote_host",
     "snapshot_ssh_argv",
 ]

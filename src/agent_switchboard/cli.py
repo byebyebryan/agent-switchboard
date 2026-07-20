@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import importlib
 import json
 import os
@@ -14,7 +15,7 @@ from pathlib import Path
 
 from . import __version__
 from .agent_tools import AgentToolError, AgentToolService
-from .config import SwitchboardConfig, load_config, migrate_legacy_config
+from .config import RemoteConfig, SwitchboardConfig, load_config, migrate_legacy_config
 from .curation import (
     MAX_HANDOFF_INPUT_BYTES,
     CurationError,
@@ -54,12 +55,21 @@ from .protocol import (
     SessionDetailEnvelope,
     SnapshotEnvelope,
 )
-from .remote import RemoteError, build_fleet_envelope, refresh_remote_cache
+from .remote import (
+    RemoteError,
+    attach_ssh_argv,
+    build_fleet_envelope,
+    invoke_remote_empty,
+    invoke_remote_json,
+    refresh_remote_cache,
+    resolve_remote_host,
+)
 from .session_actions import ManagedSessionController
 from .storage import DEFAULT_HANDOFF_LIMIT, MAX_HANDOFF_LIMIT, Registry, StorageError
 from .tmux import TmuxController, TmuxError
 
 _MAX_ERROR_MESSAGE_LENGTH = 1_024
+_MAX_REMOTE_ACTION_INPUT_BYTES = 16 * 1024
 _EPHEMERAL_CONFIG_HOST_ID = HostId("00000000-0000-4000-8000-000000000000")
 
 
@@ -318,9 +328,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     prepare_open = commands.add_parser(
         "prepare-open",
-        help="atomically prepare an existing local session for presentation",
+        help="atomically prepare an existing session on its owning host",
     )
     prepare_open.add_argument("session_key")
+    prepare_open.add_argument("--host")
     prepare_open.add_argument("--request-id", required=True)
     prepare_open.add_argument("--has-current-terminal", action="store_true")
     prepare_open.add_argument("--current-tmux-client")
@@ -333,7 +344,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="atomically open or continue one task",
     )
     prepare_task.add_argument("task_id")
+    prepare_task.add_argument("--host")
     prepare_task.add_argument("--create", action="store_true")
+    prepare_task.add_argument("--json-stdin", action="store_true")
     prepare_task.add_argument("--project")
     prepare_task.add_argument("--title")
     prepare_task.add_argument("--purpose")
@@ -351,6 +364,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="atomically prepare the native Claude history picker",
     )
     prepare_history.add_argument("--project", required=True)
+    prepare_history.add_argument("--host")
     prepare_history.add_argument("--checkout")
     prepare_history.add_argument("--request-id", required=True)
     prepare_history.add_argument("--has-current-terminal", action="store_true")
@@ -361,22 +375,25 @@ def build_parser() -> argparse.ArgumentParser:
 
     select = commands.add_parser(
         "select-surface",
-        help="switch one revalidated tmux client to a managed surface",
+        help="switch one revalidated owning-host tmux client to a surface",
     )
     select.add_argument("surface_id")
+    select.add_argument("--host")
     select.add_argument("--client", required=True)
 
     attach = commands.add_parser(
         "attach-surface",
-        help="attach this terminal to a revalidated managed surface",
+        help="attach this terminal to a revalidated owning-host surface",
     )
     attach.add_argument("surface_id")
+    attach.add_argument("--host")
 
     stop = commands.add_parser(
         "stop-session",
-        help="stop one revalidated launch-owned Claude session",
+        help="stop one revalidated launch-owned Claude session on its host",
     )
     stop.add_argument("session_key")
+    stop.add_argument("--host")
     stop.add_argument("--json", action="store_true", required=True)
 
     bootstrap = commands.add_parser(
@@ -512,19 +529,92 @@ def _coordinator(
     )
 
 
-def _prepare_open(arguments: argparse.Namespace) -> str:
-    # Full reconciliation is bounded and authoritative for the duplicate-runtime
-    # decision. Its JSON result is intentionally discarded; preparation reads the
-    # resulting retained transaction directly.
-    build_local_snapshot_json(reconcile="full")
-    host_id = load_or_create_host_id()
-    config = load_config(host_id=host_id)
-    context = PresentationContext(
+def _action_host(
+    arguments: argparse.Namespace,
+    local_host_id: HostId,
+    *,
+    session_key: str | None = None,
+) -> HostId:
+    explicit = getattr(arguments, "host", None)
+    requested = local_host_id if explicit is None else HostId(explicit)
+    if session_key is None:
+        return requested
+    inferred = SessionKey.parse(session_key).host_id
+    if explicit is not None and requested != inferred:
+        raise ValidationError("requested host disagrees with the session key")
+    return inferred
+
+
+def _presentation_context(arguments: argparse.Namespace) -> PresentationContext:
+    return PresentationContext(
         arguments.has_current_terminal,
         arguments.current_tmux_client,
         arguments.can_focus_desktop,
         arguments.can_launch_terminal,
     )
+
+
+def _remote_context_arguments(arguments: argparse.Namespace) -> tuple[str, ...]:
+    values: list[str] = []
+    if arguments.has_current_terminal:
+        values.append("--has-current-terminal")
+    # A tmux client is host-local. It must never be interpreted on the owner as
+    # a client on that host; remote terminal callers receive an attach plan.
+    if arguments.can_focus_desktop:
+        values.append("--can-focus-desktop")
+    if arguments.can_launch_terminal:
+        values.append("--can-launch-terminal")
+    return tuple(values)
+
+
+def _remote_endpoint(config: SwitchboardConfig, host_id: HostId) -> RemoteConfig:
+    with Registry(database_path()) as registry:
+        return resolve_remote_host(registry, config, host_id)
+
+
+def _validate_remote_plan(
+    envelope: PresentationPlanEnvelope,
+    host_id: HostId,
+) -> PresentationPlanEnvelope:
+    if envelope.plan.host_id != host_id:
+        raise RemoteError(
+            "remote_action_host_mismatch",
+            "The remote action response belongs to another host.",
+            retryable=False,
+        )
+    return envelope
+
+
+def _prepare_open(arguments: argparse.Namespace) -> str:
+    host_id = load_or_create_host_id()
+    config = load_config(host_id=host_id)
+    target_host_id = _action_host(
+        arguments,
+        host_id,
+        session_key=arguments.session_key,
+    )
+    context = _presentation_context(arguments)
+    if target_host_id != host_id:
+        remote = _remote_endpoint(config, target_host_id)
+        envelope = asyncio.run(
+            invoke_remote_json(
+                remote,
+                (
+                    "prepare-open",
+                    arguments.session_key,
+                    "--request-id",
+                    arguments.request_id,
+                    *_remote_context_arguments(arguments),
+                    "--json",
+                ),
+                PresentationPlanEnvelope.from_json,
+            )
+        )
+        return _validate_remote_plan(envelope, target_host_id).to_json()
+    # Full reconciliation is bounded and authoritative for the duplicate-runtime
+    # decision. Its JSON result is intentionally discarded; preparation reads the
+    # resulting retained transaction directly.
+    build_local_snapshot_json(reconcile="full")
     with Registry(database_path()) as registry:
         plan = _coordinator(registry, host_id=host_id, config=config).prepare_open(
             arguments.session_key,
@@ -534,31 +624,116 @@ def _prepare_open(arguments: argparse.Namespace) -> str:
     return PresentationPlanEnvelope(plan).to_json()
 
 
+def _prepare_task_input(
+    arguments: argparse.Namespace,
+) -> tuple[str | None, str | None, str | None, str | None, str | None]:
+    if not arguments.json_stdin:
+        return (
+            arguments.project,
+            arguments.title,
+            arguments.purpose,
+            arguments.checkout,
+            arguments.provider,
+        )
+    if not arguments.create or any(
+        value is not None
+        for value in (
+            arguments.project,
+            arguments.title,
+            arguments.purpose,
+            arguments.checkout,
+            arguments.provider,
+        )
+    ):
+        raise PresentationError(
+            "--json-stdin requires --create and no inline task fields"
+        )
+    stream = getattr(sys.stdin, "buffer", sys.stdin)
+    raw = stream.read(_MAX_REMOTE_ACTION_INPUT_BYTES + 1)
+    if len(raw) > _MAX_REMOTE_ACTION_INPUT_BYTES:
+        raise PresentationError("remote task input is too large")
+    try:
+        value = json.loads(raw)
+    except (json.JSONDecodeError, UnicodeDecodeError, TypeError) as error:
+        raise PresentationError("remote task input must be a JSON object") from error
+    if not isinstance(value, dict) or set(value) != {
+        "project",
+        "title",
+        "purpose",
+        "checkout",
+        "provider",
+    }:
+        raise PresentationError("remote task input has incompatible fields")
+    for key in ("project", "title", "provider"):
+        if not isinstance(value[key], str):
+            raise PresentationError(f"remote task {key} must be text")
+    for key in ("purpose", "checkout"):
+        if value[key] is not None and not isinstance(value[key], str):
+            raise PresentationError(f"remote task {key} must be text or null")
+    return (
+        value["project"],
+        value["title"],
+        value["purpose"],
+        value["checkout"],
+        value["provider"],
+    )
+
+
 def _prepare_task(arguments: argparse.Namespace) -> str:
     host_id = load_or_create_host_id()
     config = load_config(host_id=host_id)
-    context = PresentationContext(
-        arguments.has_current_terminal,
-        arguments.current_tmux_client,
-        arguments.can_focus_desktop,
-        arguments.can_launch_terminal,
-    )
+    target_host_id = _action_host(arguments, host_id)
+    context = _presentation_context(arguments)
+    project, title, purpose, checkout, provider = _prepare_task_input(arguments)
+    if target_host_id != host_id:
+        remote = _remote_endpoint(config, target_host_id)
+        remote_arguments = ["prepare-task", arguments.task_id]
+        stdin: bytes | None = None
+        if arguments.create:
+            remote_arguments.extend(("--create", "--json-stdin"))
+            stdin = json.dumps(
+                {
+                    "project": project,
+                    "title": title,
+                    "purpose": purpose,
+                    "checkout": checkout,
+                    "provider": provider,
+                },
+                ensure_ascii=False,
+                allow_nan=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode("utf-8")
+        elif provider is not None:
+            remote_arguments.extend(("--provider", provider))
+        remote_arguments.extend(("--request-id", arguments.request_id))
+        remote_arguments.extend(_remote_context_arguments(arguments))
+        remote_arguments.append("--json")
+        envelope = asyncio.run(
+            invoke_remote_json(
+                remote,
+                tuple(remote_arguments),
+                PresentationPlanEnvelope.from_json,
+                stdin=stdin,
+            )
+        )
+        return _validate_remote_plan(envelope, target_host_id).to_json()
     with Registry(database_path()) as registry:
         materialize_configured_projects(registry, str(host_id), config)
         reconcile_live(registry, str(host_id))
         coordinator = _coordinator(registry, host_id=host_id, config=config)
         if arguments.create:
-            if not arguments.project or not arguments.title or not arguments.provider:
+            if not project or not title or not provider:
                 raise PresentationError(
                     "--create requires --project, --title, and --provider"
                 )
             plan = coordinator.prepare_task_create(
                 task_id=arguments.task_id,
-                project_id=arguments.project,
-                title=arguments.title,
-                purpose=arguments.purpose,
-                checkout_id=arguments.checkout,
-                provider=arguments.provider,
+                project_id=project,
+                title=title,
+                purpose=purpose,
+                checkout_id=checkout,
+                provider=provider,
                 request_id=arguments.request_id,
                 context=context,
             )
@@ -566,10 +741,10 @@ def _prepare_task(arguments: argparse.Namespace) -> str:
             if any(
                 value is not None
                 for value in (
-                    arguments.project,
-                    arguments.title,
-                    arguments.purpose,
-                    arguments.checkout,
+                    project,
+                    title,
+                    purpose,
+                    checkout,
                 )
             ):
                 raise PresentationError(
@@ -577,7 +752,7 @@ def _prepare_task(arguments: argparse.Namespace) -> str:
                 )
             plan = coordinator.prepare_task(
                 arguments.task_id,
-                provider=arguments.provider,
+                provider=provider,
                 request_id=arguments.request_id,
                 context=context,
             )
@@ -587,12 +762,28 @@ def _prepare_task(arguments: argparse.Namespace) -> str:
 def _prepare_history(arguments: argparse.Namespace) -> str:
     host_id = load_or_create_host_id()
     config = load_config(host_id=host_id)
-    context = PresentationContext(
-        arguments.has_current_terminal,
-        arguments.current_tmux_client,
-        arguments.can_focus_desktop,
-        arguments.can_launch_terminal,
-    )
+    target_host_id = _action_host(arguments, host_id)
+    context = _presentation_context(arguments)
+    if target_host_id != host_id:
+        remote = _remote_endpoint(config, target_host_id)
+        remote_arguments = [
+            "prepare-history",
+            "--project",
+            arguments.project,
+        ]
+        if arguments.checkout is not None:
+            remote_arguments.extend(("--checkout", arguments.checkout))
+        remote_arguments.extend(("--request-id", arguments.request_id))
+        remote_arguments.extend(_remote_context_arguments(arguments))
+        remote_arguments.append("--json")
+        envelope = asyncio.run(
+            invoke_remote_json(
+                remote,
+                tuple(remote_arguments),
+                PresentationPlanEnvelope.from_json,
+            )
+        )
+        return _validate_remote_plan(envelope, target_host_id).to_json()
     with Registry(database_path()) as registry:
         materialize_configured_projects(registry, str(host_id), config)
         reconcile_live(registry, str(host_id))
@@ -625,6 +816,30 @@ def _bootstrap(arguments: argparse.Namespace) -> int:
 def _stop_session(arguments: argparse.Namespace) -> str:
     host_id = load_or_create_host_id()
     config = load_config(host_id=host_id)
+    target_host_id = _action_host(
+        arguments,
+        host_id,
+        session_key=arguments.session_key,
+    )
+    if target_host_id != host_id:
+        remote = _remote_endpoint(config, target_host_id)
+        envelope = asyncio.run(
+            invoke_remote_json(
+                remote,
+                ("stop-session", arguments.session_key, "--json"),
+                SessionActionEnvelope.from_json,
+            )
+        )
+        if (
+            envelope.action.host_id != target_host_id
+            or str(envelope.action.session_key) != arguments.session_key
+        ):
+            raise RemoteError(
+                "remote_action_target_mismatch",
+                "The remote stop response disagrees with the requested session.",
+                retryable=False,
+            )
+        return envelope.to_json()
     with Registry(database_path()) as registry:
         materialize_configured_projects(registry, str(host_id), config)
 
@@ -1067,6 +1282,26 @@ def _agent_mcp_command() -> int:
 
 def _surface_action(arguments: argparse.Namespace) -> int:
     host_id = load_or_create_host_id()
+    target_host_id = _action_host(arguments, host_id)
+    if target_host_id != host_id:
+        config = load_config(host_id=host_id)
+        remote = _remote_endpoint(config, target_host_id)
+        if arguments.command == "select-surface":
+            asyncio.run(
+                invoke_remote_empty(
+                    remote,
+                    (
+                        "select-surface",
+                        arguments.surface_id,
+                        "--client",
+                        arguments.client,
+                    ),
+                )
+            )
+            return 0
+        argv = attach_ssh_argv(remote, arguments.surface_id)
+        os.execvp(argv[0], argv)
+        raise PresentationError("remote SSH attach unexpectedly returned")
     tmux = TmuxController()
     with Registry(database_path()) as registry:
         if arguments.command == "select-surface":
@@ -1279,6 +1514,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         except (
             ValidationError,
             StorageError,
+            RemoteError,
             PresentationError,
             TmuxError,
             MigrationError,

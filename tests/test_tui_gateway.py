@@ -45,6 +45,7 @@ CLAUDE_SESSION_KEY = f"{HOST_ID}:claude:66666666-6666-4666-8666-666666666666"
 REQUEST_ID = "77777777-7777-4777-8777-777777777777"
 TASK_ID = "88888888-8888-4888-8888-888888888888"
 TMUX_CLIENT = "/dev/pts/7"
+REMOTE_HOST_ID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
 
 
 def _record(
@@ -306,6 +307,80 @@ def test_gateway_uses_exact_public_argv_and_reuses_request_id(tmp_path: Path) ->
         prefix,
         "attach-surface",
         "33333333-3333-4333-8333-333333333333",
+    )
+
+
+def test_gateway_routes_remote_plan_attach_and_stop_with_host_id(
+    tmp_path: Path,
+) -> None:
+    executable = tmp_path / "swbctl"
+    executable.touch(mode=0o755)
+    plan_value = json.loads(PLAN_FIXTURE.read_text())
+    plan_value = json.loads(json.dumps(plan_value).replace(HOST_ID, REMOTE_HOST_ID))
+    plan_record = _record(PresentationPlanEnvelope.from_dict(plan_value))
+    remote_session_key = f"{REMOTE_HOST_ID}:claude:66666666-6666-4666-8666-666666666666"
+    action_record = _record(
+        SessionActionEnvelope(
+            SessionAction(
+                SessionActionStatus.STOPPED,
+                HostId(REMOTE_HOST_ID),
+                SessionKey.parse(remote_session_key),
+            )
+        )
+    )
+    calls: list[tuple[str, ...]] = []
+
+    async def runner(argv, timeout, stdin):
+        command = tuple(argv)
+        calls.append(command)
+        output = action_record if command[1] == "stop-session" else plan_record
+        return CommandOutput(output, b"", 0)
+
+    gateway = SwbctlGateway(executable, runner=runner)
+    context = PresentationContext(True, TMUX_CLIENT, False, False)
+
+    async def exercise() -> None:
+        await gateway.prepare_open(
+            remote_session_key,
+            request_id=REQUEST_ID,
+            context=context,
+            host_id=REMOTE_HOST_ID,
+        )
+        await gateway.stop_session(remote_session_key, host_id=REMOTE_HOST_ID)
+
+    asyncio.run(exercise())
+    assert calls == [
+        (
+            str(executable),
+            "prepare-open",
+            remote_session_key,
+            "--host",
+            REMOTE_HOST_ID,
+            "--request-id",
+            REQUEST_ID,
+            "--has-current-terminal",
+            "--current-tmux-client",
+            TMUX_CLIENT,
+            "--json",
+        ),
+        (
+            str(executable),
+            "stop-session",
+            remote_session_key,
+            "--host",
+            REMOTE_HOST_ID,
+            "--json",
+        ),
+    ]
+    assert gateway.attach_surface_command(
+        "33333333-3333-4333-8333-333333333333",
+        host_id=REMOTE_HOST_ID,
+    ) == (
+        str(executable),
+        "attach-surface",
+        "33333333-3333-4333-8333-333333333333",
+        "--host",
+        REMOTE_HOST_ID,
     )
 
 

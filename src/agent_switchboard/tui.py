@@ -1300,7 +1300,12 @@ class SwitchboardApp(App[tuple[str, ...] | None]):
             self._render_issues()
             self._render_status()
 
-    async def _apply_plan(self, envelope: PresentationPlanEnvelope) -> None:
+    async def _apply_plan(
+        self,
+        envelope: PresentationPlanEnvelope,
+        *,
+        host_id: str,
+    ) -> None:
         plan = envelope.plan
         if plan.kind is PresentationPlanKind.BLOCKED:
             if plan.error is None:
@@ -1328,8 +1333,15 @@ class SwitchboardApp(App[tuple[str, ...] | None]):
                 retryable=False,
             )
         surface_id = str(plan.surface_id)
+        model = self.model
+        routed_host_id = (
+            None if model is not None and host_id == model.host_id else host_id
+        )
         if plan.kind is PresentationPlanKind.ATTACH:
-            command = self.gateway.attach_surface_command(surface_id)
+            command = self.gateway.attach_surface_command(
+                surface_id,
+                host_id=routed_host_id,
+            )
             self.action_message = "Attaching selected surface"
             self.exit(command)
             return
@@ -1340,7 +1352,11 @@ class SwitchboardApp(App[tuple[str, ...] | None]):
                 "The Switchboard plan is incompatible with this terminal.",
                 retryable=False,
             )
-        await self.gateway.select_surface(surface_id, client=client)
+        await self.gateway.select_surface(
+            surface_id,
+            client=client,
+            host_id=routed_host_id,
+        )
         self.action_message = "Selected surface on current tmux client"
         self.exit()
 
@@ -1349,8 +1365,6 @@ class SwitchboardApp(App[tuple[str, ...] | None]):
             return
         task = self._selected_task()
         if task is not None:
-            if not self._local_action_allowed(task.host_id):
-                return
             if task.status == "closed":
                 self._publish_action_error(
                     "task_closed",
@@ -1359,7 +1373,7 @@ class SwitchboardApp(App[tuple[str, ...] | None]):
                 )
                 return
             if self._begin_action(f"opening {task.title}"):
-                self._prepare_task(task.task_id, self._new_request_id())
+                self._prepare_task(task.task_id, task.host_id, self._new_request_id())
             return
         row = None if self.model is None else self.model.selected_row
         if row is None:
@@ -1369,21 +1383,25 @@ class SwitchboardApp(App[tuple[str, ...] | None]):
                 retryable=False,
             )
             return
-        if not self._local_action_allowed(row.host_id):
-            return
         if self._begin_action(f"opening {row.label}"):
-            self._prepare_open(row.session_key, self._new_request_id())
+            self._prepare_open(row.session_key, row.host_id, self._new_request_id())
 
     @work(exclusive=False, group="action", exit_on_error=False)
-    async def _prepare_task(self, task_id: str, request_id: str) -> None:
+    async def _prepare_task(
+        self,
+        task_id: str,
+        host_id: str,
+        request_id: str,
+    ) -> None:
         try:
             envelope = await self.gateway.prepare_task(
                 task_id,
                 provider=None,
                 request_id=request_id,
                 context=self.terminal_context,
+                host_id=self._remote_host_option(host_id),
             )
-            await self._apply_plan(envelope)
+            await self._apply_plan(envelope, host_id=host_id)
         except GatewayError as error:
             self._publish_action_error(
                 error.code, error.message, retryable=error.retryable
@@ -1392,14 +1410,20 @@ class SwitchboardApp(App[tuple[str, ...] | None]):
             self._finish_action()
 
     @work(exclusive=False, group="action", exit_on_error=False)
-    async def _prepare_open(self, session_key: str, request_id: str) -> None:
+    async def _prepare_open(
+        self,
+        session_key: str,
+        host_id: str,
+        request_id: str,
+    ) -> None:
         try:
             envelope = await self.gateway.prepare_open(
                 session_key,
                 request_id=request_id,
                 context=self.terminal_context,
+                host_id=self._remote_host_option(host_id),
             )
-            await self._apply_plan(envelope)
+            await self._apply_plan(envelope, host_id=host_id)
         except GatewayError as error:
             self._publish_action_error(
                 error.code,
@@ -1412,15 +1436,7 @@ class SwitchboardApp(App[tuple[str, ...] | None]):
     def action_new_session(self) -> None:
         if self.action_busy:
             return
-        targets = (
-            ()
-            if self.model is None
-            else tuple(
-                target
-                for target in self.model.launch_targets
-                if target.host_id == self.model.host_id
-            )
-        )
+        targets = () if self.model is None else self.model.launch_targets
         if not targets:
             self._publish_action_error(
                 "launch_target_unavailable",
@@ -1470,8 +1486,9 @@ class SwitchboardApp(App[tuple[str, ...] | None]):
                 provider=target.provider.value,
                 request_id=request_id,
                 context=self.terminal_context,
+                host_id=self._remote_host_option(target.host_id),
             )
-            await self._apply_plan(envelope)
+            await self._apply_plan(envelope, host_id=target.host_id)
         except GatewayError as error:
             self._publish_action_error(
                 error.code,
@@ -1611,8 +1628,6 @@ class SwitchboardApp(App[tuple[str, ...] | None]):
             target
             for target in (() if self.model is None else self.model.launch_targets)
             if target.provider is ProviderId.CLAUDE
-            and self.model is not None
-            and target.host_id == self.model.host_id
         )
         if not targets:
             self._publish_action_error(
@@ -1640,8 +1655,9 @@ class SwitchboardApp(App[tuple[str, ...] | None]):
                 checkout_id=target.checkout_id,
                 request_id=request_id,
                 context=self.terminal_context,
+                host_id=self._remote_host_option(target.host_id),
             )
-            await self._apply_plan(envelope)
+            await self._apply_plan(envelope, host_id=target.host_id)
         except GatewayError as error:
             self._publish_action_error(
                 error.code,
@@ -1662,8 +1678,6 @@ class SwitchboardApp(App[tuple[str, ...] | None]):
                 retryable=False,
             )
             return
-        if not self._local_action_allowed(row.host_id):
-            return
         if not row.can_stop:
             self._publish_action_error(
                 "stop_not_eligible",
@@ -1680,12 +1694,15 @@ class SwitchboardApp(App[tuple[str, ...] | None]):
         if not confirmed:
             return
         if self._begin_action(f"stopping {row.label}"):
-            self._stop_session(row.session_key)
+            self._stop_session(row.session_key, row.host_id)
 
     @work(exclusive=False, group="action", exit_on_error=False)
-    async def _stop_session(self, session_key: str) -> None:
+    async def _stop_session(self, session_key: str, host_id: str) -> None:
         try:
-            envelope = await self.gateway.stop_session(session_key)
+            envelope = await self.gateway.stop_session(
+                session_key,
+                host_id=self._remote_host_option(host_id),
+            )
             action = envelope.action
             if action.status is SessionActionStatus.BLOCKED:
                 if action.error is None:
@@ -1737,6 +1754,10 @@ class SwitchboardApp(App[tuple[str, ...] | None]):
             retryable=False,
         )
         return False
+
+    def _remote_host_option(self, host_id: str) -> str | None:
+        model = self.model
+        return None if model is not None and host_id == model.host_id else host_id
 
     def _selected_task(self) -> TaskRow | None:
         model = self.model
@@ -2016,8 +2037,6 @@ class SwitchboardApp(App[tuple[str, ...] | None]):
         if self.action_busy:
             return
         task = self._selected_task()
-        if task is not None and not self._local_action_allowed(task.host_id):
-            return
         if task is None:
             row = self._selected_row_for_action("continuing its task")
             if row is None or row.task_id is None:
@@ -2038,7 +2057,7 @@ class SwitchboardApp(App[tuple[str, ...] | None]):
         if task is None:
             return
         if self._begin_action(f"continuing {task.title}"):
-            self._prepare_task(task.task_id, self._new_request_id())
+            self._prepare_task(task.task_id, task.host_id, self._new_request_id())
 
     def action_focus_search(self) -> None:
         search = self.query_one("#search", Input)

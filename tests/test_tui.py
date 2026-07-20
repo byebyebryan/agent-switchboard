@@ -407,7 +407,9 @@ class FakeGateway:
         *,
         request_id: str,
         context: Any,
+        host_id: str | None = None,
     ) -> Any:
+        assert host_id is None
         self.action_calls.append(("open", session_key, request_id, context))
         return await self._prepare()
 
@@ -422,7 +424,9 @@ class FakeGateway:
         purpose: str | None = None,
         request_id: str,
         context: Any,
+        host_id: str | None = None,
     ) -> Any:
+        assert host_id is None
         self.action_calls.append(
             (
                 "new",
@@ -445,7 +449,9 @@ class FakeGateway:
         checkout_id: str | None,
         request_id: str,
         context: Any,
+        host_id: str | None = None,
     ) -> Any:
+        assert host_id is None
         self.action_calls.append(
             ("history", project_id, checkout_id, request_id, context)
         )
@@ -458,11 +464,19 @@ class FakeGateway:
         provider: str | None,
         request_id: str,
         context: Any,
+        host_id: str | None = None,
     ) -> Any:
+        assert host_id is None
         self.action_calls.append(("continue", task_id, provider, request_id, context))
         return await self._prepare()
 
-    async def stop_session(self, session_key: str) -> Any:
+    async def stop_session(
+        self,
+        session_key: str,
+        *,
+        host_id: str | None = None,
+    ) -> Any:
+        assert host_id is None
         self.action_calls.append(("stop", session_key))
         return self.stop_action
 
@@ -522,10 +536,23 @@ class FakeGateway:
             lambda: _detail(self.retained, session_key),
         )
 
-    async def select_surface(self, surface_id: str, *, client: str) -> None:
+    async def select_surface(
+        self,
+        surface_id: str,
+        *,
+        client: str,
+        host_id: str | None = None,
+    ) -> None:
+        assert host_id is None
         self.action_calls.append(("select", surface_id, client))
 
-    def attach_surface_command(self, surface_id: str) -> tuple[str, ...]:
+    def attach_surface_command(
+        self,
+        surface_id: str,
+        *,
+        host_id: str | None = None,
+    ) -> tuple[str, ...]:
+        assert host_id is None
         self.action_calls.append(("attach", surface_id))
         return ("/fake/swbctl", "attach-surface", surface_id)
 

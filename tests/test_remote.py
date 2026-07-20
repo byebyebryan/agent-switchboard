@@ -4,22 +4,35 @@ import asyncio
 import json
 from pathlib import Path
 
+import pytest
+
 from agent_switchboard.config import RemoteConfig, parse_config
 from agent_switchboard.domain import HostId
-from agent_switchboard.protocol import FleetEnvelope, SnapshotEnvelope
+from agent_switchboard.protocol import (
+    FleetEnvelope,
+    PresentationPlanEnvelope,
+    SnapshotEnvelope,
+)
 from agent_switchboard.remote import (
     MAX_CONCURRENT_SSH,
     REMOTE_SNAPSHOT_TIMEOUT_SECONDS,
+    RemoteError,
+    action_ssh_argv,
+    attach_ssh_argv,
     build_fleet_envelope,
     fetch_remote_snapshot,
     fetch_remote_snapshots,
+    invoke_remote_empty,
+    invoke_remote_json,
     refresh_remote_cache,
+    resolve_remote_host,
     snapshot_ssh_argv,
 )
 from agent_switchboard.storage import Registry
 from agent_switchboard.tui_gateway import CommandOutput
 
 FIXTURE = Path(__file__).parent / "fixtures/protocol/v2/snapshot.json"
+PLAN_FIXTURE = Path(__file__).parent / "fixtures/protocol/v2/presentation-plan.json"
 LOCAL_HOST = HostId("11111111-1111-4111-8111-111111111111")
 REMOTE_HOST = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
 SECOND_REMOTE_HOST = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
@@ -59,6 +72,46 @@ def test_snapshot_ssh_argv_is_exact_and_shell_free() -> None:
     )
 
 
+def test_remote_action_argv_is_exact_and_rejects_unsafe_tokens() -> None:
+    remote = RemoteConfig("snap", "bryan@snap.lan", "snap")
+    arguments = (
+        "prepare-open",
+        f"{REMOTE_HOST}:codex:55555555-5555-4555-8555-555555555555",
+        "--request-id",
+        "77777777-7777-4777-8777-777777777777",
+        "--has-current-terminal",
+        "--json",
+    )
+    assert action_ssh_argv(remote, arguments) == (
+        "ssh",
+        "-T",
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        "ConnectTimeout=5",
+        "--",
+        "bryan@snap.lan",
+        "swbctl",
+        *arguments,
+    )
+    assert attach_ssh_argv(
+        remote,
+        "33333333-3333-4333-8333-333333333333",
+    ) == (
+        "ssh",
+        "-tt",
+        "--",
+        "bryan@snap.lan",
+        "swbctl",
+        "attach-surface",
+        "33333333-3333-4333-8333-333333333333",
+    )
+    with pytest.raises(RemoteError, match="safe bounded token"):
+        action_ssh_argv(remote, ("prepare-open", "bad; touch /tmp/injected"))
+    with pytest.raises(RemoteError, match="safe bounded token"):
+        action_ssh_argv(remote, ("select-surface", "id", "--evil"))
+
+
 def test_remote_snapshot_success_and_nonzero_are_bounded() -> None:
     calls: list[tuple[tuple[str, ...], float, bytes | None]] = []
 
@@ -94,6 +147,81 @@ def test_remote_snapshot_success_and_nonzero_are_bounded() -> None:
     assert failure.error is not None
     assert failure.error.code == "ssh_failed"
     assert "private ssh detail" not in failure.error.message
+
+
+def test_remote_action_validates_json_and_empty_responses() -> None:
+    remote = RemoteConfig("snap", "snap.lan", "snap")
+    plan_value = json.loads(PLAN_FIXTURE.read_text())
+    plan_value = json.loads(
+        json.dumps(plan_value).replace(str(LOCAL_HOST), REMOTE_HOST)
+    )
+    plan_record = (
+        PresentationPlanEnvelope.from_dict(plan_value).to_json().encode() + b"\n"
+    )
+    calls: list[tuple[tuple[str, ...], bytes | None]] = []
+
+    async def runner(argv, timeout, stdin):
+        calls.append((tuple(argv), stdin))
+        output = plan_record if argv[9] == "prepare-open" else b""
+        return CommandOutput(output, b"", 0)
+
+    async def exercise() -> None:
+        envelope = await invoke_remote_json(
+            remote,
+            (
+                "prepare-open",
+                f"{REMOTE_HOST}:codex:55555555-5555-4555-8555-555555555555",
+                "--request-id",
+                "77777777-7777-4777-8777-777777777777",
+                "--json",
+            ),
+            PresentationPlanEnvelope.from_json,
+            stdin=b'{"bounded":true}',
+            runner=runner,
+        )
+        assert str(envelope.plan.host_id) == REMOTE_HOST
+        await invoke_remote_empty(
+            remote,
+            (
+                "select-surface",
+                "33333333-3333-4333-8333-333333333333",
+                "--client",
+                "/dev/pts/7",
+            ),
+            runner=runner,
+        )
+
+    asyncio.run(exercise())
+    assert calls[0][1] == b'{"bounded":true}'
+    assert calls[1][1] is None
+
+
+def test_resolve_remote_host_requires_one_declared_pinned_endpoint(tmp_path) -> None:
+    config = parse_config(
+        """
+config_version = 2
+[remotes.snap]
+ssh_target = "snap.lan"
+display_name = "snap"
+""",
+        host_id=LOCAL_HOST,
+    )
+    with Registry(tmp_path / "switchboard.db") as registry:
+        registry.upsert_remote("snap", "snap.lan", "snap", observed_at=1)
+        with pytest.raises(RemoteError) as unknown:
+            resolve_remote_host(registry, config, HostId(REMOTE_HOST))
+        assert unknown.value.code == "remote_host_unknown"
+        registry.store_remote_snapshot(
+            "snap",
+            json.loads(snapshot_bytes(REMOTE_HOST, "snap", 10)),
+            remote_host_id=REMOTE_HOST,
+            schema_version=2,
+            protocol_version=2,
+            observed_at=10,
+            received_at=11,
+        )
+        resolved = resolve_remote_host(registry, config, HostId(REMOTE_HOST))
+    assert resolved.ssh_target == "snap.lan"
 
 
 def test_remote_snapshot_concurrency_is_bounded() -> None:

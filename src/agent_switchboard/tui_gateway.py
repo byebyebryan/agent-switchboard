@@ -17,6 +17,7 @@ from uuid import UUID
 
 from .domain import (
     MAX_HANDOFF_FIELD_BYTES,
+    HostId,
     PresentationContext,
     ProviderId,
     SessionKey,
@@ -284,6 +285,17 @@ def _session_argument(value: object) -> str:
         ) from error
 
 
+def _host_argument(value: object) -> str:
+    try:
+        return str(HostId(value))
+    except (TypeError, ValidationError) as error:
+        raise GatewayError(
+            "argument_invalid",
+            "Host ID is invalid.",
+            retryable=False,
+        ) from error
+
+
 def _curation_value(value: object, field: str, *, maximum: int) -> str:
     text = _bounded_argument(value, field, maximum=maximum).strip()
     if not text:
@@ -496,20 +508,20 @@ class SwbctlGateway:
         *,
         request_id: str,
         context: PresentationContext,
+        host_id: str | None = None,
     ) -> PresentationPlanEnvelope:
         canonical_key = _session_argument(session_key)
+        arguments = ["prepare-open", canonical_key]
+        if host_id is not None:
+            arguments.extend(("--host", _host_argument(host_id)))
+        arguments.extend(("--request-id", _uuid_argument(request_id, "request ID")))
+        arguments.extend(self._context_arguments(context))
+        arguments.append("--json")
         envelope = await self._json(
-            (
-                "prepare-open",
-                canonical_key,
-                "--request-id",
-                _uuid_argument(request_id, "request ID"),
-                *self._context_arguments(context),
-                "--json",
-            ),
+            arguments,
             PresentationPlanEnvelope.from_json,
         )
-        self._validate_plan(envelope, context)
+        self._validate_plan(envelope, context, host_id=host_id)
         return envelope
 
     async def prepare_task(
@@ -519,11 +531,14 @@ class SwbctlGateway:
         provider: str | None,
         request_id: str,
         context: PresentationContext,
+        host_id: str | None = None,
     ) -> PresentationPlanEnvelope:
         arguments = [
             "prepare-task",
             _uuid_argument(task_id, "task ID"),
         ]
+        if host_id is not None:
+            arguments.extend(("--host", _host_argument(host_id)))
         if provider is not None:
             try:
                 provider_id = ProviderId(provider).value
@@ -538,7 +553,7 @@ class SwbctlGateway:
         arguments.extend(self._context_arguments(context))
         arguments.append("--json")
         envelope = await self._json(arguments, PresentationPlanEnvelope.from_json)
-        self._validate_plan(envelope, context)
+        self._validate_plan(envelope, context, host_id=host_id)
         return envelope
 
     async def prepare_task_create(
@@ -552,6 +567,7 @@ class SwbctlGateway:
         purpose: str | None = None,
         request_id: str,
         context: PresentationContext,
+        host_id: str | None = None,
     ) -> PresentationPlanEnvelope:
         try:
             provider_id = ProviderId(provider).value
@@ -564,12 +580,18 @@ class SwbctlGateway:
         arguments = [
             "prepare-task",
             _uuid_argument(task_id, "task ID"),
-            "--create",
-            "--project",
-            _uuid_argument(project_id, "project ID"),
-            "--title",
-            _curation_value(title, "Task title", maximum=256),
         ]
+        if host_id is not None:
+            arguments.extend(("--host", _host_argument(host_id)))
+        arguments.extend(
+            (
+                "--create",
+                "--project",
+                _uuid_argument(project_id, "project ID"),
+                "--title",
+                _curation_value(title, "Task title", maximum=256),
+            )
+        )
         if purpose is not None:
             arguments.extend(
                 ("--purpose", _curation_value(purpose, "Task purpose", maximum=4096))
@@ -587,7 +609,7 @@ class SwbctlGateway:
         arguments.extend(self._context_arguments(context))
         arguments.append("--json")
         envelope = await self._json(arguments, PresentationPlanEnvelope.from_json)
-        self._validate_plan(envelope, context)
+        self._validate_plan(envelope, context, host_id=host_id)
         return envelope
 
     async def prepare_history(
@@ -597,19 +619,26 @@ class SwbctlGateway:
         checkout_id: str | None,
         request_id: str,
         context: PresentationContext,
+        host_id: str | None = None,
     ) -> PresentationPlanEnvelope:
         arguments = [
             "prepare-history",
-            "--project",
-            _uuid_argument(project_id, "project ID"),
         ]
+        if host_id is not None:
+            arguments.extend(("--host", _host_argument(host_id)))
+        arguments.extend(
+            (
+                "--project",
+                _uuid_argument(project_id, "project ID"),
+            )
+        )
         if checkout_id is not None:
             arguments.extend(("--checkout", _uuid_argument(checkout_id, "checkout ID")))
         arguments.extend(("--request-id", _uuid_argument(request_id, "request ID")))
         arguments.extend(self._context_arguments(context))
         arguments.append("--json")
         envelope = await self._json(arguments, PresentationPlanEnvelope.from_json)
-        self._validate_plan(envelope, context)
+        self._validate_plan(envelope, context, host_id=host_id)
         return envelope
 
     async def adopt_session(self, session_key: str, *, task_id: str) -> None:
@@ -714,10 +743,19 @@ class SwbctlGateway:
             stdin=payload,
         )
 
-    async def stop_session(self, session_key: str) -> SessionActionEnvelope:
+    async def stop_session(
+        self,
+        session_key: str,
+        *,
+        host_id: str | None = None,
+    ) -> SessionActionEnvelope:
         canonical_key = _session_argument(session_key)
+        arguments = ["stop-session", canonical_key]
+        if host_id is not None:
+            arguments.extend(("--host", _host_argument(host_id)))
+        arguments.append("--json")
         envelope = await self._json(
-            ("stop-session", canonical_key, "--json"),
+            arguments,
             SessionActionEnvelope.from_json,
         )
         if str(envelope.action.session_key) != canonical_key:
@@ -875,31 +913,46 @@ class SwbctlGateway:
         self._validate_detail(envelope, canonical_key)
         return envelope
 
-    async def select_surface(self, surface_id: str, *, client: str) -> None:
+    async def select_surface(
+        self,
+        surface_id: str,
+        *,
+        client: str,
+        host_id: str | None = None,
+    ) -> None:
         """Select one validated surface on the exact inherited tmux client."""
 
-        await self._empty(
-            (
-                "select-surface",
-                _uuid_argument(surface_id, "surface ID"),
-                "--client",
-                _bounded_argument(client, "tmux client", maximum=1024),
-            )
+        arguments = ["select-surface", _uuid_argument(surface_id, "surface ID")]
+        if host_id is not None:
+            arguments.extend(("--host", _host_argument(host_id)))
+        arguments.extend(
+            ("--client", _bounded_argument(client, "tmux client", maximum=1024))
         )
+        await self._empty(arguments)
 
-    def attach_surface_command(self, surface_id: str) -> tuple[str, ...]:
+    def attach_surface_command(
+        self,
+        surface_id: str,
+        *,
+        host_id: str | None = None,
+    ) -> tuple[str, ...]:
         """Build the public attachment command for post-TUI process replacement."""
 
-        return (
+        arguments = [
             self.executable,
             "attach-surface",
             _uuid_argument(surface_id, "surface ID"),
-        )
+        ]
+        if host_id is not None:
+            arguments.extend(("--host", _host_argument(host_id)))
+        return tuple(arguments)
 
     @staticmethod
     def _validate_plan(
         envelope: PresentationPlanEnvelope,
         context: PresentationContext,
+        *,
+        host_id: str | None = None,
     ) -> None:
         try:
             envelope.plan.validate_for_context(context)
@@ -909,6 +962,14 @@ class SwbctlGateway:
                 "The Switchboard plan is incompatible with this terminal.",
                 retryable=False,
             ) from error
+        if host_id is not None and str(envelope.plan.host_id) != _host_argument(
+            host_id
+        ):
+            raise GatewayError(
+                "response_invalid",
+                "The Switchboard plan belongs to another host.",
+                retryable=False,
+            )
 
     @staticmethod
     def _validate_detail(

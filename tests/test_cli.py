@@ -18,6 +18,7 @@ import agent_switchboard.snapshot as snapshot_module
 import agent_switchboard.storage as storage_module
 from agent_switchboard import __version__
 from agent_switchboard.cli import main
+from agent_switchboard.config import RemoteConfig
 from agent_switchboard.domain import HostId, SessionKey
 from agent_switchboard.protocol import (
     ErrorRecord,
@@ -42,6 +43,8 @@ CURATION_SESSION_ID = "44444444-4444-4444-8444-444444444444"
 CURATION_SESSION_KEY = f"{CURATION_HOST_ID}:codex:{CURATION_SESSION_ID}"
 CURATION_HANDOFF_ID = "55555555-5555-4555-8555-555555555555"
 CURATION_TASK_ID = "66666666-6666-4666-8666-666666666666"
+REMOTE_HOST_ID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+REMOTE_SURFACE_ID = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
 
 
 @dataclass(frozen=True, slots=True)
@@ -180,6 +183,204 @@ def test_fleet_cli_emits_one_local_host_without_network(
     assert len(fleet.hosts) == 1
     assert fleet.hosts[0].source.value == "local"
     assert fleet.hosts[0].snapshot is not None
+
+
+def test_remote_prepare_task_uses_bounded_json_stdin_and_validates_host(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    local_host = HostId(CURATION_HOST_ID)
+    remote_host = HostId(REMOTE_HOST_ID)
+    remote = RemoteConfig("snap", "snap.lan", "snap")
+    plan = PresentationPlanEnvelope(
+        PresentationPlan(
+            PresentationPlanKind.ATTACH,
+            remote_host,
+            surface_id=REMOTE_SURFACE_ID,
+            workspace_id="as-remote",
+            tmux_target="as-remote:@1.%1",
+        )
+    )
+    calls: list[tuple[tuple[str, ...], bytes | None]] = []
+
+    async def invoke(remote_value, arguments, parser, *, stdin=None, **_kwargs):
+        assert remote_value is remote
+        assert parser.__self__ is PresentationPlanEnvelope
+        calls.append((tuple(arguments), stdin))
+        return plan
+
+    monkeypatch.setattr(cli_module, "load_or_create_host_id", lambda: local_host)
+    monkeypatch.setattr(cli_module, "load_config", lambda **_kwargs: object())
+    monkeypatch.setattr(cli_module, "_remote_endpoint", lambda *_args: remote)
+    monkeypatch.setattr(cli_module, "invoke_remote_json", invoke)
+
+    assert (
+        main(
+            [
+                "prepare-task",
+                CURATION_TASK_ID,
+                "--host",
+                REMOTE_HOST_ID,
+                "--create",
+                "--project",
+                PROJECT_ID,
+                "--title",
+                "Remote Phase 5",
+                "--checkout",
+                LOCATION_ID,
+                "--provider",
+                "claude",
+                "--request-id",
+                CURATION_HANDOFF_ID,
+                "--has-current-terminal",
+                "--json",
+            ]
+        )
+        == 0
+    )
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    assert PresentationPlanEnvelope.from_json(captured.out) == plan
+    assert calls[0][0] == (
+        "prepare-task",
+        CURATION_TASK_ID,
+        "--create",
+        "--json-stdin",
+        "--request-id",
+        CURATION_HANDOFF_ID,
+        "--has-current-terminal",
+        "--json",
+    )
+    assert json.loads(calls[0][1]) == {
+        "checkout": LOCATION_ID,
+        "project": PROJECT_ID,
+        "provider": "claude",
+        "purpose": None,
+        "title": "Remote Phase 5",
+    }
+
+
+def test_remote_attach_replaces_process_with_exact_ssh_command(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    local_host = HostId(CURATION_HOST_ID)
+    remote = RemoteConfig("snap", "snap.lan", "snap")
+    calls: list[tuple[str, tuple[str, ...]]] = []
+
+    def execvp(executable: str, argv: tuple[str, ...]) -> None:
+        calls.append((executable, argv))
+        raise OSError("test-owned exec boundary")
+
+    monkeypatch.setattr(cli_module, "load_or_create_host_id", lambda: local_host)
+    monkeypatch.setattr(cli_module, "load_config", lambda **_kwargs: object())
+    monkeypatch.setattr(cli_module, "_remote_endpoint", lambda *_args: remote)
+    monkeypatch.setattr(cli_module.os, "execvp", execvp)
+
+    assert (
+        main(
+            [
+                "attach-surface",
+                REMOTE_SURFACE_ID,
+                "--host",
+                REMOTE_HOST_ID,
+            ]
+        )
+        == 1
+    )
+    assert calls == [
+        (
+            "ssh",
+            (
+                "ssh",
+                "-tt",
+                "--",
+                "snap.lan",
+                "swbctl",
+                "attach-surface",
+                REMOTE_SURFACE_ID,
+            ),
+        )
+    ]
+
+
+def test_remote_prepare_task_json_input_is_exact_and_bounded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    arguments = cli_module.build_parser().parse_args(
+        [
+            "prepare-task",
+            CURATION_TASK_ID,
+            "--create",
+            "--json-stdin",
+            "--request-id",
+            CURATION_HANDOFF_ID,
+            "--json",
+        ]
+    )
+    payload = {
+        "project": PROJECT_ID,
+        "title": "Remote Phase 5",
+        "purpose": "Finish the SSH slice",
+        "checkout": LOCATION_ID,
+        "provider": "claude",
+    }
+    monkeypatch.setattr(
+        cli_module.sys,
+        "stdin",
+        io.BytesIO(json.dumps(payload).encode()),
+    )
+    assert cli_module._prepare_task_input(arguments) == (
+        PROJECT_ID,
+        "Remote Phase 5",
+        "Finish the SSH slice",
+        LOCATION_ID,
+        "claude",
+    )
+
+
+def test_remote_prepare_rejects_a_plan_from_another_host(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    local_host = HostId(CURATION_HOST_ID)
+    remote = RemoteConfig("snap", "snap.lan", "snap")
+    wrong_plan = PresentationPlanEnvelope(
+        PresentationPlan(
+            PresentationPlanKind.ATTACH,
+            local_host,
+            surface_id=REMOTE_SURFACE_ID,
+            workspace_id="as-wrong",
+            tmux_target="as-wrong:@1.%1",
+        )
+    )
+
+    async def invoke(*_args, **_kwargs):
+        return wrong_plan
+
+    monkeypatch.setattr(cli_module, "load_or_create_host_id", lambda: local_host)
+    monkeypatch.setattr(cli_module, "load_config", lambda **_kwargs: object())
+    monkeypatch.setattr(cli_module, "_remote_endpoint", lambda *_args: remote)
+    monkeypatch.setattr(cli_module, "invoke_remote_json", invoke)
+
+    assert (
+        main(
+            [
+                "prepare-history",
+                "--host",
+                REMOTE_HOST_ID,
+                "--project",
+                PROJECT_ID,
+                "--request-id",
+                CURATION_HANDOFF_ID,
+                "--has-current-terminal",
+                "--json",
+            ]
+        )
+        == 1
+    )
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "belongs to another host" in captured.err
 
 
 def test_tui_command_is_lazy_and_returns_the_frontend_status(
