@@ -415,3 +415,13 @@ Accepted locally on 2026-07-19 after Claude Code advanced to `2.1.215`:
 - the isolated real-Claude lifecycle probe passed on `2.1.215` with exactly one
   `SessionStart`, `UserPromptSubmit`, and `SessionEnd`, zero turns, zero cost,
   no persisted prompt, and no interaction with the active user session.
+
+## Hook-latency follow-up
+
+The default warm-p95 doctor gate moved from 100 ms to 125 ms after repeated
+installed samples showed otherwise healthy Codex and Claude hooks fluctuating
+between the high 80s and 113 ms. The new bound covers the observed scheduler
+noise with modest headroom rather than removing the performance gate. A warm
+p95 above 125 ms remains unhealthy, hook execution still has a separate
+one-second timeout, and the threshold remains explicitly configurable per
+host.

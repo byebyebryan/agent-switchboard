@@ -27,6 +27,7 @@ from .domain import (
 from .paths import config_path, load_or_create_host_id
 
 _MAX_CONTEXT_SOURCES = 32
+_DEFAULT_HOOK_LATENCY_BUDGET_MS = 125
 _ALIAS_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
 _TMUX_PREFIX_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,31}$")
 _MEMORY_TOOL_RE = re.compile(r"^[A-Za-z0-9_.-]{1,128}$")
@@ -80,7 +81,7 @@ class TmuxConfig:
 @dataclass(frozen=True, slots=True)
 class HooksConfig:
     timeout_seconds: int = 1
-    latency_budget_ms: int = 100
+    latency_budget_ms: int = _DEFAULT_HOOK_LATENCY_BUDGET_MS
 
 
 @dataclass(frozen=True, slots=True)
@@ -511,7 +512,7 @@ def _parse_hooks(raw: object) -> HooksConfig:
             maximum=60,
         ),
         latency_budget_ms=_integer(
-            table.get("latency_budget_ms", 100),
+            table.get("latency_budget_ms", _DEFAULT_HOOK_LATENCY_BUDGET_MS),
             "hooks.latency_budget_ms",
             minimum=1,
             maximum=60_000,
