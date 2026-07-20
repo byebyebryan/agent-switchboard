@@ -1,4 +1,4 @@
-"""Pure, widget-independent frontend projection of Snapshot v1."""
+"""Pure, widget-independent frontend projection of Snapshot v2."""
 
 from __future__ import annotations
 
@@ -95,9 +95,9 @@ class LaunchTarget:
     target_id: str
     project_id: str
     project_name: str
-    location_id: str
-    location_name: str | None
-    location_path: str
+    checkout_id: str
+    checkout_name: str | None
+    checkout_path: str
     provider: ProviderId
     is_default: bool
     is_preferred_provider: bool
@@ -110,11 +110,12 @@ class SessionRow:
     host_name: str
     provider: ProviderId
     provider_session_id: str
+    task_id: str | None
     project_id: str | None
     project_name: str | None
-    location_id: str | None
-    location_name: str | None
-    location_path: str | None
+    checkout_id: str | None
+    checkout_name: str | None
+    checkout_path: str | None
     name: str | None
     purpose: str | None
     label: str
@@ -142,6 +143,30 @@ class SessionRow:
     @property
     def has_warnings(self) -> bool:
         return bool(self.issue_ids)
+
+
+@dataclass(frozen=True, slots=True)
+class TaskRow:
+    task_id: str
+    title: str
+    purpose: str | None
+    project_id: str
+    project_name: str
+    checkout_id: str | None
+    checkout_name: str | None
+    checkout_kind: str | None
+    branch: str | None
+    preferred_provider: ProviderId | None
+    current_provider: ProviderId | None
+    current_session_key: str | None
+    status: str
+    pinned: bool
+    display_status: DisplayStatus
+    attention_rank: AttentionRank
+    created_at: int
+    updated_at: int
+    closed_at: int | None
+    search_text: str = field(repr=False)
 
 
 @dataclass(frozen=True, slots=True)
@@ -307,6 +332,10 @@ class FrontendModel:
     host_name: str
     rows: tuple[SessionRow, ...]
     visible_rows: tuple[SessionRow, ...]
+    task_rows: tuple[TaskRow, ...]
+    open_tasks: tuple[TaskRow, ...]
+    closed_tasks: tuple[TaskRow, ...]
+    inbox_rows: tuple[SessionRow, ...]
     launch_targets: tuple[LaunchTarget, ...]
     capabilities: tuple[ProviderCapability, ...]
     issues: tuple[FrontendIssue, ...]
@@ -686,37 +715,48 @@ def _launch_targets(snapshot: SnapshotEnvelope) -> tuple[LaunchTarget, ...]:
         for project in snapshot.projects
         if project.get("declared") is not False
     }
+    project_ids_by_repository: dict[str, list[str]] = {}
+    for membership in snapshot.project_repositories:
+        project_ids_by_repository.setdefault(
+            str(membership["repositoryId"]), []
+        ).append(str(membership["projectId"]))
     targets: list[LaunchTarget] = []
-    for location in snapshot.locations:
-        if location.get("declared") is False:
+    for checkout in snapshot.checkouts:
+        if checkout.get("declared") is False:
             continue
-        project = projects.get(str(location["projectId"]))
-        if project is None:
-            continue
-        transport = location.get("transportOverride") or project.get("defaultTransport")
-        if str(transport) != "tmux":
-            continue
-        preferred = location.get("providerOverride") or project.get("defaultProvider")
-        for provider in ProviderId:
-            project_id = str(project["projectId"])
-            location_id = str(location["locationId"])
-            targets.append(
-                LaunchTarget(
-                    target_id=f"{project_id}:{location_id}:{provider.value}",
-                    project_id=project_id,
-                    project_name=str(project["name"]),
-                    location_id=location_id,
-                    location_name=(
-                        None
-                        if location.get("displayName") is None
-                        else str(location["displayName"])
-                    ),
-                    location_path=str(location["path"]),
-                    provider=provider,
-                    is_default=bool(location.get("isDefault", False)),
-                    is_preferred_provider=str(preferred) == provider.value,
-                )
+        for project_id in project_ids_by_repository.get(
+            str(checkout["repositoryId"]), []
+        ):
+            project = projects.get(project_id)
+            if project is None:
+                continue
+            transport = checkout.get("transportOverride") or project.get(
+                "defaultTransport"
             )
+            if str(transport) != "tmux":
+                continue
+            preferred = checkout.get("providerOverride") or project.get(
+                "defaultProvider"
+            )
+            for provider in ProviderId:
+                checkout_id = str(checkout["checkoutId"])
+                targets.append(
+                    LaunchTarget(
+                        target_id=f"{project_id}:{checkout_id}:{provider.value}",
+                        project_id=project_id,
+                        project_name=str(project["name"]),
+                        checkout_id=checkout_id,
+                        checkout_name=(
+                            None
+                            if checkout.get("displayName") is None
+                            else str(checkout["displayName"])
+                        ),
+                        checkout_path=str(checkout["path"]),
+                        provider=provider,
+                        is_default=bool(checkout.get("isDefault", False)),
+                        is_preferred_provider=str(preferred) == provider.value,
+                    )
+                )
     return tuple(
         sorted(
             targets,
@@ -725,9 +765,9 @@ def _launch_targets(snapshot: SnapshotEnvelope) -> tuple[LaunchTarget, ...]:
                 target.project_name,
                 target.project_id,
                 not target.is_default,
-                "" if target.location_name is None else target.location_name.casefold(),
-                "" if target.location_name is None else target.location_name,
-                target.location_id,
+                "" if target.checkout_name is None else target.checkout_name.casefold(),
+                "" if target.checkout_name is None else target.checkout_name,
+                target.checkout_id,
                 0 if target.provider is ProviderId.CODEX else 1,
             ),
         )
@@ -739,8 +779,8 @@ def _session_rows(
     issues: tuple[FrontendIssue, ...],
 ) -> tuple[SessionRow, ...]:
     projects = {str(project["projectId"]): project for project in snapshot.projects}
-    locations = {
-        str(location["locationId"]): location for location in snapshot.locations
+    checkouts = {
+        str(checkout["checkoutId"]): checkout for checkout in snapshot.checkouts
     }
     surfaces = {str(surface["surfaceId"]): surface for surface in snapshot.surfaces}
     capability_issue_ids: dict[ProviderId, list[str]] = {
@@ -765,11 +805,11 @@ def _session_rows(
         project_id = (
             None if session.get("projectId") is None else str(session["projectId"])
         )
-        location_id = (
-            None if session.get("locationId") is None else str(session["locationId"])
+        checkout_id = (
+            None if session.get("checkoutId") is None else str(session["checkoutId"])
         )
         project = projects.get(project_id) if project_id is not None else None
-        location = locations.get(location_id) if location_id is not None else None
+        checkout = checkouts.get(checkout_id) if checkout_id is not None else None
         runtime_presence = RuntimePresence(str(session["runtimePresence"]))
         resumability = Resumability(str(session["resumability"]))
         activity = Activity(str(session["activity"]))
@@ -790,12 +830,12 @@ def _session_rows(
         name = None if session.get("name") is None else str(session["name"])
         purpose = None if session.get("purpose") is None else str(session["purpose"])
         project_name = None if project is None else str(project["name"])
-        location_name = (
+        checkout_name = (
             None
-            if location is None or location.get("displayName") is None
-            else str(location["displayName"])
+            if checkout is None or checkout.get("displayName") is None
+            else str(checkout["displayName"])
         )
-        location_path = None if location is None else str(location["path"])
+        checkout_path = None if checkout is None else str(checkout["path"])
         cwd = None if session.get("cwd") is None else str(session["cwd"])
         label = _display_label(
             provider=provider,
@@ -834,11 +874,14 @@ def _session_rows(
                 host_name=snapshot.host.display_name,
                 provider=provider,
                 provider_session_id=provider_session_id,
+                task_id=(
+                    None if session.get("taskId") is None else str(session["taskId"])
+                ),
                 project_id=project_id,
                 project_name=project_name,
-                location_id=location_id,
-                location_name=location_name,
-                location_path=location_path,
+                checkout_id=checkout_id,
+                checkout_name=checkout_name,
+                checkout_path=checkout_path,
                 name=name,
                 purpose=purpose,
                 label=label,
@@ -883,8 +926,8 @@ def _session_rows(
                     purpose,
                     project_name,
                     *(project.get("aliases", ()) if project is not None else ()),
-                    location_name,
-                    location_path,
+                    checkout_name,
+                    checkout_path,
                     cwd,
                     snapshot.host.display_name,
                     provider.value,
@@ -909,6 +952,108 @@ def _session_rows(
     )
 
 
+def _task_rows(
+    snapshot: SnapshotEnvelope, sessions: tuple[SessionRow, ...]
+) -> tuple[TaskRow, ...]:
+    projects = {str(project["projectId"]): project for project in snapshot.projects}
+    checkouts = {
+        str(checkout["checkoutId"]): checkout for checkout in snapshot.checkouts
+    }
+    sessions_by_key = {session.session_key: session for session in sessions}
+    rows: list[TaskRow] = []
+    for task in snapshot.tasks:
+        project_id = str(task["projectId"])
+        project = projects[project_id]
+        checkout_id = (
+            None if task.get("checkoutId") is None else str(task["checkoutId"])
+        )
+        checkout = checkouts.get(checkout_id) if checkout_id is not None else None
+        current_session_key = (
+            None
+            if task.get("currentSessionKey") is None
+            else str(task["currentSessionKey"])
+        )
+        current = (
+            sessions_by_key.get(current_session_key)
+            if current_session_key is not None
+            else None
+        )
+        preferred = (
+            None
+            if task.get("preferredProvider") is None
+            else ProviderId(str(task["preferredProvider"]))
+        )
+        display_status = (
+            DisplayStatus.PARKED
+            if str(task["status"]) == "closed"
+            else DisplayStatus.READY
+            if current is None
+            else current.status
+        )
+        title = str(task["title"])
+        purpose = None if task.get("purpose") is None else str(task["purpose"])
+        project_name = str(project["name"])
+        checkout_name = (
+            None
+            if checkout is None or checkout.get("displayName") is None
+            else str(checkout["displayName"])
+        )
+        branch = (
+            None
+            if checkout is None or checkout.get("branch") is None
+            else str(checkout["branch"])
+        )
+        rows.append(
+            TaskRow(
+                task_id=str(task["taskId"]),
+                title=title,
+                purpose=purpose,
+                project_id=project_id,
+                project_name=project_name,
+                checkout_id=checkout_id,
+                checkout_name=checkout_name,
+                checkout_kind=None if checkout is None else str(checkout["kind"]),
+                branch=branch,
+                preferred_provider=preferred,
+                current_provider=None if current is None else current.provider,
+                current_session_key=current_session_key,
+                status=str(task["status"]),
+                pinned=bool(task["pinned"]),
+                display_status=display_status,
+                attention_rank=_ATTENTION_BY_STATUS[display_status],
+                created_at=int(task["createdAt"]),
+                updated_at=int(task["updatedAt"]),
+                closed_at=(
+                    None if task.get("closedAt") is None else int(task["closedAt"])
+                ),
+                search_text=_search_text(
+                    title,
+                    purpose,
+                    project_name,
+                    *(project.get("aliases", ())),
+                    checkout_name,
+                    branch,
+                    preferred.value if preferred is not None else None,
+                    current.provider.value if current is not None else None,
+                    task["status"],
+                    task["taskId"],
+                ),
+            )
+        )
+    return tuple(
+        sorted(
+            rows,
+            key=lambda row: (
+                row.status == "closed",
+                not row.pinned,
+                row.attention_rank,
+                -row.updated_at,
+                row.task_id,
+            ),
+        )
+    )
+
+
 def _build_model(
     snapshot: SnapshotEnvelope,
     *,
@@ -928,6 +1073,7 @@ def _build_model(
     age = _snapshot_age(snapshot.generated_at, now_ms)
     capabilities, source_issues = _capabilities_and_issues(snapshot)
     rows = _session_rows(snapshot, source_issues)
+    task_rows = _task_rows(snapshot, rows)
     visible = tuple(row for row in rows if filters.matches(row))
     selected = _retained_selection(
         previous_visible,
@@ -944,6 +1090,10 @@ def _build_model(
         host_name=snapshot.host.display_name,
         rows=rows,
         visible_rows=visible,
+        task_rows=task_rows,
+        open_tasks=tuple(task for task in task_rows if task.status == "open"),
+        closed_tasks=tuple(task for task in task_rows if task.status == "closed"),
+        inbox_rows=tuple(session for session in rows if session.task_id is None),
         launch_targets=_launch_targets(snapshot),
         capabilities=capabilities,
         issues=source_issues + frontend_issues,
@@ -970,5 +1120,6 @@ __all__ = [
     "ProviderCapability",
     "SessionDetailView",
     "SessionRow",
+    "TaskRow",
     "ViewFilters",
 ]

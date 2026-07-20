@@ -29,7 +29,7 @@ from agent_switchboard.tui_model import (
 )
 
 ROOT = Path(__file__).parents[1]
-SNAPSHOT_FIXTURE = ROOT / "tests/fixtures/protocol/v1/snapshot.json"
+SNAPSHOT_FIXTURE = ROOT / "tests/fixtures/protocol/v2/snapshot.json"
 
 
 def _value() -> dict[str, object]:
@@ -56,8 +56,8 @@ def _detail(
     session_key = str(session["sessionKey"])
     return SessionDetailEnvelope.from_dict(
         {
-            "schemaVersion": 1,
-            "protocolVersion": 1,
+            "schemaVersion": 2,
+            "protocolVersion": 2,
             "generatedAt": generated_at,
             "session": session,
             "handoffs": [
@@ -110,6 +110,7 @@ def _session(
         }
     )
     session.pop("surfaceId", None)
+    session.pop("taskId", None)
     return session
 
 
@@ -152,10 +153,11 @@ def _attention_value() -> dict[str, object]:
         ),
     ]
     sessions[-1].pop("projectId", None)
-    sessions[-1].pop("locationId", None)
+    sessions[-1].pop("checkoutId", None)
     value["sessions"] = sessions
     value["runtimes"] = []
     value["surfaces"] = []
+    value["tasks"] = []
     return value
 
 
@@ -163,7 +165,10 @@ def test_empty_snapshot_has_neutral_capabilities_and_no_selection() -> None:
     value = _value()
     for collection in (
         "projects",
-        "locations",
+        "projectRepositories",
+        "repositories",
+        "checkouts",
+        "tasks",
         "sessions",
         "runtimes",
         "surfaces",
@@ -194,7 +199,7 @@ def test_snapshot_projects_rows_launch_targets_and_capabilities() -> None:
     row = model.rows[0]
     assert row.label == "example"
     assert row.project_name == "example"
-    assert row.location_path == "/work/example"
+    assert row.checkout_path == "/work/example"
     assert row.status is DisplayStatus.WORKING
     assert row.attention_rank is AttentionRank.WORKING
     assert row.can_stop is False
@@ -210,7 +215,7 @@ def test_snapshot_projects_rows_launch_targets_and_capabilities() -> None:
     assert model.capability("claude").status is CapabilityStatus.NEUTRAL
 
     undeclared_value = _value()
-    undeclared_value["locations"][0]["declared"] = False  # type: ignore[index]
+    undeclared_value["checkouts"][0]["declared"] = False  # type: ignore[index]
     undeclared = FrontendModel.from_snapshot(
         _snapshot(undeclared_value), now_ms=snapshot.generated_at
     )
@@ -284,6 +289,7 @@ def test_detail_cache_is_bounded_to_snapshot_and_ignores_older_results() -> None
     removed_value = copy.deepcopy(refreshed_value)
     removed_value["generatedAt"] = snapshot.generated_at + 30
     removed_value["sessions"] = []
+    removed_value["tasks"] = []
     removed_value["runtimes"] = []
     removed_value["surfaces"] = []
     removed = refreshed.apply_snapshot(
@@ -397,6 +403,7 @@ def test_degraded_capability_errors_and_safe_stop_are_inspectable() -> None:
             "currentSessionKey": session_key,
         }
     )
+    value["tasks"][0]["currentSessionKey"] = session_key  # type: ignore[index]
     value["runtimes"] = []
     value["capabilities"] = [
         {
@@ -473,7 +480,7 @@ def test_unicode_token_search_matches_across_public_display_fields() -> None:
     value = _value()
     value["projects"][0]["name"] = "Café"  # type: ignore[index]
     value["projects"][0]["aliases"] = ["Résumé"]  # type: ignore[index]
-    value["locations"][0]["displayName"] = "東京"  # type: ignore[index]
+    value["checkouts"][0]["displayName"] = "東京"  # type: ignore[index]
     value["sessions"][0]["name"] = "Straße Δ"  # type: ignore[index]
     value["sessions"][0]["purpose"] = "naïve router"  # type: ignore[index]
     snapshot = _snapshot(value)
@@ -550,6 +557,7 @@ def test_large_bounded_snapshot_builds_stable_rows_and_searches_locally() -> Non
     ]
     sessions[1_337]["name"] = "Needle 東京"
     value["sessions"] = sessions
+    value["tasks"] = []
     value["runtimes"] = []
     value["surfaces"] = []
     snapshot = _snapshot(value)

@@ -389,6 +389,60 @@ class SwbctlGateway:
                 retryable=False,
             )
 
+    async def _task_action(
+        self,
+        arguments: Sequence[str],
+        *,
+        task_id: str,
+        stdin: bytes | None = None,
+    ) -> Mapping[str, object]:
+        output = await self._runner(
+            (self.executable, *arguments), self.timeout_seconds, stdin
+        )
+        if output.exit_code != 0:
+            raise GatewayError(
+                "command_failed",
+                "The Switchboard command failed.",
+                retryable=True,
+            )
+        if output.stderr:
+            raise GatewayError(
+                "response_invalid",
+                "The Switchboard command emitted unexpected diagnostics.",
+                retryable=False,
+            )
+        if (
+            not output.stdout.endswith(b"\n")
+            or b"\n" in output.stdout[:-1]
+            or b"\r" in output.stdout
+        ):
+            raise GatewayError(
+                "response_invalid",
+                "The Switchboard command did not emit one JSON record.",
+                retryable=False,
+            )
+        try:
+            payload = json.loads(output.stdout)
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise GatewayError(
+                "response_invalid",
+                "The Switchboard command emitted invalid JSON.",
+                retryable=False,
+            ) from error
+        if (
+            not isinstance(payload, dict)
+            or payload.get("schemaVersion") != 2
+            or payload.get("protocolVersion") != 2
+            or not isinstance(payload.get("task"), dict)
+            or payload["task"].get("taskId") != task_id
+        ):
+            raise GatewayError(
+                "response_invalid",
+                "The Switchboard command emitted an incompatible task response.",
+                retryable=False,
+            )
+        return payload
+
     @staticmethod
     def _context_arguments(context: PresentationContext) -> tuple[str, ...]:
         if (
@@ -449,12 +503,44 @@ class SwbctlGateway:
         self._validate_plan(envelope, context)
         return envelope
 
-    async def prepare_new(
+    async def prepare_task(
         self,
-        project_id: str,
+        task_id: str,
         *,
-        location_id: str | None,
+        provider: str | None,
+        request_id: str,
+        context: PresentationContext,
+    ) -> PresentationPlanEnvelope:
+        arguments = [
+            "prepare-task",
+            _uuid_argument(task_id, "task ID"),
+        ]
+        if provider is not None:
+            try:
+                provider_id = ProviderId(provider).value
+            except ValueError as error:
+                raise GatewayError(
+                    "argument_invalid",
+                    "Provider is invalid.",
+                    retryable=False,
+                ) from error
+            arguments.extend(("--provider", provider_id))
+        arguments.extend(("--request-id", _uuid_argument(request_id, "request ID")))
+        arguments.extend(self._context_arguments(context))
+        arguments.append("--json")
+        envelope = await self._json(arguments, PresentationPlanEnvelope.from_json)
+        self._validate_plan(envelope, context)
+        return envelope
+
+    async def prepare_task_create(
+        self,
+        task_id: str,
+        *,
+        project_id: str,
+        title: str,
+        checkout_id: str | None,
         provider: str,
+        purpose: str | None = None,
         request_id: str,
         context: PresentationContext,
     ) -> PresentationPlanEnvelope:
@@ -467,12 +553,20 @@ class SwbctlGateway:
                 retryable=False,
             ) from error
         arguments = [
-            "prepare-new",
+            "prepare-task",
+            _uuid_argument(task_id, "task ID"),
+            "--create",
             "--project",
             _uuid_argument(project_id, "project ID"),
+            "--title",
+            _curation_value(title, "Task title", maximum=256),
         ]
-        if location_id is not None:
-            arguments.extend(("--location", _uuid_argument(location_id, "location ID")))
+        if purpose is not None:
+            arguments.extend(
+                ("--purpose", _curation_value(purpose, "Task purpose", maximum=4096))
+            )
+        if checkout_id is not None:
+            arguments.extend(("--checkout", _uuid_argument(checkout_id, "checkout ID")))
         arguments.extend(
             (
                 "--provider",
@@ -487,34 +581,11 @@ class SwbctlGateway:
         self._validate_plan(envelope, context)
         return envelope
 
-    async def prepare_continuation(
-        self,
-        handoff_id: str,
-        *,
-        request_id: str,
-        context: PresentationContext,
-    ) -> PresentationPlanEnvelope:
-        canonical_handoff_id = _uuid_argument(handoff_id, "handoff ID")
-        envelope = await self._json(
-            (
-                "prepare-new",
-                "--from",
-                canonical_handoff_id,
-                "--request-id",
-                _uuid_argument(request_id, "request ID"),
-                *self._context_arguments(context),
-                "--json",
-            ),
-            PresentationPlanEnvelope.from_json,
-        )
-        self._validate_plan(envelope, context)
-        return envelope
-
     async def prepare_history(
         self,
         project_id: str,
         *,
-        location_id: str | None,
+        checkout_id: str | None,
         request_id: str,
         context: PresentationContext,
     ) -> PresentationPlanEnvelope:
@@ -523,14 +594,116 @@ class SwbctlGateway:
             "--project",
             _uuid_argument(project_id, "project ID"),
         ]
-        if location_id is not None:
-            arguments.extend(("--location", _uuid_argument(location_id, "location ID")))
+        if checkout_id is not None:
+            arguments.extend(("--checkout", _uuid_argument(checkout_id, "checkout ID")))
         arguments.extend(("--request-id", _uuid_argument(request_id, "request ID")))
         arguments.extend(self._context_arguments(context))
         arguments.append("--json")
         envelope = await self._json(arguments, PresentationPlanEnvelope.from_json)
         self._validate_plan(envelope, context)
         return envelope
+
+    async def adopt_session(self, session_key: str, *, task_id: str) -> None:
+        canonical_task_id = _uuid_argument(task_id, "task ID")
+        await self._task_action(
+            (
+                "task",
+                "adopt",
+                _session_argument(session_key),
+                "--task",
+                canonical_task_id,
+                "--json",
+            ),
+            task_id=canonical_task_id,
+        )
+
+    async def set_task_title(self, task_id: str, value: str) -> None:
+        canonical_task_id = _uuid_argument(task_id, "task ID")
+        await self._task_action(
+            (
+                "task",
+                "title",
+                canonical_task_id,
+                _curation_value(value, "Task title", maximum=256),
+                "--json",
+            ),
+            task_id=canonical_task_id,
+        )
+
+    async def set_task_purpose(self, task_id: str, value: str | None) -> None:
+        canonical_task_id = _uuid_argument(task_id, "task ID")
+        arguments = ["task", "purpose", canonical_task_id]
+        if value is None:
+            arguments.append("--clear")
+        else:
+            arguments.append(_curation_value(value, "Task purpose", maximum=4096))
+        arguments.append("--json")
+        await self._task_action(arguments, task_id=canonical_task_id)
+
+    async def set_task_pinned(self, task_id: str, *, pinned: bool) -> None:
+        if type(pinned) is not bool:
+            raise GatewayError(
+                "argument_invalid",
+                "Pinned state must be boolean.",
+                retryable=False,
+            )
+        canonical_task_id = _uuid_argument(task_id, "task ID")
+        arguments = ["task", "pin", canonical_task_id]
+        if not pinned:
+            arguments.append("--off")
+        arguments.append("--json")
+        await self._task_action(arguments, task_id=canonical_task_id)
+
+    async def reopen_task(self, task_id: str) -> None:
+        canonical_task_id = _uuid_argument(task_id, "task ID")
+        await self._task_action(
+            ("task", "reopen", canonical_task_id, "--json"),
+            task_id=canonical_task_id,
+        )
+
+    async def close_task(
+        self,
+        task_id: str,
+        *,
+        handoff_id: str | None,
+        summary: str | None,
+        next_action: str | None,
+    ) -> None:
+        canonical_task_id = _uuid_argument(task_id, "task ID")
+        if handoff_id is None and summary is None and next_action is None:
+            payload = b"{}"
+        elif handoff_id is not None and summary is not None and next_action is not None:
+            try:
+                normalized_summary = normalize_handoff_text(summary, "summary")
+                normalized_next_action = normalize_handoff_text(
+                    next_action, "next action"
+                )
+            except ValidationError as error:
+                raise GatewayError(
+                    "argument_invalid", str(error), retryable=False
+                ) from error
+            payload = json.dumps(
+                {
+                    "handoffId": _uuid_argument(handoff_id, "handoff ID"),
+                    "summary": normalized_summary,
+                    "nextAction": normalized_next_action,
+                },
+                ensure_ascii=False,
+                allow_nan=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode("utf-8")
+        else:
+            raise GatewayError(
+                "argument_invalid",
+                "Task close requires a complete handoff or no handoff fields.",
+                retryable=False,
+            )
+        await self._task_action(
+            ("task", "close", canonical_task_id, "--json-stdin", "--json"),
+            task_id=canonical_task_id,
+            stdin=payload,
+        )
 
     async def stop_session(self, session_key: str) -> SessionActionEnvelope:
         canonical_key = _session_argument(session_key)

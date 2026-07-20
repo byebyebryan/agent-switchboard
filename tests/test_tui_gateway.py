@@ -30,14 +30,15 @@ from agent_switchboard.tui_gateway import (
 )
 
 ROOT = Path(__file__).parents[1]
-SNAPSHOT_FIXTURE = ROOT / "tests/fixtures/protocol/v1/snapshot.json"
-PLAN_FIXTURE = ROOT / "tests/fixtures/protocol/v1/presentation-plan.json"
+SNAPSHOT_FIXTURE = ROOT / "tests/fixtures/protocol/v2/snapshot.json"
+PLAN_FIXTURE = ROOT / "tests/fixtures/protocol/v2/presentation-plan.json"
 HOST_ID = "11111111-1111-4111-8111-111111111111"
 PROJECT_ID = "22222222-2222-4222-8222-222222222222"
 LOCATION_ID = "44444444-4444-4444-8444-444444444444"
 CODEX_SESSION_KEY = f"{HOST_ID}:codex:55555555-5555-4555-8555-555555555555"
 CLAUDE_SESSION_KEY = f"{HOST_ID}:claude:66666666-6666-4666-8666-666666666666"
 REQUEST_ID = "77777777-7777-4777-8777-777777777777"
+TASK_ID = "88888888-8888-4888-8888-888888888888"
 TMUX_CLIENT = "/dev/pts/7"
 
 
@@ -69,14 +70,28 @@ _detail_session["latestHandoffId"] = None
 DETAIL_RECORD = _record(
     SessionDetailEnvelope.from_dict(
         {
-            "schemaVersion": 1,
-            "protocolVersion": 1,
+            "schemaVersion": 2,
+            "protocolVersion": 2,
             "generatedAt": _snapshot_value["generatedAt"],
             "session": _detail_session,
             "handoffs": [],
             "handoffsTruncated": False,
         }
     )
+)
+TASK_RECORD = (
+    json.dumps(
+        {
+            "schemaVersion": 2,
+            "protocolVersion": 2,
+            "generatedAt": 1,
+            "task": {"taskId": TASK_ID},
+            "sessions": [],
+        },
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode()
+    + b"\n"
 )
 
 
@@ -98,8 +113,9 @@ class RecordingRunner:
             "snapshot": SNAPSHOT_RECORD,
             "show": DETAIL_RECORD,
             "session": DETAIL_RECORD,
+            "task": TASK_RECORD,
             "prepare-open": PLAN_RECORD,
-            "prepare-new": PLAN_RECORD,
+            "prepare-task": PLAN_RECORD,
             "prepare-history": PLAN_RECORD,
             "stop-session": ACTION_RECORD,
             "select-surface": b"",
@@ -147,16 +163,18 @@ def test_gateway_uses_exact_public_argv_and_reuses_request_id(tmp_path: Path) ->
             request_id=REQUEST_ID,
             context=context,
         )
-        created = await gateway.prepare_new(
-            PROJECT_ID,
-            location_id=LOCATION_ID,
+        created = await gateway.prepare_task_create(
+            TASK_ID,
+            project_id=PROJECT_ID,
+            title="Implement Phase 4D",
+            checkout_id=LOCATION_ID,
             provider="claude",
             request_id=REQUEST_ID,
             context=context,
         )
         history = await gateway.prepare_history(
             PROJECT_ID,
-            location_id=LOCATION_ID,
+            checkout_id=LOCATION_ID,
             request_id=REQUEST_ID,
             context=context,
         )
@@ -206,10 +224,14 @@ def test_gateway_uses_exact_public_argv_and_reuses_request_id(tmp_path: Path) ->
         (
             (
                 prefix,
-                "prepare-new",
+                "prepare-task",
+                TASK_ID,
+                "--create",
                 "--project",
                 PROJECT_ID,
-                "--location",
+                "--title",
+                "Implement Phase 4D",
+                "--checkout",
                 LOCATION_ID,
                 "--provider",
                 "claude",
@@ -228,7 +250,7 @@ def test_gateway_uses_exact_public_argv_and_reuses_request_id(tmp_path: Path) ->
                 "prepare-history",
                 "--project",
                 PROJECT_ID,
-                "--location",
+                "--checkout",
                 LOCATION_ID,
                 "--request-id",
                 REQUEST_ID,
@@ -290,8 +312,9 @@ def test_gateway_curation_uses_exact_public_argv_and_bounded_json_stdin(
             next_action="Run the acceptance loop",
             wrap=True,
         )
-        await gateway.prepare_continuation(
-            handoff_id,
+        await gateway.prepare_task(
+            TASK_ID,
+            provider=None,
             request_id=REQUEST_ID,
             context=context,
         )
@@ -346,9 +369,8 @@ def test_gateway_curation_uses_exact_public_argv_and_bounded_json_stdin(
         ),
         (
             prefix,
-            "prepare-new",
-            "--from",
-            handoff_id,
+            "prepare-task",
+            TASK_ID,
             "--request-id",
             REQUEST_ID,
             "--has-current-terminal",
@@ -386,6 +408,63 @@ def test_gateway_curation_uses_exact_public_argv_and_bounded_json_stdin(
     ]
 
 
+def test_gateway_task_management_uses_exact_public_commands(tmp_path: Path) -> None:
+    executable = tmp_path / "swbctl"
+    executable.touch(mode=0o755)
+    runner = RecordingRunner()
+    gateway = SwbctlGateway(executable, timeout_seconds=3, runner=runner)
+    handoff_id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+
+    async def exercise() -> None:
+        await gateway.adopt_session(CODEX_SESSION_KEY, task_id=TASK_ID)
+        await gateway.set_task_title(TASK_ID, "Phase 4D")
+        await gateway.set_task_purpose(TASK_ID, "Finish the task surface")
+        await gateway.set_task_purpose(TASK_ID, None)
+        await gateway.set_task_pinned(TASK_ID, pinned=True)
+        await gateway.set_task_pinned(TASK_ID, pinned=False)
+        await gateway.close_task(
+            TASK_ID,
+            handoff_id=handoff_id,
+            summary="Phase 4D is complete.",
+            next_action="Review the DMS adapter.",
+        )
+        await gateway.reopen_task(TASK_ID)
+
+    asyncio.run(exercise())
+
+    prefix = str(executable)
+    assert [call for call, _timeout in runner.calls] == [
+        (
+            prefix,
+            "task",
+            "adopt",
+            CODEX_SESSION_KEY,
+            "--task",
+            TASK_ID,
+            "--json",
+        ),
+        (prefix, "task", "title", TASK_ID, "Phase 4D", "--json"),
+        (
+            prefix,
+            "task",
+            "purpose",
+            TASK_ID,
+            "Finish the task surface",
+            "--json",
+        ),
+        (prefix, "task", "purpose", TASK_ID, "--clear", "--json"),
+        (prefix, "task", "pin", TASK_ID, "--json"),
+        (prefix, "task", "pin", TASK_ID, "--off", "--json"),
+        (prefix, "task", "close", TASK_ID, "--json-stdin", "--json"),
+        (prefix, "task", "reopen", TASK_ID, "--json"),
+    ]
+    assert json.loads(runner.inputs[-2]) == {
+        "handoffId": handoff_id,
+        "summary": "Phase 4D is complete.",
+        "nextAction": "Review the DMS adapter.",
+    }
+
+
 def test_gateway_curation_rejects_invalid_arguments_before_execution(
     tmp_path: Path,
 ) -> None:
@@ -415,8 +494,9 @@ def test_gateway_curation_rejects_invalid_arguments_before_execution(
                 next_action="Next",
                 wrap=False,
             ),
-            gateway.prepare_continuation(
+            gateway.prepare_task(
                 "invalid",
+                provider=None,
                 request_id=REQUEST_ID,
                 context=context,
             ),
@@ -490,10 +570,9 @@ def test_gateway_rejects_invalid_arguments_before_execution(tmp_path: Path) -> N
         )
     with pytest.raises(GatewayError, match="terminal-local"):
         asyncio.run(
-            gateway.prepare_new(
-                PROJECT_ID,
-                location_id=None,
-                provider="codex",
+            gateway.prepare_task(
+                TASK_ID,
+                provider=None,
                 request_id=REQUEST_ID,
                 context=PresentationContext(False, None, False, False),
             )

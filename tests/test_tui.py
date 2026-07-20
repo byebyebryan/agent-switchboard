@@ -19,11 +19,12 @@ protocol_module = importlib.import_module("agent_switchboard.protocol")
 widgets_module = importlib.import_module("textual.widgets")
 
 ROOT = Path(__file__).parents[1]
-SNAPSHOT_FIXTURE = ROOT / "tests/fixtures/protocol/v1/snapshot.json"
+SNAPSHOT_FIXTURE = ROOT / "tests/fixtures/protocol/v2/snapshot.json"
 NOW_MS = 1_784_142_010_000
 PROJECT_ID = "22222222-2222-4222-8222-222222222222"
 HOST_ID = "11111111-1111-4111-8111-111111111111"
 LOCATION_ID = "44444444-4444-4444-8444-444444444444"
+TASK_ID = "88888888-8888-4888-8888-888888888888"
 SURFACE_ID = "33333333-3333-4333-8333-333333333333"
 STOP_SURFACE_ID = "33333333-3333-4333-8333-333333333334"
 TMUX_CLIENT = "/dev/pts/7"
@@ -66,6 +67,9 @@ def _mixed_snapshot(*, degraded: bool = False) -> Any:
         }
     )
     claude.pop("surfaceId", None)
+    codex.pop("taskId", None)
+    claude.pop("taskId", None)
+    value["tasks"] = []
     value["sessions"] = [codex, claude]
     if degraded:
         value["capabilities"].append(
@@ -130,7 +134,10 @@ def _empty_snapshot() -> Any:
     value = _value()
     for collection in (
         "projects",
-        "locations",
+        "projectRepositories",
+        "repositories",
+        "checkouts",
+        "tasks",
         "sessions",
         "runtimes",
         "surfaces",
@@ -171,8 +178,8 @@ def _plan(kind: str, *, client: str | None = None) -> Any:
         fields["tmuxClient"] = client
     return protocol_module.PresentationPlanEnvelope.from_dict(
         {
-            "schemaVersion": 1,
-            "protocolVersion": 1,
+            "schemaVersion": 2,
+            "protocolVersion": 2,
             "plan": fields,
         }
     )
@@ -184,8 +191,8 @@ def _blocked_plan(
 ) -> Any:
     return protocol_module.PresentationPlanEnvelope.from_dict(
         {
-            "schemaVersion": 1,
-            "protocolVersion": 1,
+            "schemaVersion": 2,
+            "protocolVersion": 2,
             "plan": {
                 "kind": "blocked",
                 "hostId": HOST_ID,
@@ -222,8 +229,8 @@ def _stop_action(status: str, *, blocked: bool = False) -> Any:
         }
     return protocol_module.SessionActionEnvelope.from_dict(
         {
-            "schemaVersion": 1,
-            "protocolVersion": 1,
+            "schemaVersion": 2,
+            "protocolVersion": 2,
             "action": action,
         }
     )
@@ -236,8 +243,8 @@ def _detail(snapshot: Any, session_key: str) -> Any:
     )
     return protocol_module.SessionDetailEnvelope.from_dict(
         {
-            "schemaVersion": 1,
-            "protocolVersion": 1,
+            "schemaVersion": 2,
+            "protocolVersion": 2,
             "generatedAt": value["generatedAt"],
             "session": session,
             "handoffs": [],
@@ -283,8 +290,8 @@ def _curated_detail(
     ]
     return protocol_module.SessionDetailEnvelope.from_dict(
         {
-            "schemaVersion": 1,
-            "protocolVersion": 1,
+            "schemaVersion": 2,
+            "protocolVersion": 2,
             "generatedAt": (
                 int(value["generatedAt"]) if generated_at is None else generated_at
             ),
@@ -378,17 +385,30 @@ class FakeGateway:
         self.action_calls.append(("open", session_key, request_id, context))
         return await self._prepare()
 
-    async def prepare_new(
+    async def prepare_task_create(
         self,
-        project_id: str,
+        task_id: str,
         *,
-        location_id: str | None,
+        project_id: str,
+        title: str,
+        checkout_id: str | None,
         provider: str,
+        purpose: str | None = None,
         request_id: str,
         context: Any,
     ) -> Any:
         self.action_calls.append(
-            ("new", project_id, location_id, provider, request_id, context)
+            (
+                "new",
+                task_id,
+                project_id,
+                title,
+                checkout_id,
+                provider,
+                purpose,
+                request_id,
+                context,
+            )
         )
         return await self._prepare()
 
@@ -396,23 +416,24 @@ class FakeGateway:
         self,
         project_id: str,
         *,
-        location_id: str | None,
+        checkout_id: str | None,
         request_id: str,
         context: Any,
     ) -> Any:
         self.action_calls.append(
-            ("history", project_id, location_id, request_id, context)
+            ("history", project_id, checkout_id, request_id, context)
         )
         return await self._prepare()
 
-    async def prepare_continuation(
+    async def prepare_task(
         self,
-        handoff_id: str,
+        task_id: str,
         *,
+        provider: str | None,
         request_id: str,
         context: Any,
     ) -> Any:
-        self.action_calls.append(("continue", handoff_id, request_id, context))
+        self.action_calls.append(("continue", task_id, provider, request_id, context))
         return await self._prepare()
 
     async def stop_session(self, session_key: str) -> Any:
@@ -489,6 +510,7 @@ def _app(
     tmux_client: str | None = None,
     request_ids: tuple[UUID, ...] = REQUEST_IDS,
     handoff_ids: tuple[UUID, ...] = HANDOFF_IDS,
+    initial_view: str = "inbox",
 ) -> Any:
     ids = iter(request_ids)
     handoffs = iter(handoff_ids)
@@ -503,6 +525,7 @@ def _app(
         now_ms=lambda: NOW_MS,
         request_id_factory=lambda: next(ids),
         handoff_id_factory=lambda: next(handoffs),
+        initial_view=initial_view,
     )
 
 
@@ -539,7 +562,7 @@ def test_application_renders_status_navigation_details_and_help() -> None:
                 app.query_one("#issues", widgets_module.Static).content
             )
             status = str(app.query_one("#status", widgets_module.Static).content)
-            assert "2/2 sessions" in status
+            assert "2/2 Inbox sessions" in status
             assert "2 issue(s)" in status
             assert "claude degraded" in status
             assert "plain terminal" in status
@@ -735,7 +758,7 @@ def test_narrow_and_empty_layout_remain_usable() -> None:
             assert app.query_one("#filters").has_class("narrow")
             assert app.query_one("#sessions").region.height > 0
             assert app.query_one("#side-panel").region.height > 0
-            assert "0/0 sessions" in str(
+            assert "0/0 Inbox sessions" in str(
                 app.query_one("#status", widgets_module.Static).content
             )
             assert "No sessions are currently known" in str(
@@ -938,6 +961,9 @@ def test_new_and_history_use_declared_target_picker() -> None:
             await pilot.press("n")
             assert isinstance(app.screen, tui_module.TargetPicker)
             await pilot.press("enter")
+            assert isinstance(app.screen, tui_module.TextEditScreen)
+            app.screen.query_one("#edit-value", widgets_module.Input).value = "Phase 4D"
+            await pilot.press("enter")
             await _wait_until(
                 pilot,
                 lambda: not app.is_running,
@@ -946,10 +972,13 @@ def test_new_and_history_use_declared_target_picker() -> None:
             assert gateway.action_calls[:1] == [
                 (
                     "new",
+                    str(REQUEST_IDS[0]),
                     PROJECT_ID,
+                    "Phase 4D",
                     LOCATION_ID,
                     "codex",
-                    str(REQUEST_IDS[0]),
+                    None,
+                    str(REQUEST_IDS[1]),
                     context,
                 )
             ]
@@ -1453,48 +1482,20 @@ def test_detail_reload_failure_preserves_last_good_and_retry_replaces_it() -> No
     asyncio.run(exercise())
 
 
-def test_continuation_requires_a_handoff_and_uses_terminal_plan_path() -> None:
-    async def exercise_missing() -> None:
-        snapshot = _mixed_snapshot()
-        gateway = FakeGateway(retained=snapshot)
-        app = _app(gateway)
-        async with app.run_test(size=(100, 28)) as pilot:
-            await _wait_until(
-                pilot,
-                lambda: app.model is not None and app.model.selected_detail is not None,
-                message="initial detail did not load",
-            )
-            await pilot.press("c")
-            assert app.action_error.code == "continuation_handoff_missing"
-            assert gateway.action_calls == []
-
-    async def exercise_attach() -> None:
+def test_task_continuation_uses_task_identity_and_terminal_plan_path() -> None:
+    async def exercise() -> None:
         context = domain_module.PresentationContext(True, None, False, False)
-        snapshot = _mixed_snapshot()
-        session_key = str(snapshot.sessions[1]["sessionKey"])
-        detail = _curated_detail(
-            snapshot,
-            session_key,
-            handoffs=(
-                (
-                    str(HANDOFF_IDS[0]),
-                    1,
-                    "Continue this work",
-                    "Open a fresh provider session",
-                ),
-            ),
-        )
+        snapshot = protocol_module.SnapshotEnvelope.from_dict(_value())
         gateway = FakeGateway(
             retained=snapshot,
-            detail=detail,
             plan=_plan("attach"),
         )
-        app = _app(gateway)
+        app = _app(gateway, initial_view="open")
         async with app.run_test(size=(100, 28)) as pilot:
             await _wait_until(
                 pilot,
-                lambda: app.model is not None and app.model.selected_detail is not None,
-                message="continuation detail did not load",
+                lambda: app._selected_task_id == TASK_ID,
+                message="open task did not become selected",
             )
             await pilot.press("c")
             await _wait_until(
@@ -1505,7 +1506,8 @@ def test_continuation_requires_a_handoff_and_uses_terminal_plan_path() -> None:
             assert gateway.action_calls == [
                 (
                     "continue",
-                    str(HANDOFF_IDS[0]),
+                    TASK_ID,
+                    None,
                     str(REQUEST_IDS[0]),
                     context,
                 ),
@@ -1517,8 +1519,7 @@ def test_continuation_requires_a_handoff_and_uses_terminal_plan_path() -> None:
                 SURFACE_ID,
             )
 
-    asyncio.run(exercise_missing())
-    asyncio.run(exercise_attach())
+    asyncio.run(exercise())
 
 
 def test_terminal_handoff_exec_is_exact_and_failure_is_restored(
