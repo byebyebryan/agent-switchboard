@@ -241,7 +241,7 @@ def run_doctor(
         environment=environment,
     ).inspect_hooks(cwds=(inspected_cwd,))
     for issue in inspection.issues:
-        add("error", issue.code, issue.message)
+        add("error" if issue.blocking else "warning", issue.code, issue.message)
     expected_path = codex_home(environ=environment) / "hooks.json"
     expected_command = hook_command(current_swbctl)
     canonical = canonical_hook_groups(
@@ -435,7 +435,7 @@ def run_claude_doctor(
         executable=claude_executable, environment=environment
     ).inspect_capability(settings)
     for issue in capability.degraded_reasons:
-        add("error", issue.code, issue.message)
+        add("error" if issue.blocking else "warning", issue.code, issue.message)
     if settings.disable_all_hooks is True:
         add("error", "hooks_disabled", "Claude disableAllHooks is enabled")
     if settings.allow_managed_hooks_only is True:

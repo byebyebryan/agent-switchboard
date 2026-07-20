@@ -449,6 +449,26 @@ def test_degraded_capability_errors_and_safe_stop_are_inspectable() -> None:
     assert blocked.rows[0].can_stop is False
 
 
+def test_available_capability_degradation_is_a_warning() -> None:
+    value = _value()
+    value["capabilities"][0]["degradedReasons"] = [  # type: ignore[index]
+        {
+            "code": "untested_provider_version",
+            "message": "The provider version is outside the tested range.",
+            "retryable": False,
+        }
+    ]
+
+    model = FrontendModel.from_snapshot(
+        _snapshot(value), now_ms=int(value["generatedAt"])
+    )
+
+    capability = model.capability("codex")
+    assert capability.available is True
+    assert capability.status is CapabilityStatus.WARNING
+    assert len(capability.issue_ids) == 1
+
+
 def test_unicode_token_search_matches_across_public_display_fields() -> None:
     value = _value()
     value["projects"][0]["name"] = "Café"  # type: ignore[index]

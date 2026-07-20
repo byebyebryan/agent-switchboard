@@ -75,9 +75,20 @@ def test_unsupported_version_and_provider_failure_are_structured(
 ) -> None:
     provider, _ = configured(tmp_path, monkeypatch, {"stdout": "9.9.9 (Claude Code)\n"})
     unsupported = provider.inspect_capability(settings(tmp_path / "settings.json"))
-    assert not unsupported.available
+    assert unsupported.available
     assert unsupported.provider_version == "9.9.9"
     assert unsupported.degraded_reasons[-1].code == "untested_provider_version"
+    assert not unsupported.degraded_reasons[-1].blocking
+
+    blocked = provider.inspect_capability(
+        settings(tmp_path / "settings.json", disabled=False)
+    )
+    assert not blocked.available
+    assert [issue.code for issue in blocked.degraded_reasons] == [
+        "untested_provider_version",
+        "agent_view_enabled",
+    ]
+    assert [issue.blocking for issue in blocked.degraded_reasons] == [False, True]
 
     missing = ClaudeProvider(str(tmp_path / "missing")).inspect_capability(
         settings(tmp_path / "settings.json")
@@ -85,6 +96,7 @@ def test_unsupported_version_and_provider_failure_are_structured(
     assert not missing.available
     assert missing.provider_version is None
     assert missing.degraded_reasons[-1].code == "provider_not_found"
+    assert missing.degraded_reasons[-1].blocking
 
 
 def test_timeout_kills_complete_process_group(

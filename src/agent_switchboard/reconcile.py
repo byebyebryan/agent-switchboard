@@ -129,6 +129,7 @@ def _unavailable_result(
             ).to_dict()
         )
         for issue in issues
+        if issue.blocking
     )
     return CodexReconciliationResult(None, capability, errors)
 
@@ -227,6 +228,7 @@ def reconcile_claude_capability(
             ).to_dict()
         )
         for issue in report.degraded_reasons
+        if issue.blocking
     )
     return ClaudeReconciliationResult(capability, errors)
 

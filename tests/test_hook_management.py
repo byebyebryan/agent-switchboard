@@ -699,6 +699,26 @@ def test_doctor_reports_healthy_effective_hooks_and_isolated_latency(
     assert result.warm_p95_latency_ms is not None
     assert "Agent Switchboard doctor: healthy" in result.render()
     assert not (tmp_path / "state").exists()
+
+    document = json.loads(plan.read_text(encoding="utf-8"))
+    document["version"] = {"stdout": "codex-cli 9.9.9\n"}
+    write_json(plan, document)
+    version_warning = run_doctor(
+        codex_executable=str(FAKE_CODEX),
+        swbctl_executable=swbctl,
+        hooks=HooksConfig(),
+        cwd=tmp_path,
+        environment=environment,
+    )
+    assert version_warning.healthy
+    diagnostic = next(
+        item
+        for item in version_warning.diagnostics
+        if item.code == "untested_provider_version"
+    )
+    assert diagnostic.level == "warning"
+    assert "WARNING untested_provider_version" in version_warning.render()
+
     invocations = [
         json.loads(line)
         for line in log.read_text(encoding="utf-8").splitlines()

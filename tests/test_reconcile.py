@@ -8,13 +8,21 @@ import pytest
 
 from agent_switchboard.domain import ProviderId
 from agent_switchboard.protocol import ErrorScope
+from agent_switchboard.providers.claude import (
+    CLAUDE_FEATURES,
+    ClaudeCapabilityReport,
+    ClaudeProviderIssue,
+)
 from agent_switchboard.providers.codex import (
     CodexCapabilityReport,
     CodexDiscoveryResult,
     CodexProviderIssue,
     NormalizedCodexSession,
 )
-from agent_switchboard.reconcile import reconcile_codex_discovery
+from agent_switchboard.reconcile import (
+    reconcile_claude_capability,
+    reconcile_codex_discovery,
+)
 from agent_switchboard.storage import Registry
 
 HOST_ID = "11111111-1111-4111-8111-111111111111"
@@ -192,6 +200,34 @@ def test_complete_discovery_carries_explicit_null_name(registry: Registry) -> No
     assert stored["provider_name"] is None
     assert stored["name_source"] == "provider"
     assert stored["metadata_source"] == "provider"
+
+
+def test_claude_version_drift_is_available_degradation_without_provider_error() -> None:
+    warning = ClaudeProviderIssue(
+        code="untested_provider_version",
+        message="The installed Claude version is outside the tested contract range.",
+        retryable=False,
+        stage="version",
+        blocking=False,
+    )
+    result = reconcile_claude_capability(
+        HOST_ID,
+        ClaudeCapabilityReport(
+            available=True,
+            provider_version="9.9.9",
+            tested_contract_min="2.1.214",
+            tested_contract_max="2.1.214",
+            features=CLAUDE_FEATURES,
+            degraded_reasons=(warning,),
+        ),
+        observed_at=100,
+    )
+
+    assert result.capability.available
+    assert [item.code for item in result.capability.degraded_reasons] == [
+        "untested_provider_version"
+    ]
+    assert result.errors == ()
 
 
 def test_complete_unavailable_result_fails_closed_without_mutation(

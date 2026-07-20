@@ -190,6 +190,26 @@ def test_claude_doctor_checks_profile_handlers_latency_and_legacy_runtime(
     assert healthy.provider_version == "2.1.214"
     assert healthy.cold_latency_ms is not None
 
+    plan.write_text('{"stdout":"9.9.9 (Claude Code)\\n"}', encoding="utf-8")
+    version_warning = run_claude_doctor(
+        claude_executable=str(fake_claude),
+        swbctl_executable=executable,
+        hooks=HooksConfig(latency_budget_ms=10_000),
+        environment=full_environment,
+        proc_root=proc_root,
+        uid=os.getuid(),
+    )
+    assert version_warning.healthy
+    diagnostic = next(
+        item
+        for item in version_warning.diagnostics
+        if item.code == "untested_provider_version"
+    )
+    assert diagnostic.level == "warning"
+    assert "WARNING untested_provider_version" in version_warning.render()
+
+    plan.write_text("{}", encoding="utf-8")
+
     agent = proc_root / "42"
     agent.mkdir()
     (agent / "cmdline").write_bytes(b"claude\0agents\0")

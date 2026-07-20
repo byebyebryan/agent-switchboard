@@ -705,6 +705,14 @@ available, and structured degraded reasons. Adapters must tolerate missing
 providers and version-specific capability gaps. The core exposes those gaps to
 frontends instead of fabricating support.
 
+The tested-contract range records positive compatibility evidence; it is not a
+runtime allowlist. A syntactically valid provider version outside that range is
+a visible non-blocking warning while bounded feature probes continue. Actual
+command, schema, hook, configuration, or shape failures retain their existing
+independent severity: required-contract failures block, while optional feature
+evidence may degrade only that feature. This keeps frequent provider releases
+usable without silently claiming that an untested version was certified.
+
 The initial fixture baseline is the locally verified Codex `0.144.4` and Claude
 Code `2.1.210`, but these are not permanent pins. Codex app-server schemas are
 generated from each supported CLI version and contract-tested. Claude's
@@ -2068,10 +2076,13 @@ transcript files.
 ### Provider contract evolution
 
 Codex app-server schemas and Claude hook/native-resume behavior are
-version-specific. Unsupported versions retain registry-known sessions and
-provider-native history actions, but structured discovery/status features may
-be marked unavailable. Shipping a new supported version requires fixture and
-contract-test coverage; unknown fields alone do not require a release.
+version-specific. A version outside the tested range retains registry-known
+sessions and emits a warning, but does not by itself make the provider
+unavailable. Bounded feature probes and structural validation remain the
+runtime gate; a failed required command, incompatible response shape, or
+hook/profile conflict still blocks, while optional schema evidence may degrade
+only its feature. Recording a newly tested version requires fixture or isolated
+no-model contract evidence; unknown fields alone do not require a release.
 
 ## Resolved Implementation Decisions
 

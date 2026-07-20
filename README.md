@@ -22,7 +22,7 @@ Codex and Claude sessions:
 - SQLite schema, migrations, and registry operations
 - production Codex `0.144.6` app-server discovery, normalization, atomic
   reconciliation, and canonical local snapshots
-- bounded Claude Code `2.1.214` capability detection for the
+- bounded Claude Code `2.1.214` through `2.1.215` capability detection for the
   Agent-View-disabled profile without supervisor or transcript discovery
 - retained no-refresh reads, structured provider degradation, and explicit
   snapshot-session truncation
@@ -301,6 +301,15 @@ Run the local acceptance gates from the repository root:
 .venv/bin/ruff check .
 .venv/bin/pytest
 git diff --check
+```
+
+To replace the dogfood installation with the current checkout, including the
+TUI extra, force a fresh local build. `--force` alone may reuse an older cached
+artifact while development commits still share version `0.1.0`:
+
+```sh
+uv tool install --force --no-cache '.[tui]'
+swbctl doctor
 ```
 
 The tests use the `src/` tree directly, so `pytest` also works before package

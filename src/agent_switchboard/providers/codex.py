@@ -175,6 +175,7 @@ class CodexProviderIssue:
     retryable: bool
     stage: str
     feature: str | None = None
+    blocking: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -281,8 +282,9 @@ def _issue(
     retryable: bool,
     stage: str,
     feature: str | None = None,
+    blocking: bool = True,
 ) -> CodexProviderIssue:
-    return CodexProviderIssue(code, message, retryable, stage, feature)
+    return CodexProviderIssue(code, message, retryable, stage, feature, blocking)
 
 
 def _failure(
@@ -726,6 +728,7 @@ class _AppServer:
                 issue.retryable,
                 issue.stage,
                 self.feature,
+                issue.blocking,
             )
         )
 
@@ -1427,6 +1430,7 @@ class CodexProvider:
                     retryable=False,
                     stage="version",
                     feature="app_server_thread_list",
+                    blocking=False,
                 )
             )
 
@@ -1473,6 +1477,7 @@ class CodexProvider:
                         issue.retryable,
                         issue.stage,
                         "hooks_list",
+                        issue.blocking,
                     ),
                 ),
             )
@@ -1485,6 +1490,7 @@ class CodexProvider:
                     retryable=False,
                     stage="version",
                     feature="hooks_list",
+                    blocking=False,
                 )
             )
         try:

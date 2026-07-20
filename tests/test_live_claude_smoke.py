@@ -43,17 +43,25 @@ def _environment(
     return environment, claude, swbctl
 
 
-def _run(tmp_path: Path, plan: dict[str, object]) -> subprocess.CompletedProcess[str]:
+def _run(
+    tmp_path: Path,
+    plan: dict[str, object],
+    *,
+    expected_version: str | None = None,
+) -> subprocess.CompletedProcess[str]:
     environment, claude, swbctl = _environment(tmp_path, plan)
+    argv = [
+        sys.executable,
+        str(SCRIPT),
+        "--claude",
+        str(claude),
+        "--swbctl",
+        str(swbctl),
+    ]
+    if expected_version is not None:
+        argv.extend(("--expected-version", expected_version))
     return subprocess.run(
-        [
-            sys.executable,
-            str(SCRIPT),
-            "--claude",
-            str(claude),
-            "--swbctl",
-            str(swbctl),
-        ],
+        argv,
         cwd=ROOT,
         env=environment,
         capture_output=True,
@@ -87,6 +95,7 @@ def test_live_claude_smoke_prints_only_sanitized_no_model_summary(
         "reportedCostUsd",
         "reportedTurns",
         "sessionCount",
+        "warningCodes",
     }
     assert summary["providerVersion"] == "2.1.214"
     assert summary["features"] == ["hooks", "native_resume", "tmux_runtime"]
@@ -98,6 +107,7 @@ def test_live_claude_smoke_prints_only_sanitized_no_model_summary(
     assert summary["reportedCostUsd"] == 0.0
     assert summary["reportedTurns"] == 0
     assert summary["sessionCount"] == 1
+    assert summary["warningCodes"] == []
 
 
 def test_live_claude_smoke_failure_is_generic_and_payload_free(
@@ -117,3 +127,21 @@ def test_live_claude_smoke_failure_is_generic_and_payload_free(
     assert completed.stdout == ""
     assert completed.stderr == "live Claude smoke failed\n"
     assert secret not in completed.stderr
+
+
+def test_live_claude_smoke_accepts_nonblocking_version_warning(
+    tmp_path: Path,
+) -> None:
+    completed = _run(
+        tmp_path,
+        {
+            "acceptanceProbe": True,
+            "stdout": "9.9.9 (Claude Code)\n",
+        },
+        expected_version="9.9.9",
+    )
+
+    assert completed.returncode == 0
+    summary = json.loads(completed.stdout)
+    assert summary["providerVersion"] == "9.9.9"
+    assert summary["warningCodes"] == ["untested_provider_version"]

@@ -399,3 +399,19 @@ Accepted locally on 2026-07-19:
 - acceptance started no provider, invoked no model, did not read provider or
   claude-mem private state, never entered DMS, and cleaned the test-owned tmux
   server independently of any live user session.
+
+## Provider-version follow-up
+
+Accepted locally on 2026-07-19 after Claude Code advanced to `2.1.215`:
+
+- provider-version drift became a non-blocking capability warning for Codex and
+  Claude while actual command, schema, hook, settings, and response-shape
+  failures retain their existing independent severity;
+- snapshots retain the warning in `degradedReasons` with `available=true`, emit
+  no provider error row for version drift alone, and the TUI distinguishes the
+  warning state from an unavailable provider;
+- `swbctl doctor` reports the mismatch as `WARNING` and remains healthy when
+  the effective hooks, profile, and latency checks pass; and
+- the isolated real-Claude lifecycle probe passed on `2.1.215` with exactly one
+  `SessionStart`, `UserPromptSubmit`, and `SessionEnd`, zero turns, zero cost,
+  no persisted prompt, and no interaction with the active user session.

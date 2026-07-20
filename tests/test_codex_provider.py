@@ -341,8 +341,10 @@ def test_unknown_version_is_shape_probed_and_reported(
     result = provider.discover_sessions()
 
     assert result.complete
+    assert result.capability.available
     assert result.capability.provider_version == "9.9.9"
     assert result.capability.degraded_reasons[-1].code == "untested_provider_version"
+    assert not result.capability.degraded_reasons[-1].blocking
 
 
 def test_schema_fingerprint_is_canonical_and_tracks_semantic_changes() -> None:

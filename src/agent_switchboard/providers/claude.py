@@ -18,7 +18,10 @@ from pathlib import Path
 from typing import Final
 
 CLAUDE_TESTED_CONTRACT_MIN: Final = "2.1.214"
-CLAUDE_TESTED_CONTRACT_MAX: Final = "2.1.214"
+CLAUDE_TESTED_CONTRACT_MAX: Final = "2.1.215"
+_CLAUDE_TESTED_CONTRACT_VERSIONS: Final = frozenset(
+    {CLAUDE_TESTED_CONTRACT_MIN, CLAUDE_TESTED_CONTRACT_MAX}
+)
 CLAUDE_FEATURES: Final = ("hooks", "native_resume", "tmux_runtime")
 MAX_CLAUDE_SETTINGS_BYTES: Final = 8 * 1024 * 1024
 
@@ -37,6 +40,7 @@ class ClaudeProviderIssue:
     retryable: bool
     stage: str
     feature: str | None = None
+    blocking: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -75,8 +79,9 @@ def _issue(
     retryable: bool,
     stage: str,
     feature: str | None = None,
+    blocking: bool = True,
 ) -> ClaudeProviderIssue:
-    return ClaudeProviderIssue(code, message, retryable, stage, feature)
+    return ClaudeProviderIssue(code, message, retryable, stage, feature, blocking)
 
 
 def _failure(
@@ -438,7 +443,7 @@ class ClaudeProvider:
                 (failure.issue,),
             )
         issues: list[ClaudeProviderIssue] = []
-        if version != CLAUDE_TESTED_CONTRACT_MIN:
+        if version not in _CLAUDE_TESTED_CONTRACT_VERSIONS:
             issues.append(
                 _issue(
                     "untested_provider_version",
@@ -446,6 +451,7 @@ class ClaudeProvider:
                     "contract range.",
                     retryable=False,
                     stage="version",
+                    blocking=False,
                 )
             )
         if settings.issue is not None:
@@ -461,7 +467,7 @@ class ClaudeProvider:
                 )
             )
         return ClaudeCapabilityReport(
-            not issues,
+            not any(issue.blocking for issue in issues),
             version,
             CLAUDE_TESTED_CONTRACT_MIN,
             CLAUDE_TESTED_CONTRACT_MAX,

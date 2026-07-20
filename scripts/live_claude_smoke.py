@@ -71,6 +71,14 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         help="bounded Claude probe deadline (default: 20)",
     )
+    parser.add_argument(
+        "--expected-version",
+        default=CLAUDE_TESTED_CONTRACT_MIN,
+        help=(
+            "exact Claude version expected from the isolated probe "
+            f"(default: {CLAUDE_TESTED_CONTRACT_MIN})"
+        ),
+    )
     return parser
 
 
@@ -213,6 +221,7 @@ def _run_smoke(
     claude: Path,
     swbctl: Path,
     timeout_seconds: float,
+    expected_version: str,
 ) -> dict[str, object]:
     if not math.isfinite(timeout_seconds) or not 1.0 <= timeout_seconds <= 120.0:
         raise _SmokeFailure
@@ -230,9 +239,9 @@ def _run_smoke(
     )
     if (
         not capability.available
-        or capability.provider_version != CLAUDE_TESTED_CONTRACT_MIN
+        or capability.provider_version != expected_version
         or capability.features != CLAUDE_FEATURES
-        or capability.degraded_reasons
+        or any(issue.blocking for issue in capability.degraded_reasons)
     ):
         raise _SmokeFailure
 
@@ -332,6 +341,9 @@ def _run_smoke(
         "reportedCostUsd": cost,
         "reportedTurns": turns,
         "sessionCount": len(sessions),
+        "warningCodes": sorted(
+            issue.code for issue in capability.degraded_reasons if not issue.blocking
+        ),
     }
 
 
@@ -345,6 +357,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             claude=claude,
             swbctl=swbctl,
             timeout_seconds=arguments.timeout_seconds,
+            expected_version=arguments.expected_version,
         )
     except Exception:
         print("live Claude smoke failed", file=sys.stderr)

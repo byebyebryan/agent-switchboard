@@ -31,6 +31,7 @@ class CapabilityStatus(StrEnum):
 
     NEUTRAL = "neutral"
     AVAILABLE = "available"
+    WARNING = "warning"
     DEGRADED = "degraded"
 
 
@@ -638,7 +639,9 @@ def _capabilities_and_issues(
             )
         status = (
             CapabilityStatus.DEGRADED
-            if not capability.available or capability.degraded_reasons
+            if not capability.available
+            else CapabilityStatus.WARNING
+            if capability.degraded_reasons
             else CapabilityStatus.AVAILABLE
         )
         capabilities.append(
