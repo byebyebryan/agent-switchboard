@@ -11,6 +11,10 @@ import pytest
 
 from agent_switchboard.domain import HostId, PresentationContext, SessionKey
 from agent_switchboard.protocol import (
+    FleetEnvelope,
+    FleetHost,
+    FleetReachability,
+    FleetSource,
     PresentationPlanEnvelope,
     SessionAction,
     SessionActionEnvelope,
@@ -22,6 +26,7 @@ from agent_switchboard.tui_gateway import (
     MAX_STDIN_BYTES,
     MAX_STDOUT_BYTES,
     CommandOutput,
+    FleetSnapshotSource,
     GatewayError,
     SnapshotSource,
     SwbctlGateway,
@@ -45,6 +50,7 @@ TMUX_CLIENT = "/dev/pts/7"
 def _record(
     envelope: (
         SnapshotEnvelope
+        | FleetEnvelope
         | PresentationPlanEnvelope
         | SessionActionEnvelope
         | SessionDetailEnvelope
@@ -54,6 +60,28 @@ def _record(
 
 
 SNAPSHOT_RECORD = _record(SnapshotEnvelope.from_json(SNAPSHOT_FIXTURE.read_bytes()))
+_snapshot_envelope = SnapshotEnvelope.from_json(SNAPSHOT_FIXTURE.read_bytes())
+FLEET_RECORD = _record(
+    FleetEnvelope(
+        generated_at=_snapshot_envelope.generated_at,
+        local_host_id=_snapshot_envelope.host.host_id,
+        hosts=(
+            FleetHost(
+                source=FleetSource.LOCAL,
+                remote_name=None,
+                host_id=_snapshot_envelope.host.host_id,
+                display_name=_snapshot_envelope.host.display_name,
+                reachability=FleetReachability.ONLINE,
+                snapshot_observed_at=_snapshot_envelope.generated_at,
+                snapshot_received_at=_snapshot_envelope.generated_at,
+                last_attempt_at=_snapshot_envelope.generated_at,
+                stale=False,
+                error=None,
+                snapshot=_snapshot_envelope,
+            ),
+        ),
+    )
+)
 PLAN_RECORD = _record(PresentationPlanEnvelope.from_json(PLAN_FIXTURE.read_bytes()))
 ACTION_RECORD = _record(
     SessionActionEnvelope(
@@ -110,6 +138,7 @@ class RecordingRunner:
         self.calls.append((command, timeout_seconds))
         self.inputs.append(stdin)
         records = {
+            "fleet": FLEET_RECORD,
             "snapshot": SNAPSHOT_RECORD,
             "show": DETAIL_RECORD,
             "session": DETAIL_RECORD,
@@ -708,6 +737,48 @@ def test_snapshot_source_coalesces_refresh_and_preserves_last_good(
         fallback = await source.refresh()
         assert fallback is first
         assert calls == 2
+        assert source.last_error is not None
+        assert source.last_error.code == "command_failed"
+
+    asyncio.run(exercise())
+
+
+def test_fleet_gateway_and_source_use_exact_refresh_contract(tmp_path: Path) -> None:
+    executable = tmp_path / "swbctl"
+    executable.touch(mode=0o755)
+
+    async def exercise() -> None:
+        started = asyncio.Event()
+        release = asyncio.Event()
+        outputs = [
+            CommandOutput(FLEET_RECORD, b"", 0),
+            CommandOutput(b"", b"private diagnostic", 1),
+        ]
+        calls: list[tuple[str, ...]] = []
+
+        async def runner(
+            argv: Sequence[str], _timeout: float, _stdin: bytes | None
+        ) -> CommandOutput:
+            calls.append(tuple(argv))
+            if len(calls) == 1:
+                started.set()
+                await release.wait()
+            return outputs[len(calls) - 1]
+
+        source = FleetSnapshotSource(SwbctlGateway(executable, runner=runner))
+        first_waiter = asyncio.create_task(source.refresh())
+        await started.wait()
+        second_waiter = asyncio.create_task(source.refresh())
+        await asyncio.sleep(0)
+        assert calls == [(str(executable), "fleet", "--refresh", "--json")]
+        release.set()
+        first, second = await asyncio.gather(first_waiter, second_waiter)
+        assert first is second
+        assert source.last_good is first
+
+        fallback = await source.retained()
+        assert fallback is first
+        assert calls[-1] == (str(executable), "fleet", "--json")
         assert source.last_error is not None
         assert source.last_error.code == "command_failed"
 

@@ -12,6 +12,7 @@ from .domain import (
     Activity,
     ActivityReason,
     Attachment,
+    HostId,
     ProjectId,
     ProviderId,
     Resumability,
@@ -19,7 +20,13 @@ from .domain import (
     StateConfidence,
     ValidationError,
 )
-from .protocol import ErrorScope, SessionDetailEnvelope, SnapshotEnvelope
+from .protocol import (
+    ErrorScope,
+    FleetEnvelope,
+    FleetReachability,
+    SessionDetailEnvelope,
+    SnapshotEnvelope,
+)
 from .state import DisplayStatus, HostReachability, SessionState, derive_display_status
 
 DEFAULT_STALE_AFTER_MS = 120_000
@@ -93,6 +100,11 @@ class ProviderCapability:
 @dataclass(frozen=True, slots=True)
 class LaunchTarget:
     target_id: str
+    host_id: str
+    host_name: str
+    remote: bool
+    reachable: bool
+    stale: bool
     project_id: str
     project_name: str
     checkout_id: str
@@ -108,6 +120,9 @@ class SessionRow:
     session_key: str
     host_id: str
     host_name: str
+    remote: bool
+    reachable: bool
+    stale: bool
     provider: ProviderId
     provider_session_id: str
     task_id: str | None
@@ -148,6 +163,11 @@ class SessionRow:
 @dataclass(frozen=True, slots=True)
 class TaskRow:
     task_id: str
+    host_id: str
+    host_name: str
+    remote: bool
+    reachable: bool
+    stale: bool
     title: str
     purpose: str | None
     project_id: str
@@ -167,6 +187,10 @@ class TaskRow:
     updated_at: int
     closed_at: int | None
     search_text: str = field(repr=False)
+
+    @property
+    def row_key(self) -> str:
+        return f"{self.host_id}:{self.task_id}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -246,6 +270,7 @@ class ViewFilters:
 
     query: str = ""
     providers: frozenset[ProviderId] = frozenset()
+    host_ids: frozenset[str] = frozenset()
     project_ids: frozenset[str | None] = frozenset()
     activities: frozenset[Activity] = frozenset()
     runtime_presences: frozenset[RuntimePresence] = frozenset()
@@ -274,6 +299,13 @@ class ViewFilters:
             "providers",
             _enum_values(ProviderId, self.providers),
         )
+        canonical_hosts: set[str] = set()
+        try:
+            for host_id in self.host_ids:
+                canonical_hosts.add(str(HostId(host_id)))
+        except (TypeError, ValidationError) as error:
+            raise ValidationError("invalid host filter") from error
+        object.__setattr__(self, "host_ids", frozenset(canonical_hosts))
         canonical_projects: set[str | None] = set()
         try:
             for project_id in self.project_ids:
@@ -304,6 +336,8 @@ class ViewFilters:
         return self._query_tokens
 
     def matches(self, row: SessionRow) -> bool:
+        if self.host_ids and row.host_id not in self.host_ids:
+            return False
         if self.providers and row.provider not in self.providers:
             return False
         if self.project_ids and row.project_id not in self.project_ids:
@@ -357,6 +391,29 @@ class FrontendModel:
     ) -> Self:
         return _build_model(
             snapshot,
+            now_ms=now_ms,
+            stale_after_ms=stale_after_ms,
+            filters=ViewFilters() if filters is None else filters,
+            selected_session_key=selected_session_key,
+            previous_visible=(),
+            frontend_issues=(),
+            details=(),
+            ignored_snapshot_count=0,
+            ignored_detail_count=0,
+        )
+
+    @classmethod
+    def from_fleet(
+        cls,
+        fleet: FleetEnvelope,
+        *,
+        now_ms: int,
+        stale_after_ms: int = DEFAULT_STALE_AFTER_MS,
+        filters: ViewFilters | None = None,
+        selected_session_key: str | None = None,
+    ) -> Self:
+        return _build_fleet_model(
+            fleet,
             now_ms=now_ms,
             stale_after_ms=stale_after_ms,
             filters=ViewFilters() if filters is None else filters,
@@ -425,10 +482,16 @@ class FrontendModel:
         """Retain one validated detail without allowing an older result to win."""
 
         detail = SessionDetailView.from_envelope(envelope)
-        if str(envelope.session["hostId"]) != self.host_id:
+        detail_host_id = str(envelope.session["hostId"])
+        if detail_host_id not in {row.host_id for row in self.rows}:
             raise ValidationError("session detail belongs to another host")
-        if not any(row.session_key == detail.session_key for row in self.rows):
+        matching_row = next(
+            (row for row in self.rows if row.session_key == detail.session_key), None
+        )
+        if matching_row is None:
             raise ValidationError("session detail is not present in the snapshot")
+        if detail_host_id != matching_row.host_id:
+            raise ValidationError("session detail belongs to another host")
         existing = next(
             (item for item in self.details if item.session_key == detail.session_key),
             None,
@@ -526,6 +589,34 @@ class FrontendModel:
             )
         return _build_model(
             snapshot,
+            now_ms=now_ms,
+            stale_after_ms=self.stale_after_ms,
+            filters=self.filters,
+            selected_session_key=self.selected_session_key,
+            previous_visible=self.visible_rows,
+            frontend_issues=(),
+            details=self.details,
+            ignored_snapshot_count=self.ignored_snapshot_count,
+            ignored_detail_count=self.ignored_detail_count,
+        )
+
+    def apply_fleet(self, fleet: FleetEnvelope, *, now_ms: int) -> Self:
+        """Apply a fleet refresh without allowing an older result to win."""
+
+        if str(fleet.local_host_id) != self.host_id:
+            raise ValidationError("refreshed fleet belongs to another local host")
+        if fleet.generated_at < self.generated_at:
+            return replace(
+                self.with_frontend_error(
+                    "stale_fleet_ignored",
+                    "An older fleet refresh result was ignored.",
+                    retryable=True,
+                    observed_at=now_ms,
+                ),
+                ignored_snapshot_count=self.ignored_snapshot_count + 1,
+            )
+        return _build_fleet_model(
+            fleet,
             now_ms=now_ms,
             stale_after_ms=self.stale_after_ms,
             filters=self.filters,
@@ -709,7 +800,13 @@ def _capabilities_and_issues(
     return tuple(capabilities), tuple(issues)
 
 
-def _launch_targets(snapshot: SnapshotEnvelope) -> tuple[LaunchTarget, ...]:
+def _launch_targets(
+    snapshot: SnapshotEnvelope,
+    *,
+    local_host_id: str | None = None,
+    reachable: bool = True,
+    stale: bool = False,
+) -> tuple[LaunchTarget, ...]:
     projects = {
         str(project["projectId"]): project
         for project in snapshot.projects
@@ -742,7 +839,20 @@ def _launch_targets(snapshot: SnapshotEnvelope) -> tuple[LaunchTarget, ...]:
                 checkout_id = str(checkout["checkoutId"])
                 targets.append(
                     LaunchTarget(
-                        target_id=f"{project_id}:{checkout_id}:{provider.value}",
+                        target_id=(
+                            f"{project_id}:{checkout_id}:{provider.value}"
+                            if local_host_id is None
+                            else f"{snapshot.host.host_id}:{project_id}:"
+                            f"{checkout_id}:{provider.value}"
+                        ),
+                        host_id=str(snapshot.host.host_id),
+                        host_name=snapshot.host.display_name,
+                        remote=(
+                            local_host_id is not None
+                            and str(snapshot.host.host_id) != local_host_id
+                        ),
+                        reachable=reachable,
+                        stale=stale,
                         project_id=project_id,
                         project_name=str(project["name"]),
                         checkout_id=checkout_id,
@@ -777,6 +887,10 @@ def _launch_targets(snapshot: SnapshotEnvelope) -> tuple[LaunchTarget, ...]:
 def _session_rows(
     snapshot: SnapshotEnvelope,
     issues: tuple[FrontendIssue, ...],
+    *,
+    local_host_id: str | None = None,
+    reachability: HostReachability = HostReachability.ONLINE,
+    stale: bool = False,
 ) -> tuple[SessionRow, ...]:
     projects = {str(project["projectId"]): project for project in snapshot.projects}
     checkouts = {
@@ -817,7 +931,7 @@ def _session_rows(
         attachment = Attachment(str(session["attachment"]))
         state_confidence = StateConfidence(str(session["stateConfidence"]))
         status = derive_display_status(
-            HostReachability.ONLINE,
+            reachability,
             SessionState(
                 runtime_presence=runtime_presence,
                 resumability=resumability,
@@ -872,6 +986,12 @@ def _session_rows(
                 session_key=session_key,
                 host_id=str(session["hostId"]),
                 host_name=snapshot.host.display_name,
+                remote=(
+                    local_host_id is not None
+                    and str(snapshot.host.host_id) != local_host_id
+                ),
+                reachable=reachability is HostReachability.ONLINE,
+                stale=stale,
                 provider=provider,
                 provider_session_id=provider_session_id,
                 task_id=(
@@ -953,7 +1073,12 @@ def _session_rows(
 
 
 def _task_rows(
-    snapshot: SnapshotEnvelope, sessions: tuple[SessionRow, ...]
+    snapshot: SnapshotEnvelope,
+    sessions: tuple[SessionRow, ...],
+    *,
+    local_host_id: str | None = None,
+    reachable: bool = True,
+    stale: bool = False,
 ) -> tuple[TaskRow, ...]:
     projects = {str(project["projectId"]): project for project in snapshot.projects}
     checkouts = {
@@ -984,7 +1109,9 @@ def _task_rows(
             else ProviderId(str(task["preferredProvider"]))
         )
         display_status = (
-            DisplayStatus.PARKED
+            DisplayStatus.OFFLINE
+            if not reachable
+            else DisplayStatus.PARKED
             if str(task["status"]) == "closed"
             else DisplayStatus.READY
             if current is None
@@ -1006,6 +1133,14 @@ def _task_rows(
         rows.append(
             TaskRow(
                 task_id=str(task["taskId"]),
+                host_id=str(snapshot.host.host_id),
+                host_name=snapshot.host.display_name,
+                remote=(
+                    local_host_id is not None
+                    and str(snapshot.host.host_id) != local_host_id
+                ),
+                reachable=reachable,
+                stale=stale,
                 title=title,
                 purpose=purpose,
                 project_id=project_id,
@@ -1037,6 +1172,7 @@ def _task_rows(
                     current.provider.value if current is not None else None,
                     task["status"],
                     task["taskId"],
+                    snapshot.host.display_name,
                 ),
             )
         )
@@ -1097,6 +1233,183 @@ def _build_model(
         launch_targets=_launch_targets(snapshot),
         capabilities=capabilities,
         issues=source_issues + frontend_issues,
+        details=tuple(
+            detail for detail in details if detail.session_key in retained_session_keys
+        ),
+        filters=filters,
+        selected_session_key=selected,
+        ignored_snapshot_count=ignored_snapshot_count,
+        ignored_detail_count=ignored_detail_count,
+    )
+
+
+def _build_fleet_model(
+    fleet: FleetEnvelope,
+    *,
+    now_ms: int,
+    stale_after_ms: int,
+    filters: ViewFilters,
+    selected_session_key: str | None,
+    previous_visible: tuple[SessionRow, ...],
+    frontend_issues: tuple[FrontendIssue, ...],
+    details: tuple[SessionDetailView, ...],
+    ignored_snapshot_count: int,
+    ignored_detail_count: int,
+) -> FrontendModel:
+    stale_after_ms = _timestamp(stale_after_ms, "staleness interval")
+    if stale_after_ms == 0:
+        raise ValidationError("staleness interval must be positive")
+    local_host_id = str(fleet.local_host_id)
+    all_rows: list[SessionRow] = []
+    all_tasks: list[TaskRow] = []
+    all_targets: list[LaunchTarget] = []
+    all_issues: list[FrontendIssue] = []
+    local_capabilities: tuple[ProviderCapability, ...] | None = None
+    local_snapshot: SnapshotEnvelope | None = None
+
+    for host in fleet.hosts:
+        snapshot = host.snapshot
+        if host.error is not None:
+            alias = host.remote_name or host.display_name
+            all_issues.append(
+                FrontendIssue(
+                    issue_id=f"fleet:{_safe_issue_component(alias)}:{host.error.code}",
+                    source=IssueSource.SNAPSHOT,
+                    code=host.error.code,
+                    message=f"{host.display_name}: {host.error.message}",
+                    scope=ErrorScope.HOST,
+                    retryable=host.error.retryable,
+                    observed_at=host.last_attempt_at or fleet.generated_at,
+                )
+            )
+        if snapshot is None:
+            continue
+        reachable = host.reachability is FleetReachability.ONLINE
+        reachability = (
+            HostReachability.ONLINE
+            if host.reachability is FleetReachability.ONLINE
+            else HostReachability.OFFLINE
+            if host.reachability is FleetReachability.OFFLINE
+            else HostReachability.UNKNOWN
+        )
+        capabilities, source_issues = _capabilities_and_issues(snapshot)
+        rows = _session_rows(
+            snapshot,
+            source_issues,
+            local_host_id=local_host_id,
+            reachability=reachability,
+            stale=host.stale,
+        )
+        if str(snapshot.host.host_id) != local_host_id:
+            prefix = f"host:{snapshot.host.host_id}:"
+            issue_mapping = {
+                issue.issue_id: f"{prefix}{issue.issue_id}" for issue in source_issues
+            }
+            source_issues = tuple(
+                replace(
+                    issue,
+                    issue_id=issue_mapping[issue.issue_id],
+                    message=f"{snapshot.host.display_name}: {issue.message}",
+                )
+                for issue in source_issues
+            )
+            rows = tuple(
+                replace(
+                    row,
+                    issue_ids=tuple(
+                        issue_mapping.get(issue_id, issue_id)
+                        for issue_id in row.issue_ids
+                    ),
+                )
+                for row in rows
+            )
+        else:
+            local_snapshot = snapshot
+            local_capabilities = capabilities
+        all_rows.extend(rows)
+        all_tasks.extend(
+            _task_rows(
+                snapshot,
+                rows,
+                local_host_id=local_host_id,
+                reachable=reachable,
+                stale=host.stale,
+            )
+        )
+        all_targets.extend(
+            _launch_targets(
+                snapshot,
+                local_host_id=local_host_id,
+                reachable=reachable,
+                stale=host.stale,
+            )
+        )
+        all_issues.extend(source_issues)
+
+    if local_snapshot is None or local_capabilities is None:
+        raise ValidationError("fleet has no usable local snapshot")
+    rows = tuple(
+        sorted(
+            all_rows,
+            key=lambda row: (
+                row.attention_rank,
+                -row.recency_at,
+                row.host_name.casefold(),
+                row.session_key,
+            ),
+        )
+    )
+    task_rows = tuple(
+        sorted(
+            all_tasks,
+            key=lambda row: (
+                row.status == "closed",
+                not row.pinned,
+                row.attention_rank,
+                -row.updated_at,
+                row.host_name.casefold(),
+                row.row_key,
+            ),
+        )
+    )
+    launch_targets = tuple(
+        sorted(
+            all_targets,
+            key=lambda target: (
+                target.project_name.casefold(),
+                target.project_name,
+                target.remote,
+                target.host_name.casefold(),
+                not target.is_default,
+                0 if target.provider is ProviderId.CODEX else 1,
+                target.target_id,
+            ),
+        )
+    )
+    visible = tuple(row for row in rows if filters.matches(row))
+    selected = _retained_selection(
+        previous_visible,
+        visible,
+        selected_session_key,
+    )
+    retained_session_keys = {row.session_key for row in rows}
+    age = _snapshot_age(local_snapshot.generated_at, now_ms)
+    return FrontendModel(
+        generated_at=fleet.generated_at,
+        snapshot_age_ms=age,
+        stale_after_ms=stale_after_ms,
+        is_stale=age > stale_after_ms or any(host.stale for host in fleet.hosts),
+        host_id=local_host_id,
+        host_name=local_snapshot.host.display_name,
+        rows=rows,
+        visible_rows=visible,
+        task_rows=task_rows,
+        open_tasks=tuple(task for task in task_rows if task.status == "open"),
+        closed_tasks=tuple(task for task in task_rows if task.status == "closed"),
+        inbox_rows=tuple(session for session in rows if session.task_id is None),
+        launch_targets=launch_targets,
+        capabilities=local_capabilities,
+        issues=tuple(all_issues) + frontend_issues,
         details=tuple(
             detail for detail in details if detail.session_key in retained_session_keys
         ),

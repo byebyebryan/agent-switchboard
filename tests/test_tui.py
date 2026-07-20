@@ -148,6 +148,28 @@ def _empty_snapshot() -> Any:
     return protocol_module.SnapshotEnvelope.from_dict(value)
 
 
+def _fleet(snapshot: Any) -> Any:
+    return protocol_module.FleetEnvelope(
+        generated_at=snapshot.generated_at,
+        local_host_id=snapshot.host.host_id,
+        hosts=(
+            protocol_module.FleetHost(
+                source=protocol_module.FleetSource.LOCAL,
+                remote_name=None,
+                host_id=snapshot.host.host_id,
+                display_name=snapshot.host.display_name,
+                reachability=protocol_module.FleetReachability.ONLINE,
+                snapshot_observed_at=snapshot.generated_at,
+                snapshot_received_at=snapshot.generated_at,
+                last_attempt_at=snapshot.generated_at,
+                stale=False,
+                error=None,
+                snapshot=snapshot,
+            ),
+        ),
+    )
+
+
 def _stoppable_snapshot() -> Any:
     value = _mixed_snapshot().to_dict()
     claude = value["sessions"][1]
@@ -360,6 +382,10 @@ class FakeGateway:
         if isinstance(result, BaseException):
             raise result
         return result
+
+    async def fleet(self, *, refresh: bool) -> Any:
+        snapshot = await self.snapshot(reconcile="full" if refresh else "none")
+        return _fleet(snapshot)
 
     async def _prepare(self) -> Any:
         if self.prepare_started is not None:
@@ -1494,7 +1520,7 @@ def test_task_continuation_uses_task_identity_and_terminal_plan_path() -> None:
         async with app.run_test(size=(100, 28)) as pilot:
             await _wait_until(
                 pilot,
-                lambda: app._selected_task_id == TASK_ID,
+                lambda: app._selected_task_id == f"{HOST_ID}:{TASK_ID}",
                 message="open task did not become selected",
             )
             await pilot.press("c")

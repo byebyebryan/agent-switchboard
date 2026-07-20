@@ -16,6 +16,11 @@ from agent_switchboard.domain import (
 )
 from agent_switchboard.protocol import (
     MAX_JSON_BYTES,
+    FleetEnvelope,
+    FleetError,
+    FleetHost,
+    FleetReachability,
+    FleetSource,
     SessionDetailEnvelope,
     SnapshotEnvelope,
 )
@@ -30,6 +35,7 @@ from agent_switchboard.tui_model import (
 
 ROOT = Path(__file__).parents[1]
 SNAPSHOT_FIXTURE = ROOT / "tests/fixtures/protocol/v2/snapshot.json"
+REMOTE_HOST_ID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
 
 
 def _value() -> dict[str, object]:
@@ -40,6 +46,57 @@ def _snapshot(value: dict[str, object]) -> SnapshotEnvelope:
     raw = json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode()
     assert len(raw) <= MAX_JSON_BYTES
     return SnapshotEnvelope.from_json(raw)
+
+
+def _fleet(*, remote_reachability: FleetReachability) -> FleetEnvelope:
+    local = _snapshot(_value())
+    remote_value = json.loads(
+        json.dumps(_value()).replace(
+            str(local.host.host_id),
+            REMOTE_HOST_ID,
+        )
+    )
+    remote_host = remote_value["host"]
+    assert isinstance(remote_host, dict)
+    remote_host["displayName"] = "remote-host"
+    remote = _snapshot(remote_value)
+    error = (
+        None
+        if remote_reachability is FleetReachability.ONLINE
+        else FleetError("ssh_failed", "Remote host is unavailable.", True)
+    )
+    return FleetEnvelope(
+        generated_at=max(local.generated_at, remote.generated_at) + 1,
+        local_host_id=local.host.host_id,
+        hosts=(
+            FleetHost(
+                FleetSource.LOCAL,
+                None,
+                local.host.host_id,
+                local.host.display_name,
+                FleetReachability.ONLINE,
+                local.generated_at,
+                local.generated_at,
+                local.generated_at,
+                False,
+                None,
+                local,
+            ),
+            FleetHost(
+                FleetSource.REMOTE,
+                "remote",
+                remote.host.host_id,
+                remote.host.display_name,
+                remote_reachability,
+                remote.generated_at,
+                remote.generated_at + 1,
+                remote.generated_at + 1,
+                remote_reachability is not FleetReachability.ONLINE,
+                error,
+                remote,
+            ),
+        ),
+    )
 
 
 def _detail(
@@ -189,6 +246,39 @@ def test_empty_snapshot_has_neutral_capabilities_and_no_selection() -> None:
         CapabilityStatus.NEUTRAL,
         CapabilityStatus.NEUTRAL,
     ]
+
+
+def test_fleet_model_namespaces_tasks_and_projects_remote_host_state() -> None:
+    fleet = _fleet(remote_reachability=FleetReachability.OFFLINE)
+    model = FrontendModel.from_fleet(fleet, now_ms=fleet.generated_at)
+
+    assert len(model.rows) == 2
+    assert len(model.task_rows) == 2
+    assert len({task.row_key for task in model.task_rows}) == 2
+    local_task = next(task for task in model.task_rows if not task.remote)
+    remote_task = next(task for task in model.task_rows if task.remote)
+    assert local_task.task_id == remote_task.task_id
+    assert remote_task.host_name == "remote-host"
+    assert remote_task.reachable is False
+    assert remote_task.stale is True
+    assert remote_task.display_status is DisplayStatus.OFFLINE
+    assert all(row.status is DisplayStatus.OFFLINE for row in model.rows if row.remote)
+    assert any(issue.code == "ssh_failed" for issue in model.issues)
+
+
+def test_fleet_host_filter_applies_to_sessions_and_survives_refresh() -> None:
+    fleet = _fleet(remote_reachability=FleetReachability.ONLINE)
+    model = FrontendModel.from_fleet(
+        fleet,
+        now_ms=fleet.generated_at,
+        filters=ViewFilters(host_ids=frozenset((REMOTE_HOST_ID,))),
+    )
+
+    assert model.visible_rows
+    assert {row.host_id for row in model.visible_rows} == {REMOTE_HOST_ID}
+    refreshed = model.apply_fleet(fleet, now_ms=fleet.generated_at + 10)
+    assert refreshed.filters.host_ids == frozenset((REMOTE_HOST_ID,))
+    assert {row.host_id for row in refreshed.visible_rows} == {REMOTE_HOST_ID}
 
 
 def test_snapshot_projects_rows_launch_targets_and_capabilities() -> None:

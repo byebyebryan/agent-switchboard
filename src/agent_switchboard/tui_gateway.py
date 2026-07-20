@@ -25,6 +25,7 @@ from .domain import (
 )
 from .protocol import (
     MAX_JSON_BYTES,
+    FleetEnvelope,
     PresentationPlanEnvelope,
     ProtocolError,
     SessionActionEnvelope,
@@ -46,6 +47,7 @@ Envelope = TypeVar(
     PresentationPlanEnvelope,
     SessionActionEnvelope,
     SessionDetailEnvelope,
+    FleetEnvelope,
 )
 EnvelopeParser = Callable[[str | bytes | bytearray], Envelope]
 
@@ -480,6 +482,13 @@ class SwbctlGateway:
             ("snapshot", "--reconcile", reconcile, "--json"),
             SnapshotEnvelope.from_json,
         )
+
+    async def fleet(self, *, refresh: bool) -> FleetEnvelope:
+        arguments = ["fleet"]
+        if refresh:
+            arguments.append("--refresh")
+        arguments.append("--json")
+        return await self._json(tuple(arguments), FleetEnvelope.from_json)
 
     async def prepare_open(
         self,
@@ -970,3 +979,57 @@ class SnapshotSource:
         self.last_good = snapshot
         self.last_error = None
         return snapshot
+
+
+class FleetSnapshotSource:
+    """Coalesce fleet refreshes while retaining the last valid fleet."""
+
+    def __init__(self, gateway: SwbctlGateway) -> None:
+        self.gateway = gateway
+        self.last_good: FleetEnvelope | None = None
+        self.last_error: GatewayError | None = None
+        self._refresh_task: asyncio.Task[FleetEnvelope] | None = None
+
+    def _finish_refresh(self, task: asyncio.Task[FleetEnvelope]) -> None:
+        if self._refresh_task is task:
+            self._refresh_task = None
+        if task.cancelled():
+            return
+        try:
+            fleet = task.result()
+        except GatewayError as error:
+            self.last_error = error
+        except BaseException:
+            return
+        else:
+            self.last_good = fleet
+            self.last_error = None
+
+    async def retained(self) -> FleetEnvelope:
+        try:
+            fleet = await self.gateway.fleet(refresh=False)
+        except GatewayError as error:
+            self.last_error = error
+            if self.last_good is not None:
+                return self.last_good
+            raise
+        self.last_good = fleet
+        self.last_error = None
+        return fleet
+
+    async def refresh(self) -> FleetEnvelope:
+        task = self._refresh_task
+        if task is None:
+            task = asyncio.create_task(self.gateway.fleet(refresh=True))
+            self._refresh_task = task
+            task.add_done_callback(self._finish_refresh)
+        try:
+            fleet = await asyncio.shield(task)
+        except GatewayError as error:
+            self.last_error = error
+            if self.last_good is not None:
+                return self.last_good
+            raise
+        self.last_good = fleet
+        self.last_error = None
+        return fleet

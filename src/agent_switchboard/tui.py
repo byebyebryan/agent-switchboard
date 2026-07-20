@@ -41,8 +41,8 @@ from .protocol import (
     SessionDetailEnvelope,
 )
 from .tui_gateway import (
+    FleetSnapshotSource,
     GatewayError,
-    SnapshotSource,
     SwbctlGateway,
     resolve_terminal_context,
 )
@@ -435,10 +435,10 @@ class SwitchboardApp(App[tuple[str, ...] | None]):
 
     #filters.narrow {
         layout: grid;
-        grid-size: 3 2;
+        grid-size: 3 3;
         grid-columns: 1fr 1fr 1fr;
-        grid-rows: 3 3;
-        height: 6;
+        grid-rows: 3 3 3;
+        height: 9;
     }
 
     .filter-select {
@@ -512,7 +512,7 @@ class SwitchboardApp(App[tuple[str, ...] | None]):
         if initial_view not in {"open", "inbox", "closed"}:
             raise ValueError("initial view is invalid")
         self.gateway = gateway
-        self.snapshots = SnapshotSource(gateway)
+        self.snapshots = FleetSnapshotSource(gateway)
         self.terminal_context = terminal_context
         self.model: FrontendModel | None = None
         self.refreshing = False
@@ -569,6 +569,13 @@ class SwitchboardApp(App[tuple[str, ...] | None]):
                     (),
                     prompt="Project: all",
                     id="project-filter",
+                    classes="filter-select",
+                    disabled=True,
+                )
+                yield Select[str](
+                    (),
+                    prompt="Host: all",
+                    id="host-filter",
                     classes="filter-select",
                     disabled=True,
                 )
@@ -666,7 +673,7 @@ class SwitchboardApp(App[tuple[str, ...] | None]):
     @work(exclusive=True, group="snapshot", exit_on_error=False)
     async def _load_snapshot(self, full: bool, request_id: int) -> None:
         try:
-            snapshot = (
+            fleet = (
                 await self.snapshots.refresh()
                 if full
                 else await self.snapshots.retained()
@@ -674,10 +681,8 @@ class SwitchboardApp(App[tuple[str, ...] | None]):
             now_ms = self._now_ms()
             current = self.model
             model = await asyncio.to_thread(
-                FrontendModel.from_snapshot
-                if current is None
-                else current.apply_snapshot,
-                snapshot,
+                FrontendModel.from_fleet if current is None else current.apply_fleet,
+                fleet,
                 now_ms=now_ms,
             )
             source_error = self.snapshots.last_error
@@ -693,6 +698,7 @@ class SwitchboardApp(App[tuple[str, ...] | None]):
             self.model = model
             self.last_error = source_error
             self._refresh_project_options()
+            self._refresh_host_options()
             self._set_controls_disabled(False)
             self._render_rows()
             if not self._initial_snapshot_rendered:
@@ -758,6 +764,36 @@ class SwitchboardApp(App[tuple[str, ...] | None]):
         if previous is not None and any(value == previous for _, value in options):
             select.value = previous
 
+    def _refresh_host_options(self) -> None:
+        model = self.model
+        if model is None:
+            return
+        select = self.query_one("#host-filter", Select)
+        previous = select.selection
+        hosts = {row.host_id: row.host_name for row in model.rows}
+        hosts.update({task.host_id: task.host_name for task in model.task_rows})
+        hosts.update(
+            {target.host_id: target.host_name for target in model.launch_targets}
+        )
+        options: list[tuple[Text, str]] = [
+            (
+                Text(f"{name}{' (local)' if host_id == model.host_id else ''}"),
+                host_id,
+            )
+            for host_id, name in sorted(
+                hosts.items(),
+                key=lambda item: (
+                    item[0] != model.host_id,
+                    item[1].casefold(),
+                    item[1],
+                    item[0],
+                ),
+            )
+        ]
+        select.set_options(options)
+        if previous is not None and any(value == previous for _, value in options):
+            select.value = previous
+
     def on_input_changed(self, _event: Input.Changed) -> None:
         self._request_filter()
 
@@ -782,12 +818,14 @@ class SwitchboardApp(App[tuple[str, ...] | None]):
             model.closed_tasks if self._view_mode() == "closed" else model.open_tasks
         )
         query = self.query_one("#search", Input).value.casefold().split()
+        host = self.query_one("#host-filter", Select).selection
         project = self.query_one("#project-filter", Select).selection
         provider = self.query_one("#provider-filter", Select).selection
         return tuple(
             task
             for task in source
             if all(token in task.search_text for token in query)
+            and (host is None or task.host_id == host)
             and (
                 project is None
                 or (project != _UNASSIGNED_PROJECT and task.project_id == project)
@@ -822,12 +860,14 @@ class SwitchboardApp(App[tuple[str, ...] | None]):
             return self.query_one(widget_id, Select).selection
 
         provider = selection("#provider-filter")
+        host = selection("#host-filter")
         project = selection("#project-filter")
         activity = selection("#activity-filter")
         runtime = selection("#runtime-filter")
         attachment = selection("#attachment-filter")
         return ViewFilters(
             query=self.query_one("#search", Input).value,
+            host_ids=frozenset(() if host is None else (host,)),
             providers=frozenset(() if provider is None else (provider,)),
             project_ids=frozenset(
                 ()
@@ -865,6 +905,8 @@ class SwitchboardApp(App[tuple[str, ...] | None]):
         row = None if model is None else model.selected_row
         if row is None:
             return
+        if row.host_id != model.host_id:
+            return
         if not force and model.selected_detail is not None:
             return
         if self.detail_loading_key == row.session_key:
@@ -895,10 +937,10 @@ class SwitchboardApp(App[tuple[str, ...] | None]):
         else:
             tasks = self._visible_tasks()
             task = next(
-                (item for item in tasks if item.task_id == self._selected_task_id),
+                (item for item in tasks if item.row_key == self._selected_task_id),
                 None if not tasks else tasks[0],
             )
-            self._selected_task_id = None if task is None else task.task_id
+            self._selected_task_id = None if task is None else task.row_key
             selected = None if task is None else task.current_session_key
             if selected is not None and not any(
                 row.session_key == selected for row in model.visible_rows
@@ -951,7 +993,7 @@ class SwitchboardApp(App[tuple[str, ...] | None]):
                     table.add_row(
                         Text(_row_cue(row)),
                         Text(row.label),
-                        Text(row.project_name or "Unassigned"),
+                        Text(_project_host_label(row.project_name, row)),
                         Text(row.provider.value),
                         Text(row.attachment.value),
                         Text(_format_age(row.recency_at, self._now_ms())),
@@ -971,11 +1013,11 @@ class SwitchboardApp(App[tuple[str, ...] | None]):
                     table.add_row(
                         Text(_STATUS_CUES[task.display_status.value]),
                         Text(task.title),
-                        Text(task.project_name),
+                        Text(_project_host_label(task.project_name, task)),
                         Text("—" if provider is None else provider.value),
                         Text(context),
                         Text(_format_age(task.updated_at, self._now_ms())),
-                        key=task.task_id,
+                        key=task.row_key,
                     )
                 if self._selected_task_id is not None:
                     try:
@@ -998,10 +1040,10 @@ class SwitchboardApp(App[tuple[str, ...] | None]):
         if not isinstance(row_key, str):
             return
         task = next(
-            (task for task in self.model.task_rows if task.task_id == row_key), None
+            (task for task in self.model.task_rows if task.row_key == row_key), None
         )
         if task is not None:
-            self._selected_task_id = task.task_id
+            self._selected_task_id = task.row_key
             self.model = self.model.with_selection(task.current_session_key)
         else:
             self._selected_task_id = None
@@ -1020,7 +1062,11 @@ class SwitchboardApp(App[tuple[str, ...] | None]):
         model = self.model
         task = self._selected_task()
         if task is not None:
-            sessions = tuple(row for row in model.rows if row.task_id == task.task_id)
+            sessions = tuple(
+                row
+                for row in model.rows
+                if row.task_id == task.task_id and row.host_id == task.host_id
+            )
             provider = task.current_provider or task.preferred_provider
             history = "\n".join(
                 f"- {row.provider.value}: {row.label}"
@@ -1031,6 +1077,7 @@ class SwitchboardApp(App[tuple[str, ...] | None]):
             details.update(
                 f"{task.title}\n"
                 f"Status: {task.status} · {_STATUS_CUES[task.display_status.value]}\n"
+                f"Host: {task.host_name}{' (local)' if not task.remote else ''}\n"
                 f"Project: {task.project_name}\n"
                 f"Checkout: {task.checkout_name or task.branch or 'Default'}\n"
                 f"Provider: {'None' if provider is None else provider.value}\n"
@@ -1104,6 +1151,8 @@ class SwitchboardApp(App[tuple[str, ...] | None]):
             f"Runtime: {row.runtime_presence.value}\n"
             f"Attachment: {row.attachment.value}\n"
             f"Provider: {row.provider.value}\n"
+            f"Host: {row.host_name}"
+            f"{' (local)' if row.host_id == model.host_id else ''}\n"
             f"Project: {project}\n"
             f"Checkout: {checkout}\n"
             f"Working directory: {working_directory}\n"
@@ -1300,6 +1349,8 @@ class SwitchboardApp(App[tuple[str, ...] | None]):
             return
         task = self._selected_task()
         if task is not None:
+            if not self._local_action_allowed(task.host_id):
+                return
             if task.status == "closed":
                 self._publish_action_error(
                     "task_closed",
@@ -1317,6 +1368,8 @@ class SwitchboardApp(App[tuple[str, ...] | None]):
                 "Select a known session before opening it.",
                 retryable=False,
             )
+            return
+        if not self._local_action_allowed(row.host_id):
             return
         if self._begin_action(f"opening {row.label}"):
             self._prepare_open(row.session_key, self._new_request_id())
@@ -1359,7 +1412,15 @@ class SwitchboardApp(App[tuple[str, ...] | None]):
     def action_new_session(self) -> None:
         if self.action_busy:
             return
-        targets = () if self.model is None else self.model.launch_targets
+        targets = (
+            ()
+            if self.model is None
+            else tuple(
+                target
+                for target in self.model.launch_targets
+                if target.host_id == self.model.host_id
+            )
+        )
         if not targets:
             self._publish_action_error(
                 "launch_target_unavailable",
@@ -1434,6 +1495,7 @@ class SwitchboardApp(App[tuple[str, ...] | None]):
             )
             return
         tasks = () if self.model is None else self.model.open_tasks
+        tasks = tuple(task for task in tasks if task.host_id == row.host_id)
         if not tasks:
             self._publish_action_error(
                 "task_unavailable",
@@ -1475,6 +1537,8 @@ class SwitchboardApp(App[tuple[str, ...] | None]):
                 "Select an open task before closing it.",
                 retryable=False,
             )
+            return
+        if not self._local_action_allowed(task.host_id):
             return
         if task.current_session_key is None:
             if self._begin_action(f"closing {task.title}"):
@@ -1521,6 +1585,8 @@ class SwitchboardApp(App[tuple[str, ...] | None]):
                 retryable=False,
             )
             return
+        if not self._local_action_allowed(task.host_id):
+            return
         if self._begin_action(f"reopening {task.title}"):
             self._reopen_task(task.task_id)
 
@@ -1545,6 +1611,8 @@ class SwitchboardApp(App[tuple[str, ...] | None]):
             target
             for target in (() if self.model is None else self.model.launch_targets)
             if target.provider is ProviderId.CLAUDE
+            and self.model is not None
+            and target.host_id == self.model.host_id
         )
         if not targets:
             self._publish_action_error(
@@ -1593,6 +1661,8 @@ class SwitchboardApp(App[tuple[str, ...] | None]):
                 "Select a known session before stopping it.",
                 retryable=False,
             )
+            return
+        if not self._local_action_allowed(row.host_id):
             return
         if not row.can_stop:
             self._publish_action_error(
@@ -1653,7 +1723,20 @@ class SwitchboardApp(App[tuple[str, ...] | None]):
                 f"Select a known session before {action}.",
                 retryable=False,
             )
+        elif not self._local_action_allowed(row.host_id):
+            return None
         return row
+
+    def _local_action_allowed(self, host_id: str) -> bool:
+        model = self.model
+        if model is not None and host_id == model.host_id:
+            return True
+        self._publish_action_error(
+            "remote_action_unavailable",
+            "Remote rows are read-only until the host-aware action gateway is active.",
+            retryable=False,
+        )
+        return False
 
     def _selected_task(self) -> TaskRow | None:
         model = self.model
@@ -1663,7 +1746,7 @@ class SwitchboardApp(App[tuple[str, ...] | None]):
             (
                 task
                 for task in model.task_rows
-                if task.task_id == self._selected_task_id
+                if task.row_key == self._selected_task_id
             ),
             None,
         )
@@ -1677,6 +1760,8 @@ class SwitchboardApp(App[tuple[str, ...] | None]):
             return
         task = self._selected_task()
         if task is not None:
+            if not self._local_action_allowed(task.host_id):
+                return
             self.push_screen(
                 TextEditScreen("Edit task title", value=task.title, maximum=256),
                 lambda result: self._on_task_edit(task, "title", result),
@@ -1697,6 +1782,8 @@ class SwitchboardApp(App[tuple[str, ...] | None]):
             return
         task = self._selected_task()
         if task is not None:
+            if not self._local_action_allowed(task.host_id):
+                return
             self.push_screen(
                 TextEditScreen("Edit task purpose", value=task.purpose, maximum=4096),
                 lambda result: self._on_task_edit(task, "purpose", result),
@@ -1776,6 +1863,8 @@ class SwitchboardApp(App[tuple[str, ...] | None]):
             return
         task = self._selected_task()
         if task is not None:
+            if not self._local_action_allowed(task.host_id):
+                return
             if self._begin_action(
                 ("unpinning " if task.pinned else "pinning ") + task.title
             ):
@@ -1927,6 +2016,8 @@ class SwitchboardApp(App[tuple[str, ...] | None]):
         if self.action_busy:
             return
         task = self._selected_task()
+        if task is not None and not self._local_action_allowed(task.host_id):
+            return
         if task is None:
             row = self._selected_row_for_action("continuing its task")
             if row is None or row.task_id is None:
@@ -1937,7 +2028,11 @@ class SwitchboardApp(App[tuple[str, ...] | None]):
                 )
                 return
             task = next(
-                (item for item in self.model.task_rows if item.task_id == row.task_id),
+                (
+                    item
+                    for item in self.model.task_rows
+                    if item.task_id == row.task_id and item.host_id == row.host_id
+                ),
                 None,
             )
         if task is None:
@@ -2009,6 +2104,14 @@ def _bounded_display(value: str) -> str:
     return f"{normalized[: HANDOFF_TEXT_DISPLAY_CHARS - 1]}…"
 
 
+def _project_host_label(
+    project_name: str | None,
+    row: SessionRow | TaskRow,
+) -> str:
+    project = project_name or "Unassigned"
+    return project if not row.remote else f"{project} @ {row.host_name}"
+
+
 def _target_label(target: LaunchTarget) -> str:
     checkout = target.checkout_name or target.checkout_path
     qualifiers = []
@@ -2016,6 +2119,12 @@ def _target_label(target: LaunchTarget) -> str:
         qualifiers.append("default checkout")
     if target.is_preferred_provider:
         qualifiers.append("preferred provider")
+    if target.remote:
+        qualifiers.append(target.host_name)
+    if not target.reachable:
+        qualifiers.append("offline")
+    elif target.stale:
+        qualifiers.append("stale")
     suffix = "" if not qualifiers else f" ({', '.join(qualifiers)})"
     return (
         f"{target.project_name} · {checkout} · {target.provider.value}{suffix}\n"
