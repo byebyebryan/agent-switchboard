@@ -345,6 +345,39 @@ not import core internals, read SQLite, parse provider transcripts, invoke Git,
 or gain provider/tmux ownership. Existing abnormal-exit process-group cleanup
 and fault-injection coverage remain required.
 
+### Deferred upstream DMS live-result invalidation
+
+An installed-source check on 2026-07-20 against DMS 1.5.2 confirmed an
+incomplete launcher update path. Bundled launcher examples declare and emit
+`itemsChanged()`, and `PluginService` declares
+`requestLauncherUpdate(pluginId)`, but `AppSearchService` calls the plugin's
+synchronous `getItems(query)` without connecting either signal to a new result
+read. No acknowledged issue or fix was found in the upstream repository during
+that check. Treat this as an upstream DMS follow-up, not as a Switchboard core
+or Snapshot contract change.
+
+Until that host hook exists, the adapter may emit `itemsChanged()` but must not
+depend on it. It keeps `getItems(query)` synchronous, schedules bounded reads
+outside that call, and persists a fully validated, versioned last-good frontend
+model so normal shell starts and plugin reloads have useful rows immediately.
+After a true cold start with no valid cache, completed asynchronous results may
+still require reopening the launcher or changing the query to become visible.
+Do not introduce a permanent daemon or provider polling solely to hide this DMS
+presentation limitation.
+
+The later upstream follow-up should:
+
+- file or link a minimal reproducer against the current supported DMS release;
+- establish whether `itemsChanged()` or `requestLauncherUpdate(pluginId)` is
+  the intended public invalidation contract;
+- make the launcher host re-read only the changed plugin for the current query,
+  with rapid updates coalesced and selection preserved by stable item identity;
+- disconnect the subscription when the plugin instance unloads or reloads;
+- cover asynchronous completion, query changes during a run, category changes,
+  plugin reload, and update bursts in host-side tests; and
+- remove or simplify Switchboard's cache/reopen fallback only after the fixed
+  behavior is verified on an installed supported DMS version.
+
 ## Acceptance and rollout
 
 The implementation checkpoint is split into core contract/lifecycle commit

@@ -1559,6 +1559,16 @@ Remote SSH traffic exists only while a frontend requests it:
 - DMS refreshes when the picker is opened and cached data is stale.
 - Closed frontends generate no SSH polling traffic.
 
+Refreshing source state and invalidating an already-open frontend result list
+are separate contracts. As verified against DMS 1.5.2 on 2026-07-20, the DMS
+launcher host does not consume plugin `itemsChanged()` or
+`requestLauncherUpdate` signals to re-read the current query. The DMS adapter
+therefore persists a validated last-good frontend model and does not promise
+that a cold asynchronous read will repaint an already-open picker. Reopen or a
+query change remains the bounded fallback. An upstream host-invalidation
+follow-up, including the acceptance boundary for eventually simplifying that
+fallback, is recorded in [`docs/phase-4d-plan.md`](phase-4d-plan.md#deferred-upstream-dms-live-result-invalidation).
+
 Exact intervals are configuration and performance choices rather than protocol
 guarantees. OpenSSH connection multiplexing may keep a control connection warm
 to avoid repeated handshake cost. That is an SSH transport optimization, not an
