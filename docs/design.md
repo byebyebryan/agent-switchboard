@@ -72,10 +72,12 @@ conversation. One manager should answer:
 
 - List Codex and Claude Code sessions through one model.
 - Keep active and recent parked sessions searchable across configured hosts.
-- Group sessions under stable user-defined projects without introducing a task
-  or backlog model.
-- Start a focused new session from project defaults or from an explicit prior
-  handoff.
+- Group sessions under stable user-defined projects and explicit focused tasks
+  without introducing a backlog, dependency, or scheduling system.
+- Anchor projects to stable repository identities and route each task through a
+  concrete main checkout, linked worktree, or directory checkout.
+- Start a focused task/session from project defaults or continue one from an
+  explicit prior handoff.
 - Expose bounded project, session, and memory context to agents through stable
   tools so semantic work remains inside the selected agent session.
 - Normalize useful status into working, needs input, completed/ready for
@@ -109,7 +111,7 @@ conversation. One manager should answer:
 - Retrofit fully routable surface identity into every live terminal that was
   started outside Switchboard.
 - Reimplement provider-internal task, subagent, or schedule management.
-- Maintain tasks, backlogs, assignments, milestones, or project plans.
+- Maintain backlogs, dependencies, assignments, milestones, or project plans.
 - Orchestrate multiple agents, assign work, or dispatch prompts automatically.
 - Create branches, worktrees, commits, or merges on behalf of a project.
 - Add another notification system.
@@ -128,8 +130,8 @@ The pre-implementation design review produced the following binding changes:
   atomically bound to the provider UUID by hooks or reconciliation.
 - Open/new actions reserve and create waiting surfaces before returning a
   presentation plan; read-only plans cannot create runtimes.
-- Project UUIDs are configuration-owned and globally stable across hosts, while
-  each host contributes its own configured locations.
+- Project and repository UUIDs are configuration-owned and globally stable
+  across hosts, while each host contributes its own configured checkouts.
 - Host reachability, runtime presence, provider resumability, activity/reason,
   and terminal attachment remain separate state axes.
 - Claude Agent View is disabled. Claude and Codex use the same managed tmux
@@ -193,13 +195,15 @@ case, Switchboard leaves the interaction path after the handoff.
 Frontends see one `AgentSession` model. Provider adapters decide how to
 discover, resume, attach, and reconcile each kind of session.
 
-### Projects are context and launch boundaries
+### Projects, repositories, checkouts, and tasks are separate identities
 
-A project groups related sessions and records where that work exists on each
-host. It supplies launch defaults and context sources; it does not own tasks,
-branches, worktrees, plans, or completion criteria. Under the recommended
-workflow, one focused provider session represents one task, but Switchboard
-does not enforce or model that convention.
+A project groups related work and supplies launch defaults. Repository
+memberships identify the durable codebases involved; host-local checkouts
+identify their concrete filesystem views. A task is the focused human workflow
+unit and may span sequential provider sessions while retaining one current
+top-level session. Switchboard models this identity and open/closed lifecycle,
+but not backlogs, dependencies, assignments, schedules, or completion criteria
+beyond the explicit close action.
 
 ### Deterministic core, agent-driven semantics
 
@@ -242,13 +246,23 @@ than silently showing incorrect data.
 : A durable Codex thread or Claude Code conversation.
 
 **Project**
-: A stable user-defined grouping for ongoing work, with one or more host-local
-  locations, launch defaults, and context-source declarations.
+: A stable user-defined grouping for ongoing work, with repository memberships
+  and launch defaults.
 
-**Project location**
-: A checkout or working directory for a project on one host. Multiple
-  locations may represent remote clones or local worktrees; Switchboard does
-  not create or synchronize them.
+**Repository**
+: A stable configuration-owned codebase identity with repository-relative
+  context sources. It is not derived from a Git remote, path, branch, or HEAD.
+
+**Checkout**
+: A concrete host-local main worktree, linked worktree, or directory view of a
+  repository. Switchboard discovers checkouts but does not create, synchronize,
+  or mutate them.
+
+**Task**
+: A host-owned focused unit of work within one project. It has an explicit
+  title and open/closed lifecycle, routes through one checkout in the first v2
+  implementation, and retains one current provider session plus prior wrapped
+  session history.
 
 **Session handoff**
 : An optional concise summary and next action explicitly supplied by the user
@@ -258,8 +272,8 @@ than silently showing incorrect data.
 
 **Launch intent**
 : A durable, short-lived record created before a provider process starts. It
-  carries the selected project, location, action, and surface until a provider
-  session ID exists and can be bound to them.
+  carries the selected project, task, checkout, action, and surface until a
+  provider session ID exists and can be bound to them.
 
 **Runtime**
 : A live provider process associated with a session. Provider-internal
@@ -329,7 +343,7 @@ conversation content.
 
 ## Core Domain Model
 
-### Project
+### Project, repository, checkout, and task
 
 ```text
 Project
@@ -338,69 +352,86 @@ Project
   aliases
   default_provider
   default_transport
+  created_at
+  updated_at
+
+Repository
+  repository_id
+  name
+  kind                    git | directory
   context_sources
   created_at
   updated_at
 
-ProjectLocation
-  location_id
+ProjectRepository
   project_id
+  repository_id
+  is_primary
+
+Checkout
+  checkout_id
+  repository_id
   host_id
   path
+  kind                    main | worktree | directory
   display_name
-  repository_identity
+  branch
+  head_oid
   provider_override
   transport_override
   is_default
+  declared
+  present
   last_observed_at
+
+Task
+  task_id
+  host_id
+  project_id
+  checkout_id             optional until routable
+  title
+  purpose
+  preferred_provider
+  status                  open | closed
+  pinned
+  current_session_key
+  created_at
+  updated_at
+  closed_at
 ```
 
-`project_id` is a globally stable user-owned UUID shared by every host that has
-a location for the project. It is declared in configuration and is never
-derived from a path, hostname, or Git remote. Each host normally declares only
-its own locations; remote snapshots with the same `project_id` merge into one
-logical project. Conflicting names or launch defaults for the same ID produce a
-configuration error instead of silently creating divergent projects.
+`project_id` and `repository_id` are globally stable configuration-owned UUIDs.
+Neither is derived from a path, hostname, Git remote, branch, or HEAD. A project
+may contain multiple repository memberships, but the first v2 routing contract
+requires one primary membership and uses only that repository for task launch
+and stable context. Repository context sources are relative to the task's
+concrete checkout.
 
-`location_id` is also a configured UUID so a path can move without changing
-the location identity. Project-level defaults must agree across hosts;
-provider or transport differences that are intentionally host-specific belong
-on the location override. Aliases are unioned after sanitization, while
-incompatible names or global defaults remain visible conflicts.
+`checkout_id` is a stable UUID for one host-local filesystem view. Declared
+checkouts retain configured IDs; discovered Git worktrees receive retained
+registry IDs. Git common-directory and administrative-directory evidence stay
+private and associate peer worktrees without making a path the repository
+identity. Mutable branch and HEAD observations are presentation metadata only.
 
-Project configuration is authoritative for identity, names, locations, launch
-defaults, and context-source declarations. SQLite materializes configured
-projects and retains runtime/session assignments, but it does not become a
-second editable source for those fields. Removing a configured project marks
-its materialized record undeclared; it does not erase historical sessions or
-handoffs. `swbctl project add` performs an atomic structured edit of the
-project catalog, and `--print-config` can emit the equivalent declaration for a
-dotfiles workflow.
+Configuration is authoritative for project, repository membership, declared
+checkout, defaults, and context-source fields. SQLite materializes those
+declarations and owns discovered checkouts, tasks, session assignments,
+handoffs, launches, runtimes, surfaces, and caches. Removing a declaration
+marks it undeclared or missing without erasing historical task/session state.
 
-Discovery may suggest a project from Git roots, repository remotes, and
-repeated session directories, but it does not silently promote every directory
-into a durable project. `repository_identity` assists matching and diagnostics;
-it is not the project key.
+A session observed without launch identity is assigned only when bounded Git
+evidence identifies one configured repository/checkout, or one directory
+checkout wins canonical longest-path containment. Ambiguity leaves the session
+in Inbox with a diagnostic. Reconciliation may assign project and checkout but
+never manufactures a task.
 
-A session observed without a launch intent may be assigned to an existing
-project only when its canonical cwd has one unambiguous configured location:
-
-1. Normalize the configured and observed paths to absolute paths and resolve
-   symlinks where the paths exist.
-2. Select configured locations that contain the cwd on the same host.
-3. Choose the longest matching location path.
-4. If equally specific matches disagree, leave the session unassigned and
-   report the ambiguity.
-
-This permits ordinary provider launches observed through hooks inside known
-repositories to join the right project without manufacturing projects or using
-a Git remote as identity. The assignment records
-`metadata_source=location_match` and remains user-editable.
-
-A project can contain multiple locations on one host, including worktrees. A
-new session chooses a concrete location before launch. Switchboard may warn
-when multiple live sessions share one mutable checkout, but concurrency and
-worktree policy remain the user's and agents' responsibility.
+Tasks are explicit host-owned registry state. One open task may share a main or
+directory checkout with other tasks, or exclusively claim a linked worktree.
+Each task has at most one current top-level provider session; a continuation or
+provider switch requires the prior current session's exact immutable handoff.
+Closing wraps but does not stop that session. Full invariants and the v1
+migration are specified in
+[`docs/phase-4d-plan.md`](phase-4d-plan.md).
 
 ### Session identity
 
@@ -431,7 +462,8 @@ LaunchIntent
   provider
   action                 new | resume | attach | manage
   project_id
-  location_id
+  task_id
+  checkout_id
   cwd
   source_handoff_id
   target_session_key
@@ -449,8 +481,8 @@ LaunchIntent
 provider process through `AGENT_SWITCHBOARD_LAUNCH_ID`. For a new conversation,
 `target_session_key` is absent until `SessionStart` supplies the provider UUID.
 The hook atomically creates or updates `AgentSession`, binds it to the launch's
-project and location, updates the surface metadata, and marks the intent
-`bound`.
+project, task, and checkout, updates the surface metadata, advances the task's
+current-session pointer, and marks the intent `bound`.
 
 For resume or attach, the hook-provided provider UUID must match
 `target_session_key`. A mismatch marks the intent failed with
@@ -482,7 +514,8 @@ hook when the surface, process, and provider ID can be correlated safely.
 AgentSession
   key
   project_id
-  location_id
+  task_id
+  checkout_id
   provider
   provider_session_id
   name
@@ -926,8 +959,9 @@ ${XDG_STATE_HOME:-~/.local/state}/agent-switchboard/switchboard.db
 The database contains:
 
 - hosts and their stable IDs
-- materialized configured projects, project locations, and launch/context
-  preferences
+- materialized configured projects, repositories, memberships, checkouts, and
+  launch/context preferences
+- explicit tasks and their current and historical provider-session membership
 - provider sessions and display metadata
 - launch intents, leases, and bounded launch diagnostics
 - explicit session purposes, immutable handoffs, wrapping, pinning, and lineage
@@ -1240,15 +1274,18 @@ Machine output is versioned independently of human-readable output:
 
 ```json
 {
-  "schemaVersion": 1,
-  "protocolVersion": 1,
+  "schemaVersion": 2,
+  "protocolVersion": 2,
   "generatedAt": 0,
   "host": {
     "hostId": "...",
     "displayName": "..."
   },
   "projects": [],
-  "locations": [],
+  "projectRepositories": [],
+  "repositories": [],
+  "checkouts": [],
+  "tasks": [],
   "sessions": [],
   "runtimes": [],
   "surfaces": [],
@@ -1298,16 +1335,15 @@ Project context is a structured, bounded view assembled from sources with
 different authority and freshness:
 
 ```text
-stable     configured files such as AGENTS.md, README, and selected docs
-live       active sessions, locations, host availability, and observed Git state
-recent     explicit purposes and handoffs from active or recently wrapped sessions
+stable     repository-relative files such as AGENTS.md, README, and selected docs
+live       open tasks, sessions, checkouts, host availability, and observed Git state
+recent     task purposes and handoffs from active or recently wrapped sessions
 historical optional memory search and provider-native history references
 ```
 
-There is no single project-level task status or next action. Concurrent
-sessions can have independent purposes and next actions. Context responses
-preserve source, host, observation time, and staleness so an agent can decide
-what is relevant.
+There is no single project-level status or next action. Concurrent tasks can
+have independent purposes and next actions. Context responses preserve source,
+host, observation time, and staleness so an agent can decide what is relevant.
 
 The structured `swbctl agent` JSON commands are the canonical executable
 contract. The implemented dependency-free stdio MCP server calls the same
@@ -1316,24 +1352,24 @@ provider logic. The read-mostly tool surface is:
 
 ```text
 project_get_current()
-project_list_sessions()
+project_list_tasks()
 project_get_context()
-session_get(session_key)
-session_get_handoff(handoff_id)
-session_list_handoffs(session_key)
-session_search(query)
+task_get()
+task_get_handoff(handoff_id)
+task_list_handoffs()
+task_search(query)
 memory_search(query)
-session_set_name(name)
-session_set_handoff(summary, next_action)
-session_wrap(summary, next_action)
+task_update(title?, purpose?, pinned?)
+task_set_handoff(summary, next_action)
+task_close(summary, next_action)
 ```
 
-Mutating agent tools are restricted to the calling session's curation fields.
+Mutating agent tools are restricted to the calling session's current task.
 They cannot launch, stop, attach to, archive, or send prompts to other
 sessions. `memory_search` is an optional adapter; claude-mem is the first
 target, but core session routing remains usable when it is absent.
 
-`session_search` searches Switchboard metadata, purposes, and explicit
+`task_search` searches Switchboard metadata, purposes, and explicit
 handoffs; it does not search provider transcripts. Historical transcript search
 belongs to `memory_search` or a future documented provider adapter. Every
 context result is bounded and includes source, host, record ID, observation
@@ -1358,27 +1394,28 @@ acceptance evidence are recorded in
 [`docs/phase-4c-plan.md`](phase-4c-plan.md).
 
 An optional provider skill can guide the current agent to prepare a concise
-handoff and invoke `session_wrap`. Switchboard stores the supplied result; it
+handoff and invoke `task_close`. Switchboard stores the supplied result; it
 does not decide that the underlying work is complete.
 
 ## Terminal UI
 
-The existing DMS picker is the first production consumer during migration. A
-small TUI follows once local discovery and atomic open preparation pass parity
-tests. It exercises the same public core contract and does not import provider
-implementation details directly.
+The DMS picker is the first production consumer. The TUI is the complete local
+management surface for explicit task creation, adoption, checkout selection,
+closing, and reopening. Both exercise the same public core contract and do not
+import provider implementation details directly.
 
 ### Primary view
 
-The default view presents:
+The default view presents open tasks with separate Inbox and Closed views. A
+task row presents:
 
 - project
-- provider
-- session name
+- task title
+- current provider
 - normalized status
 - attachment state
 - host
-- working directory
+- optional nondefault checkout/worktree
 - last activity
 
 Sessions are sorted by attention and recency:
@@ -1390,20 +1427,22 @@ Sessions are sorted by attention and recency:
 5. recently parked
 6. offline or unknown
 
-All known sessions remain searchable. An empty query may limit parked rows to a
+All tasks remain searchable. Provider sessions not yet adopted into a task
+remain searchable in Inbox. An empty query may limit Inbox and closed rows to a
 configurable recent count so active work stays scannable.
 
-The TUI can group sessions by project. A project row exposes its available
-locations and active, parked, pinned, and recently wrapped sessions. An
-unassigned group retains ad-hoc and legacy sessions.
+The TUI groups tasks by project and exposes repository memberships, available
+checkouts, active and pinned tasks, and retained task/session history. Inbox
+retains ad-hoc and legacy sessions without manufacturing task identity.
 
 ### Initial actions
 
-- Open the selected session.
-- Start a new Codex or Claude session from a project or explicit cwd.
-- Start a new focused session from a prior handoff.
+- Open or continue the selected task's current session.
+- Create a task with an explicit title and selected project/checkout/provider.
+- Adopt an Inbox session into a new or existing task.
+- Close a task with an exact handoff, or reopen it after checkout validation.
 - Filter by project, provider, host, state, and working directory.
-- Pin, name, hand off, or wrap a session without managing tasks.
+- Pin, title, describe, hand off, or close a task.
 - Refresh/reconcile.
 - Open the provider-native history picker when Switchboard cannot enumerate old
   provider history.
@@ -1665,8 +1704,8 @@ Expected settings include:
 
 - local display name
 - remote SSH targets and display aliases
-- globally stable project IDs, names, host-local locations, and defaults
-- configured stable context sources
+- globally stable project and repository IDs, memberships, and defaults
+- host-local declared checkouts and repository-relative context sources
 - provider enablement and executable overrides
 - default transport
 - tmux naming prefix and behavior
@@ -1677,6 +1716,8 @@ Expected settings include:
 Illustrative host-local configuration:
 
 ```toml
+config_version = 2
+
 [host]
 display_name = "starship"
 
@@ -1684,11 +1725,17 @@ display_name = "starship"
 name = "cubey"
 default_provider = "codex"
 default_transport = "tmux"
+
+[[projects."7e5945a5-39e0-48b0-a0c1-a1599b32af93".repositories]]
+repository_id = "7e5945a5-39e0-48b0-a0c1-a1599b32af93"
+name = "cubey"
+kind = "git"
+is_primary = true
 context_sources = ["AGENTS.md", "README.md", "docs"]
 
-[[projects."7e5945a5-39e0-48b0-a0c1-a1599b32af93".locations]]
-location_id = "f246cc26-bb02-4fd7-b00d-d3b834f932ec"
-display_name = "starship checkout"
+[[projects."7e5945a5-39e0-48b0-a0c1-a1599b32af93".repositories.checkouts]]
+checkout_id = "f246cc26-bb02-4fd7-b00d-d3b834f932ec"
+display_name = "main"
 path = "/home/bryan/code/cubey"
 is_default = true
 
@@ -1697,16 +1744,16 @@ ssh_target = "snap.lan"
 display_name = "snap"
 ```
 
-Another host declares the same project UUID and a different location UUID/path.
-The UUIDs, project name, and global defaults are shared; host-local location
-overrides may differ.
+Another host declares the same project and repository UUIDs with a different
+checkout UUID/path. Project/repository names and global defaults are shared;
+host-local checkout overrides may differ.
 
 The generated host UUID is stored separately under the state directory with
 mode `0600` at `.../agent-switchboard/host-id`; it is not regenerated from the
 hostname and is not normally edited in shared configuration. Hosts
 participating in the same project use the same configured `project_id` while
-declaring their own local paths. Chezmoi may render those host-local location
-blocks from one shared project catalog.
+declaring the same repository membership and their own checkout paths. Chezmoi
+may render those host-local checkout blocks from one shared project catalog.
 
 Frontend appearance and keybindings do not belong in core configuration.
 
@@ -1825,7 +1872,8 @@ Migration should preserve those behaviors while moving ownership in stages.
 ### Phase 1: Domain, configuration, and storage
 
 - Add the stable host-ID file and configuration parser.
-- Add globally stable configured projects and host-local locations.
+- Add globally stable configured projects and host-local locations. Phase 4D
+  replaces this v1 boundary with repositories and checkouts.
 - Add the SQLite schema and migrations for sessions, immutable handoffs,
   launch intents, runtime observations, surfaces, events, and remote cache.
 - Define versioned snapshot, capability, error, and presentation-plan fixtures.
@@ -1944,23 +1992,36 @@ managed Codex and Claude, bounded read/search, the stdio MCP transport, and the
 optional external-memory MCP adapter are recorded in
 [`docs/phase-4c-plan.md`](phase-4c-plan.md). Remote transport remains Phase 5.
 
+#### Phase 4D: repository, checkout, and task identity
+
+- Replace project locations with stable repositories and host-local checkouts.
+- Add explicit tasks with one current top-level provider session and retained
+  wrapped session history.
+- Cut core, TUI, agent tools, Snapshot, and DMS to the coordinated v2 contract.
+- Discover existing Git worktrees without creating or mutating them.
+
+The accepted contract and migration/rollout gates are in
+[`docs/phase-4d-plan.md`](phase-4d-plan.md). Phase 5 builds directly on v2.
+
 ### Phase 5: Remote hosts
 
-- Add SSH snapshot transport around the existing stable host identity and
-  snapshot protocol.
+- Add SSH snapshot transport around the stable host identity and Snapshot v2
+  project/repository/checkout/task protocol.
 - Add host-local snapshot reconciliation modes.
 - Add concurrent pull-based SSH aggregation and atomic caching.
 - Preserve stale snapshots and expose host reachability without overwriting
   last-known session state.
-- Add remote `prepare-open`, `prepare-new`, `select-surface`, `attach-surface`,
-  and bounded handoff envelopes.
+- Add remote `prepare-open`, `prepare-task`, `select-surface`, `attach-surface`,
+  and bounded task/handoff envelopes.
 - Move DMS remote rows to the snapshot/presentation protocol only after SSH
   bounds, stale-cache, Unicode, and error-path parity tests pass; then remove the
   remaining legacy helper paths.
 - Measure polling with SSH multiplexing before considering `watch --jsonl`.
 
-No phase should require a flag day. The existing DMS helper remains available
-until its replacement passes equivalent discovery and open-path tests.
+The pre-release v2 core and DMS adapter use one reviewed coordinated cutover
+with explicit config/registry backup. The existing DMS helper remains available
+for remote fallback until Phase 5 passes equivalent discovery and open-path
+tests.
 
 ## Test Strategy
 
@@ -2122,11 +2183,12 @@ and provider-hook installation workflow remain separate open decisions.
 
 ### Project authority
 
-Configuration owns globally stable project identity and launch/context fields.
-Each host materializes those declarations and contributes host-local locations.
-SQLite owns observed sessions, assignments, handoffs, launches, runtimes,
-surfaces, and cache. Git identity suggests locations but never creates or merges
-projects automatically.
+Configuration owns globally stable project and repository identity, repository
+memberships, declared checkouts, launch defaults, and repository-relative
+context fields. SQLite owns discovered checkouts, tasks, observed sessions,
+assignments, handoffs, launches, runtimes, surfaces, and cache. Bounded Git
+evidence associates checkouts but never creates or merges projects or
+repositories automatically.
 
 ### Interactive transport
 
@@ -2209,9 +2271,9 @@ The following decisions form the implementation baseline:
   managed sessions are running; optional agent tools are session-scoped.
 - Switchboard is the expected entry point for new managed sessions; arbitrary
   live terminals launched elsewhere are a documented best-effort gap.
-- Projects are stable context and launch profiles, not task containers.
-- One focused session per task is a recommended convention, not an enforced
-  domain model.
+- Projects are stable context and launch profiles containing explicit tasks.
+- One task has at most one current top-level provider session; prior sessions
+  remain task history after exact handoff.
 - The deterministic core exposes bounded tools that let the selected agent
   perform semantic naming, handoff, and context retrieval.
 - Provider-native storage remains authoritative.
@@ -2224,8 +2286,8 @@ The following decisions form the implementation baseline:
   a provider session ID exists.
 - Opening atomically prepares a surface before presentation; read-only plans do
   not authorize creation.
-- Projects have globally stable configured IDs and merge host-local locations
-  through snapshots.
+- Projects and repositories have globally stable configured IDs and merge
+  host-local checkouts through snapshots.
 - Codex uses tmux for runtime persistence.
 - Claude and Codex both use one managed tmux surface per live runtime; Claude
   Agent View and its supervisor are disabled.
@@ -2234,5 +2296,5 @@ The following decisions form the implementation baseline:
 - Handoffs are immutable records and continuation references an exact handoff.
 - Hooks provide live status and reconciliation repairs stale state.
 - The first milestone is local-only.
-- Task management, notifications, orchestration, transcript parsing, and
-  destructive provider management are outside the first release.
+- Backlogs, notifications, orchestration, transcript parsing, and destructive
+  provider management are outside the first release.
