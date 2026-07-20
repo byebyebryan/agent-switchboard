@@ -18,7 +18,8 @@ from .protocol import (
 )
 from .storage import HostSnapshotRows, Registry, now_ms
 
-_SNAPSHOT_SESSION_BYTE_BUDGET = MAX_JSON_BYTES // 2
+_SNAPSHOT_TASK_BYTE_BUDGET = 2 * 1024 * 1024
+_SNAPSHOT_SESSION_BYTE_BUDGET = 3 * 1024 * 1024
 
 
 class _InvalidStoredProjectJson(ValueError):
@@ -67,7 +68,6 @@ def _project(row: Mapping[str, Any]) -> dict[str, Any]:
         "projectId": row["project_id"],
         "name": row["name"],
         "aliases": _project_json_array(row, "aliases_json"),
-        "contextSources": _project_json_array(row, "context_sources_json"),
         "declared": bool(row["declared"]),
         "createdAt": row["created_at"],
         "updatedAt": row["updated_at"],
@@ -77,23 +77,68 @@ def _project(row: Mapping[str, Any]) -> dict[str, Any]:
     return result
 
 
-def _location(row: Mapping[str, Any]) -> dict[str, Any]:
-    result: dict[str, Any] = {
-        "locationId": row["location_id"],
+def _project_repository(row: Mapping[str, Any]) -> dict[str, Any]:
+    return {
         "projectId": row["project_id"],
+        "repositoryId": row["repository_id"],
+        "isPrimary": bool(row["is_primary"]),
+    }
+
+
+def _repository(row: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "repositoryId": row["repository_id"],
+        "name": row["name"],
+        "kind": row["kind"],
+        "contextSources": _project_json_array(row, "context_sources_json"),
+        "declared": bool(row["declared"]),
+        "createdAt": row["created_at"],
+        "updatedAt": row["updated_at"],
+    }
+
+
+def _checkout(row: Mapping[str, Any]) -> dict[str, Any]:
+    result: dict[str, Any] = {
+        "checkoutId": row["checkout_id"],
+        "repositoryId": row["repository_id"],
         "hostId": row["host_id"],
         "path": row["path"],
+        "kind": row["kind"],
         "isDefault": bool(row["is_default"]),
         "declared": bool(row["declared"]),
+        "present": bool(row["present"]),
         "createdAt": row["created_at"],
         "updatedAt": row["updated_at"],
     }
     for source, target in (
         ("display_name", "displayName"),
-        ("repository_identity", "repositoryIdentity"),
+        ("branch", "branch"),
+        ("head_oid", "headOid"),
         ("provider_override", "providerOverride"),
         ("transport_override", "transportOverride"),
         ("last_observed_at", "lastObservedAt"),
+    ):
+        _optional(result, row, source, target)
+    return result
+
+
+def _task(row: Mapping[str, Any]) -> dict[str, Any]:
+    result: dict[str, Any] = {
+        "taskId": row["task_id"],
+        "hostId": row["host_id"],
+        "projectId": row["project_id"],
+        "title": row["title"],
+        "status": row["status"],
+        "pinned": bool(row["pinned"]),
+        "createdAt": row["created_at"],
+        "updatedAt": row["updated_at"],
+    }
+    for source, target in (
+        ("checkout_id", "checkoutId"),
+        ("purpose", "purpose"),
+        ("preferred_provider", "preferredProvider"),
+        ("current_session_key", "currentSessionKey"),
+        ("closed_at", "closedAt"),
     ):
         _optional(result, row, source, target)
     return result
@@ -120,7 +165,8 @@ def session_record(row: Mapping[str, Any]) -> dict[str, Any]:
     }
     for source, target in (
         ("project_id", "projectId"),
-        ("location_id", "locationId"),
+        ("task_id", "taskId"),
+        ("checkout_id", "checkoutId"),
         ("name", "name"),
         ("purpose", "purpose"),
         ("cwd", "cwd"),
@@ -211,14 +257,42 @@ def _surface(row: Mapping[str, Any]) -> dict[str, Any]:
     return result
 
 
-def _bounded_session_rows(
+def _bounded_task_rows(
     rows: HostSnapshotRows,
+) -> tuple[tuple[dict[str, Any], ...], bool]:
+    """Select priority-ordered tasks within a canonical UTF-8 budget."""
+
+    selected: list[dict[str, Any]] = []
+    encoded_bytes = 2
+    for row in rows.tasks:
+        try:
+            encoded = json.dumps(
+                _task(row),
+                ensure_ascii=False,
+                allow_nan=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode("utf-8")
+        except (TypeError, ValueError, UnicodeEncodeError) as error:
+            raise ProtocolError("stored task contains invalid JSON metadata") from error
+        separator_bytes = 1 if selected else 0
+        if encoded_bytes + separator_bytes + len(encoded) > _SNAPSHOT_TASK_BYTE_BUDGET:
+            continue
+        selected.append(dict(row))
+        encoded_bytes += separator_bytes + len(encoded)
+    return tuple(selected), rows.retained_task_count > len(selected)
+
+
+def _bounded_session_rows(
+    rows: HostSnapshotRows, task_ids: set[str]
 ) -> tuple[tuple[dict[str, Any], ...], bool]:
     """Select deterministic session rows within a canonical UTF-8 budget."""
 
     selected: list[dict[str, Any]] = []
     encoded_bytes = 2  # JSON array delimiters.
     for row in rows.sessions:
+        if row["task_id"] is not None and str(row["task_id"]) not in task_ids:
+            continue
         try:
             encoded = json.dumps(
                 session_record(row),
@@ -246,9 +320,28 @@ def _bounded_session_rows(
 
 def _bounded_snapshot_rows(
     rows: HostSnapshotRows,
-) -> tuple[HostSnapshotRows, bool]:
-    sessions, truncated = _bounded_session_rows(rows)
+) -> tuple[HostSnapshotRows, bool, bool]:
+    tasks, tasks_truncated = _bounded_task_rows(rows)
+    task_ids = {str(row["task_id"]) for row in tasks}
+    sessions, sessions_truncated = _bounded_session_rows(rows, task_ids)
     selected_keys = {str(row["session_key"]) for row in sessions}
+    retained_tasks = tuple(
+        row
+        for row in tasks
+        if row["current_session_key"] is None
+        or str(row["current_session_key"]) in selected_keys
+    )
+    tasks_truncated = tasks_truncated or len(retained_tasks) != len(tasks)
+    retained_task_ids = {str(row["task_id"]) for row in retained_tasks}
+    retained_sessions = tuple(
+        row
+        for row in sessions
+        if row["task_id"] is None or str(row["task_id"]) in retained_task_ids
+    )
+    sessions_truncated = sessions_truncated or rows.retained_session_count > len(
+        retained_sessions
+    )
+    selected_keys = {str(row["session_key"]) for row in retained_sessions}
     runtimes = tuple(
         row
         for row in rows.runtimes
@@ -264,13 +357,18 @@ def _bounded_snapshot_rows(
         HostSnapshotRows(
             host=rows.host,
             projects=rows.projects,
-            locations=rows.locations,
-            sessions=sessions,
+            project_repositories=rows.project_repositories,
+            repositories=rows.repositories,
+            checkouts=rows.checkouts,
+            tasks=retained_tasks,
+            retained_task_count=rows.retained_task_count,
+            sessions=retained_sessions,
             retained_session_count=rows.retained_session_count,
             runtimes=runtimes,
             surfaces=surfaces,
         ),
-        truncated,
+        tasks_truncated,
+        sessions_truncated,
     )
 
 
@@ -303,7 +401,12 @@ def _assemble(
             display_name=rows.host["display_name"],
         ),
         projects=tuple(_project(row) for row in rows.projects),
-        locations=tuple(_location(row) for row in rows.locations),
+        project_repositories=tuple(
+            _project_repository(row) for row in rows.project_repositories
+        ),
+        repositories=tuple(_repository(row) for row in rows.repositories),
+        checkouts=tuple(_checkout(row) for row in rows.checkouts),
+        tasks=tuple(_task(row) for row in rows.tasks),
         sessions=tuple(session_record(row) for row in rows.sessions),
         runtimes=tuple(_runtime(row) for row in rows.runtimes),
         surfaces=tuple(_surface(row) for row in rows.surfaces),
@@ -325,11 +428,29 @@ def build_host_snapshot(
 ) -> SnapshotEnvelope:
     """Build a protocol-valid snapshot without querying or mutating providers."""
 
-    rows, sessions_truncated = _bounded_snapshot_rows(
+    rows, tasks_truncated, sessions_truncated = _bounded_snapshot_rows(
         registry.read_host_snapshot(host_id)
     )
     timestamp = now_ms() if generated_at is None else generated_at
     snapshot_errors = tuple(errors)
+    if tasks_truncated:
+        snapshot_errors = (
+            *snapshot_errors,
+            ErrorRecord(
+                code="snapshot_tasks_truncated",
+                message=(
+                    "The snapshot omitted tasks to remain within protocol limits."
+                ),
+                scope=ErrorScope.HOST,
+                retryable=False,
+                observed_at=timestamp,
+                host_id=HostId(rows.host["host_id"]),
+                details={
+                    "retainedCount": rows.retained_task_count,
+                    "emittedCount": len(rows.tasks),
+                },
+            ),
+        )
     if sessions_truncated:
         snapshot_errors = (
             *snapshot_errors,

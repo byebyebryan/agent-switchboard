@@ -42,6 +42,7 @@ REQUEST_ID = "66666666-6666-4666-8666-666666666666"
 PROJECT_ID = "77777777-7777-4777-8777-777777777777"
 LOCATION_ID = "88888888-8888-4888-8888-888888888888"
 HANDOFF_ID = "99999999-9999-4999-8999-999999999999"
+TASK_ID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
 
 
 def _proc_entry(
@@ -161,7 +162,7 @@ def _prepare_pending_resume(registry: Registry, locator: TmuxLocator) -> None:
             "provider": "codex",
             "action": "resume",
             "project_id": None,
-            "location_id": None,
+            "checkout_id": None,
             "cwd": None,
             "source_handoff_id": None,
             "target_session_key": SESSION_KEY,
@@ -211,9 +212,9 @@ def _prepare_pending_new(
                 "name": "project",
                 "default_provider": "codex",
                 "default_transport": "tmux",
-                "locations": [
+                "checkouts": [
                     {
-                        "location_id": LOCATION_ID,
+                        "checkout_id": LOCATION_ID,
                         "path": "/work/project",
                         "is_default": True,
                     }
@@ -222,13 +223,33 @@ def _prepare_pending_new(
         ],
         observed_at=2,
     )
+    registry.create_task(
+        task_id=TASK_ID,
+        host_id=HOST_ID,
+        project_id=PROJECT_ID,
+        checkout_id=LOCATION_ID,
+        title="Pending launch",
+        observed_at=3,
+    )
+    if source_handoff_id is not None:
+        source = registry.get_handoff(source_handoff_id)
+        assert source is not None
+        source_session_key = str(source["session_key"])
+        registry.adopt_session(
+            task_id=TASK_ID, session_key=source_session_key, observed_at=4
+        )
+        registry.connection.execute(
+            "UPDATE sessions SET wrapped_at = 4 WHERE session_key = ?",
+            (source_session_key,),
+        )
     registry.reserve_launch(
         {
             "host_id": HOST_ID,
             "provider": "codex",
             "action": "new",
             "project_id": PROJECT_ID,
-            "location_id": LOCATION_ID,
+            "task_id": TASK_ID,
+            "checkout_id": LOCATION_ID,
             "cwd": "/work/project",
             "source_handoff_id": source_handoff_id,
             "target_session_key": None,
@@ -631,9 +652,9 @@ def test_reconcile_binds_pending_new_launch_after_missed_hook(
                 "name": "project",
                 "default_provider": "codex",
                 "default_transport": "tmux",
-                "locations": [
+                "checkouts": [
                     {
-                        "location_id": LOCATION_ID,
+                        "checkout_id": LOCATION_ID,
                         "path": "/work/project",
                         "is_default": True,
                     }
@@ -649,7 +670,7 @@ def test_reconcile_binds_pending_new_launch_after_missed_hook(
             "provider": "codex",
             "provider_session_id": SECOND_SESSION_ID,
             "project_id": PROJECT_ID,
-            "location_id": LOCATION_ID,
+            "checkout_id": LOCATION_ID,
             "cwd": "/work/project",
             "runtime_presence": "unknown",
             "resumability": "resumable",
@@ -700,7 +721,7 @@ def test_reconcile_binds_pending_new_launch_after_missed_hook(
     session = registry.get_session(SESSION_KEY)
     assert session is not None
     assert session["project_id"] == PROJECT_ID
-    assert session["location_id"] == LOCATION_ID
+    assert session["checkout_id"] == LOCATION_ID
     assert session["cwd"] == "/work/project"
     assert session["metadata_source"] == "launch"
     assert session["continued_from_handoff_id"] == HANDOFF_ID

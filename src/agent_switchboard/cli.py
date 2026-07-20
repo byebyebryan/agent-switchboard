@@ -4,16 +4,19 @@ from __future__ import annotations
 
 import argparse
 import importlib
+import json
 import os
 import sqlite3
 import sys
 import time
 from collections.abc import Sequence
+from pathlib import Path
 
 from . import __version__
 from .agent_tools import AgentToolError, AgentToolService
-from .config import SwitchboardConfig, load_config
+from .config import SwitchboardConfig, load_config, migrate_legacy_config
 from .curation import (
+    MAX_HANDOFF_INPUT_BYTES,
     CurationError,
     format_session_detail,
     read_handoff_input,
@@ -21,7 +24,14 @@ from .curation import (
     resolve_current_session_key,
 )
 from .doctor import run_all_doctors
-from .domain import HostId, PresentationContext, ProviderId, SessionKey, ValidationError
+from .domain import (
+    Checkout,
+    HostId,
+    PresentationContext,
+    ProviderId,
+    SessionKey,
+    ValidationError,
+)
 from .executable import resolve_swbctl_executable
 from .hook_config import edit_claude_hooks, edit_codex_hooks
 from .hooks import HookInputError
@@ -121,6 +131,68 @@ def build_parser() -> argparse.ArgumentParser:
         help="open the optional terminal session picker",
     )
 
+    config = commands.add_parser("config", help="inspect or migrate configuration")
+    config_actions = config.add_subparsers(dest="config_action", required=True)
+    migrate_v2 = config_actions.add_parser(
+        "migrate-v2", help="print a canonical v2 form of one legacy config"
+    )
+    migrate_v2.add_argument("--input", type=Path, required=True)
+    migrate_v2.add_argument(
+        "--print", dest="print_output", action="store_true", required=True
+    )
+
+    task = commands.add_parser("task", help="manage explicit project tasks")
+    task_actions = task.add_subparsers(dest="task_action", required=True)
+    task_list = task_actions.add_parser("list", help="list local tasks")
+    task_list.add_argument("--project")
+    task_list.add_argument("--status", choices=("open", "closed"))
+    task_list.add_argument("--json", action="store_true")
+    task_show = task_actions.add_parser("show", help="show one task and its history")
+    task_show.add_argument("task_id")
+    task_show.add_argument("--json", action="store_true")
+    task_create = task_actions.add_parser("create", help="create an open task")
+    task_create.add_argument("--task-id", required=True)
+    task_create.add_argument("--project", required=True)
+    task_create.add_argument("--title", required=True)
+    task_create.add_argument("--purpose")
+    task_create.add_argument("--checkout")
+    task_create.add_argument("--provider", choices=("codex", "claude"))
+    task_create.add_argument("--json", action="store_true")
+    task_adopt = task_actions.add_parser("adopt", help="adopt an Inbox session")
+    task_adopt.add_argument("session_key")
+    adopt_target = task_adopt.add_mutually_exclusive_group(required=True)
+    adopt_target.add_argument("--task")
+    adopt_target.add_argument("--task-id")
+    task_adopt.add_argument("--title")
+    task_adopt.add_argument("--project")
+    task_adopt.add_argument("--checkout")
+    task_adopt.add_argument("--provider", choices=("codex", "claude"))
+    task_adopt.add_argument("--json", action="store_true")
+    task_title = task_actions.add_parser("title", help="change a task title")
+    task_title.add_argument("task_id")
+    task_title.add_argument("value")
+    task_title.add_argument("--json", action="store_true")
+    task_purpose = task_actions.add_parser("purpose", help="set or clear task purpose")
+    task_purpose.add_argument("task_id")
+    task_purpose.add_argument("value", nargs="?")
+    task_purpose.add_argument("--clear", action="store_true")
+    task_purpose.add_argument("--json", action="store_true")
+    task_pin = task_actions.add_parser("pin", help="pin or unpin a task")
+    task_pin.add_argument("task_id")
+    task_pin.add_argument("--off", action="store_true")
+    task_pin.add_argument("--json", action="store_true")
+    for action, help_text in (
+        ("handoff", "append a handoff to the task's current session"),
+        ("close", "wrap the current session and close the task"),
+    ):
+        task_handoff = task_actions.add_parser(action, help=help_text)
+        task_handoff.add_argument("task_id")
+        task_handoff.add_argument("--json-stdin", action="store_true", required=True)
+        task_handoff.add_argument("--json", action="store_true")
+    task_reopen = task_actions.add_parser("reopen", help="reopen a closed task")
+    task_reopen.add_argument("task_id")
+    task_reopen.add_argument("--json", action="store_true")
+
     show = commands.add_parser(
         "show",
         help="show one retained local session and its newest handoffs",
@@ -187,24 +259,19 @@ def build_parser() -> argparse.ArgumentParser:
     for action, help_text in (
         ("current", "show the exactly authorized current session"),
         ("context", "read bounded context for the current project"),
-        ("sessions", "list bounded sessions in the current project"),
+        ("tasks", "list bounded tasks in the current project"),
+        ("task", "read the authorized current task"),
     ):
         agent_read = agent_actions.add_parser(action, help=help_text)
         agent_read.add_argument("--json", action="store_true", required=True)
-    agent_show = agent_actions.add_parser(
-        "show", help="read one session in the current project"
-    )
-    agent_show.add_argument("session_key")
-    agent_show.add_argument("--json", action="store_true", required=True)
     agent_handoff_read = agent_actions.add_parser(
-        "handoff-read", help="read one exact handoff in the current project"
+        "handoff-read", help="read one exact handoff in the current task"
     )
     agent_handoff_read.add_argument("handoff_id")
     agent_handoff_read.add_argument("--json", action="store_true", required=True)
     agent_handoffs = agent_actions.add_parser(
-        "handoffs", help="read newest handoffs for a current-project session"
+        "handoffs", help="read newest handoffs across the current task"
     )
-    agent_handoffs.add_argument("session_key")
     agent_handoffs.add_argument("--limit", type=int, default=DEFAULT_HANDOFF_LIMIT)
     agent_handoffs.add_argument("--json", action="store_true", required=True)
     for action, help_text in (
@@ -215,15 +282,17 @@ def build_parser() -> argparse.ArgumentParser:
         agent_search.add_argument("query")
         agent_search.add_argument("--limit", type=int, default=20)
         agent_search.add_argument("--json", action="store_true", required=True)
-    agent_name = agent_actions.add_parser(
-        "name", help="set or clear the authorized current session name"
+    agent_update = agent_actions.add_parser(
+        "update", help="update the current task title, purpose, or pin"
     )
-    agent_name.add_argument("value", nargs="?")
-    agent_name.add_argument("--clear", action="store_true")
-    agent_name.add_argument("--json", action="store_true", required=True)
+    agent_update.add_argument("--title")
+    agent_update.add_argument("--purpose")
+    agent_update.add_argument("--clear-purpose", action="store_true")
+    agent_update.add_argument("--pin", choices=("on", "off"))
+    agent_update.add_argument("--json", action="store_true", required=True)
     for action, help_text in (
-        ("handoff", "append an agent-attributed current-session handoff"),
-        ("wrap", "append an agent-attributed handoff and wrap the session"),
+        ("handoff", "append an agent-attributed current-task handoff"),
+        ("close", "append a handoff, wrap the session, and close the task"),
     ):
         agent_handoff = agent_actions.add_parser(action, help=help_text)
         agent_handoff.add_argument("--json-stdin", action="store_true", required=True)
@@ -245,31 +314,30 @@ def build_parser() -> argparse.ArgumentParser:
     prepare_open.add_argument("--can-launch-terminal", action="store_true")
     prepare_open.add_argument("--json", action="store_true", required=True)
 
-    prepare_new = commands.add_parser(
-        "prepare-new",
-        help="atomically prepare a new local project session for presentation",
+    prepare_task = commands.add_parser(
+        "prepare-task",
+        help="atomically open or continue one task",
     )
-    prepare_new.add_argument("--project")
-    prepare_new.add_argument("--location")
-    prepare_new.add_argument("--provider", choices=("codex", "claude"))
-    prepare_new.add_argument(
-        "--from",
-        dest="source_ref",
-        help="exact handoff ID or local source session key",
-    )
-    prepare_new.add_argument("--request-id", required=True)
-    prepare_new.add_argument("--has-current-terminal", action="store_true")
-    prepare_new.add_argument("--current-tmux-client")
-    prepare_new.add_argument("--can-focus-desktop", action="store_true")
-    prepare_new.add_argument("--can-launch-terminal", action="store_true")
-    prepare_new.add_argument("--json", action="store_true", required=True)
+    prepare_task.add_argument("task_id")
+    prepare_task.add_argument("--create", action="store_true")
+    prepare_task.add_argument("--project")
+    prepare_task.add_argument("--title")
+    prepare_task.add_argument("--purpose")
+    prepare_task.add_argument("--checkout")
+    prepare_task.add_argument("--provider", choices=("codex", "claude"))
+    prepare_task.add_argument("--request-id", required=True)
+    prepare_task.add_argument("--has-current-terminal", action="store_true")
+    prepare_task.add_argument("--current-tmux-client")
+    prepare_task.add_argument("--can-focus-desktop", action="store_true")
+    prepare_task.add_argument("--can-launch-terminal", action="store_true")
+    prepare_task.add_argument("--json", action="store_true", required=True)
 
     prepare_history = commands.add_parser(
         "prepare-history",
         help="atomically prepare the native Claude history picker",
     )
     prepare_history.add_argument("--project", required=True)
-    prepare_history.add_argument("--location")
+    prepare_history.add_argument("--checkout")
     prepare_history.add_argument("--request-id", required=True)
     prepare_history.add_argument("--has-current-terminal", action="store_true")
     prepare_history.add_argument("--current-tmux-client")
@@ -311,6 +379,18 @@ def _configured_codex_executable(config: SwitchboardConfig) -> str | None:
     return None
 
 
+def _config_command(arguments: argparse.Namespace) -> str:
+    if arguments.config_action != "migrate-v2" or not arguments.print_output:
+        raise ValidationError("unsupported configuration action")
+    try:
+        raw = arguments.input.read_bytes()
+    except OSError as error:
+        raise ValidationError(
+            f"cannot read legacy configuration at {arguments.input}: {error}"
+        ) from error
+    return migrate_legacy_config(raw, host_id=_EPHEMERAL_CONFIG_HOST_ID)
+
+
 def _run_tui_command() -> int:
     try:
         tui = importlib.import_module(".tui", __package__)
@@ -347,6 +427,39 @@ def _coordinator(
     host_id: HostId,
     config: SwitchboardConfig,
 ) -> LaunchCoordinator:
+    checkouts: list[Checkout] = []
+    for project in registry.list_projects():
+        for repository in project["repositories"]:
+            for checkout in repository["checkouts"]:
+                if checkout["host_id"] != str(host_id):
+                    continue
+                checkouts.append(
+                    Checkout(
+                        checkout["checkout_id"],
+                        checkout["repository_id"],
+                        checkout["host_id"],
+                        Path(checkout["path"]),
+                        kind=checkout["kind"],
+                        display_name=checkout["display_name"],
+                        branch=checkout["branch"],
+                        head_oid=checkout["head_oid"],
+                        provider_override=checkout["provider_override"],
+                        transport_override=checkout["transport_override"],
+                        is_default=bool(checkout["is_default"]),
+                        declared=bool(checkout["declared"]),
+                        present=bool(checkout["present"]),
+                        git_common_dir=(
+                            None
+                            if checkout["git_common_dir"] is None
+                            else Path(checkout["git_common_dir"])
+                        ),
+                        git_dir=(
+                            None
+                            if checkout["git_dir"] is None
+                            else Path(checkout["git_dir"])
+                        ),
+                    )
+                )
     return LaunchCoordinator(
         registry,
         host_id=host_id,
@@ -355,7 +468,8 @@ def _coordinator(
         codex_executable=_configured_codex_executable(config),
         claude_executable=_configured_claude_executable(config),
         projects=config.projects,
-        locations=config.locations,
+        project_repositories=config.project_repositories,
+        checkouts=checkouts,
         naming_prefix=config.tmux.naming_prefix,
         launch_timeout_seconds=config.tmux.launch_timeout_seconds,
     )
@@ -383,7 +497,7 @@ def _prepare_open(arguments: argparse.Namespace) -> str:
     return PresentationPlanEnvelope(plan).to_json()
 
 
-def _prepare_new(arguments: argparse.Namespace) -> str:
+def _prepare_task(arguments: argparse.Namespace) -> str:
     host_id = load_or_create_host_id()
     config = load_config(host_id=host_id)
     context = PresentationContext(
@@ -395,14 +509,41 @@ def _prepare_new(arguments: argparse.Namespace) -> str:
     with Registry(database_path()) as registry:
         materialize_configured_projects(registry, str(host_id), config)
         reconcile_live(registry, str(host_id))
-        plan = _coordinator(registry, host_id=host_id, config=config).prepare_new(
-            arguments.project,
-            location_id=arguments.location,
-            provider=arguments.provider,
-            source_ref=arguments.source_ref,
-            request_id=arguments.request_id,
-            context=context,
-        )
+        coordinator = _coordinator(registry, host_id=host_id, config=config)
+        if arguments.create:
+            if not arguments.project or not arguments.title or not arguments.provider:
+                raise PresentationError(
+                    "--create requires --project, --title, and --provider"
+                )
+            plan = coordinator.prepare_task_create(
+                task_id=arguments.task_id,
+                project_id=arguments.project,
+                title=arguments.title,
+                purpose=arguments.purpose,
+                checkout_id=arguments.checkout,
+                provider=arguments.provider,
+                request_id=arguments.request_id,
+                context=context,
+            )
+        else:
+            if any(
+                value is not None
+                for value in (
+                    arguments.project,
+                    arguments.title,
+                    arguments.purpose,
+                    arguments.checkout,
+                )
+            ):
+                raise PresentationError(
+                    "project, title, purpose, and checkout require --create"
+                )
+            plan = coordinator.prepare_task(
+                arguments.task_id,
+                provider=arguments.provider,
+                request_id=arguments.request_id,
+                context=context,
+            )
     return PresentationPlanEnvelope(plan).to_json()
 
 
@@ -420,7 +561,7 @@ def _prepare_history(arguments: argparse.Namespace) -> str:
         reconcile_live(registry, str(host_id))
         plan = _coordinator(registry, host_id=host_id, config=config).prepare_history(
             arguments.project,
-            location_id=arguments.location,
+            checkout_id=arguments.checkout,
             request_id=arguments.request_id,
             context=context,
         )
@@ -511,6 +652,230 @@ def _render_detail(arguments: argparse.Namespace, detail: SessionDetailEnvelope)
     return detail.to_json() if arguments.json else format_session_detail(detail)
 
 
+def _task_record(task: dict[str, object]) -> dict[str, object]:
+    record: dict[str, object] = {
+        "taskId": task["task_id"],
+        "hostId": task["host_id"],
+        "projectId": task["project_id"],
+        "title": task["title"],
+        "status": task["status"],
+        "pinned": bool(task["pinned"]),
+        "createdAt": task["created_at"],
+        "updatedAt": task["updated_at"],
+    }
+    for source, target in (
+        ("checkout_id", "checkoutId"),
+        ("purpose", "purpose"),
+        ("preferred_provider", "preferredProvider"),
+        ("current_session_key", "currentSessionKey"),
+        ("closed_at", "closedAt"),
+    ):
+        if task.get(source) is not None:
+            record[target] = task[source]
+    return record
+
+
+def _task_result(
+    task: dict[str, object], *, sessions: Sequence[dict[str, object]] = ()
+) -> dict[str, object]:
+    return {
+        "schemaVersion": 2,
+        "protocolVersion": 2,
+        "generatedAt": time.time_ns() // 1_000_000,
+        "task": _task_record(task),
+        "sessions": [
+            {
+                "sessionKey": session["session_key"],
+                "provider": session["provider"],
+                "providerSessionId": session["provider_session_id"],
+                "name": session.get("name"),
+                "wrappedAt": session.get("wrapped_at"),
+                "latestHandoffId": session.get("latest_handoff_id"),
+                "firstObservedAt": session["first_observed_at"],
+                "lastObservedAt": session["last_observed_at"],
+            }
+            for session in sessions
+        ],
+    }
+
+
+def _render_task_payload(payload: dict[str, object], *, as_json: bool) -> str:
+    if as_json:
+        return json.dumps(
+            payload,
+            ensure_ascii=False,
+            allow_nan=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+    task = payload["task"]
+    assert isinstance(task, dict)
+    lines = [
+        f"{task['title']} [{task['status']}]",
+        f"task: {task['taskId']}",
+        f"project: {task['projectId']}",
+    ]
+    if task.get("purpose") is not None:
+        lines.append(f"purpose: {task['purpose']}")
+    if task.get("currentSessionKey") is not None:
+        lines.append(f"current: {task['currentSessionKey']}")
+    sessions = payload.get("sessions", [])
+    assert isinstance(sessions, list)
+    if sessions:
+        lines.append(f"history: {len(sessions)} session(s)")
+    return "\n".join(lines)
+
+
+def _task_command(arguments: argparse.Namespace) -> str:
+    host_id = load_or_create_host_id()
+    config = load_config(host_id=host_id)
+    with Registry(database_path()) as registry:
+        materialize_configured_projects(registry, str(host_id), config)
+        action = arguments.task_action
+        if action == "list":
+            tasks = registry.list_tasks(
+                host_id=str(host_id),
+                project_id=arguments.project,
+                status=arguments.status,
+            )
+            payload = {
+                "schemaVersion": 2,
+                "protocolVersion": 2,
+                "generatedAt": time.time_ns() // 1_000_000,
+                "tasks": [_task_record(task) for task in tasks],
+            }
+            if arguments.json:
+                return json.dumps(
+                    payload,
+                    ensure_ascii=False,
+                    allow_nan=False,
+                    separators=(",", ":"),
+                    sort_keys=True,
+                )
+            return "\n".join(
+                f"{task['task_id']}  {task['status']:<6}  {task['title']}"
+                for task in tasks
+            )
+        if action == "show":
+            task = registry.get_task(arguments.task_id)
+            if task is None or task["host_id"] != str(host_id):
+                raise StorageError("unknown local task")
+            return _render_task_payload(
+                _task_result(
+                    task, sessions=registry.list_task_sessions(arguments.task_id)
+                ),
+                as_json=arguments.json,
+            )
+        if action == "create":
+            task = registry.create_task(
+                task_id=arguments.task_id,
+                host_id=str(host_id),
+                project_id=arguments.project,
+                checkout_id=arguments.checkout,
+                title=arguments.title,
+                purpose=arguments.purpose,
+                preferred_provider=arguments.provider,
+            )
+        elif action == "adopt":
+            session = registry.get_session(arguments.session_key)
+            if session is None or session["host_id"] != str(host_id):
+                raise StorageError("unknown local session")
+            if arguments.task_id is not None:
+                if arguments.title is None:
+                    raise StorageError("--task-id requires --title")
+                project_id = arguments.project or session.get("project_id")
+                if project_id is None:
+                    raise StorageError("adoption requires an explicit project")
+                task = registry.create_task(
+                    task_id=arguments.task_id,
+                    host_id=str(host_id),
+                    project_id=str(project_id),
+                    checkout_id=arguments.checkout or session.get("checkout_id"),
+                    title=arguments.title,
+                    preferred_provider=arguments.provider or session["provider"],
+                )
+                task_id = str(task["task_id"])
+            else:
+                if any(
+                    value is not None
+                    for value in (
+                        arguments.title,
+                        arguments.project,
+                        arguments.checkout,
+                        arguments.provider,
+                    )
+                ):
+                    raise StorageError(
+                        "title, project, checkout, and provider require --task-id"
+                    )
+                task_id = arguments.task
+            task = registry.adopt_session(
+                task_id=task_id, session_key=arguments.session_key
+            )
+        elif action == "title":
+            task = registry.update_task(arguments.task_id, title=arguments.value)
+        elif action == "purpose":
+            if arguments.clear == (arguments.value is not None):
+                raise StorageError("choose one purpose value or --clear")
+            task = registry.update_task(
+                arguments.task_id, purpose="" if arguments.clear else arguments.value
+            )
+        elif action == "pin":
+            task = registry.update_task(arguments.task_id, pinned=not arguments.off)
+        elif action == "reopen":
+            task = registry.reopen_task(arguments.task_id, host_id=str(host_id))
+        elif action in {"handoff", "close"}:
+            task = registry.get_task(arguments.task_id)
+            if task is None or task["host_id"] != str(host_id):
+                raise StorageError("unknown local task")
+            stream = getattr(sys.stdin, "buffer", sys.stdin)
+            if action == "handoff" or task.get("current_session_key") is not None:
+                handoff = read_handoff_input(stream)
+                if action == "handoff":
+                    current = task.get("current_session_key")
+                    if not isinstance(current, str):
+                        raise StorageError("task has no current session")
+                    registry.curate_session_handoff(
+                        current,
+                        host_id=str(host_id),
+                        summary=handoff.summary,
+                        next_action=handoff.next_action,
+                        handoff_id=handoff.handoff_id,
+                        wrap=False,
+                    )
+                    task = registry.get_task(arguments.task_id)
+                    assert task is not None
+                else:
+                    task = registry.close_task(
+                        arguments.task_id,
+                        host_id=str(host_id),
+                        summary=handoff.summary,
+                        next_action=handoff.next_action,
+                        handoff_id=handoff.handoff_id,
+                    )
+            else:
+                raw = stream.read(MAX_HANDOFF_INPUT_BYTES + 1)
+                if len(raw) > MAX_HANDOFF_INPUT_BYTES:
+                    raise CurationError("task close input is too large")
+                try:
+                    empty = json.loads(raw)
+                except (json.JSONDecodeError, UnicodeDecodeError) as error:
+                    raise CurationError(
+                        "task close input must be an empty object"
+                    ) from error
+                if empty != {}:
+                    raise CurationError("a never-started task close requires {}")
+                task = registry.close_task(arguments.task_id, host_id=str(host_id))
+        else:
+            raise StorageError("unsupported task action")
+        return _render_task_payload(
+            _task_result(
+                task, sessions=registry.list_task_sessions(str(task["task_id"]))
+            ),
+            as_json=arguments.json,
+        )
+
+
 def _curation_command(arguments: argparse.Namespace) -> str:
     host_id = load_or_create_host_id()
     with Registry(database_path()) as registry:
@@ -584,36 +949,71 @@ def _agent_command(arguments: argparse.Namespace) -> str:
             return service.current().to_json()
         if arguments.agent_action == "context":
             return service.context().to_json()
-        if arguments.agent_action == "sessions":
-            return service.list_sessions().to_json()
-        if arguments.agent_action == "show":
-            return service.session_detail(arguments.session_key).to_json()
+        if arguments.agent_action == "tasks":
+            return json.dumps(
+                service.list_tasks(),
+                ensure_ascii=False,
+                allow_nan=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            )
+        if arguments.agent_action == "task":
+            return json.dumps(
+                service.task(),
+                ensure_ascii=False,
+                allow_nan=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            )
         if arguments.agent_action == "handoff-read":
             return service.handoff(arguments.handoff_id).to_json()
         if arguments.agent_action == "handoffs":
-            return service.session_detail(
-                arguments.session_key, handoff_limit=arguments.limit
-            ).to_json()
+            return json.dumps(
+                service.list_task_handoffs(limit=arguments.limit),
+                ensure_ascii=False,
+                allow_nan=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            )
         if arguments.agent_action == "search":
             return service.search(arguments.query, limit=arguments.limit).to_json()
         if arguments.agent_action == "memory":
             return service.memory_search(
                 arguments.query, limit=arguments.limit
             ).to_json()
-        if arguments.agent_action == "name":
-            if arguments.clear == (arguments.value is not None):
-                raise AgentToolError("choose exactly one name value or --clear")
-            return service.set_name(
-                None if arguments.clear else arguments.value
-            ).to_json()
+        if arguments.agent_action == "update":
+            if arguments.clear_purpose and arguments.purpose is not None:
+                raise AgentToolError("choose a purpose value or --clear-purpose")
+            values: dict[str, object] = {}
+            if arguments.title is not None:
+                values["title"] = arguments.title
+            if arguments.purpose is not None or arguments.clear_purpose:
+                values["purpose"] = (
+                    None if arguments.clear_purpose else arguments.purpose
+                )
+            if arguments.pin is not None:
+                values["pinned"] = arguments.pin == "on"
+            return json.dumps(
+                service.update_task(values),
+                ensure_ascii=False,
+                allow_nan=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            )
         stream = getattr(sys.stdin, "buffer", sys.stdin)
         handoff = read_handoff_input(stream)
-        return service.append_handoff(
-            summary=handoff.summary,
-            next_action=handoff.next_action,
-            handoff_id=handoff.handoff_id,
-            wrap=arguments.agent_action == "wrap",
-        ).to_json()
+        return json.dumps(
+            service.append_handoff(
+                summary=handoff.summary,
+                next_action=handoff.next_action,
+                handoff_id=handoff.handoff_id,
+                close=arguments.agent_action == "close",
+            ),
+            ensure_ascii=False,
+            allow_nan=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
 
 
 def _agent_mcp_command() -> int:
@@ -656,6 +1056,13 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     entry_ns = time.time_ns()
     arguments = build_parser().parse_args(argv)
+    if arguments.command == "config":
+        try:
+            sys.stdout.write(f"{_config_command(arguments)}\n")
+        except (ValidationError, OSError, ValueError) as error:
+            print(f"swbctl: {_safe_error_message(error)}", file=sys.stderr)
+            return 1
+        return 0
     if arguments.command == "event":
         try:
             stream = getattr(sys.stdin, "buffer", sys.stdin)
@@ -736,6 +1143,22 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 1
         return 0
 
+    if arguments.command == "task":
+        try:
+            sys.stdout.write(f"{_task_command(arguments)}\n")
+        except (
+            CurationError,
+            ValidationError,
+            StorageError,
+            MigrationError,
+            sqlite3.Error,
+            OSError,
+            ValueError,
+        ) as error:
+            print(f"swbctl: {_safe_error_message(error)}", file=sys.stderr)
+            return 1
+        return 0
+
     if arguments.command == "agent":
         try:
             sys.stdout.write(f"{_agent_command(arguments)}\n")
@@ -775,7 +1198,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if arguments.command in {
         "prepare-open",
-        "prepare-new",
+        "prepare-task",
         "prepare-history",
         "bootstrap",
         "select-surface",
@@ -786,8 +1209,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             if arguments.command == "prepare-open":
                 sys.stdout.write(f"{_prepare_open(arguments)}\n")
                 return 0
-            if arguments.command == "prepare-new":
-                sys.stdout.write(f"{_prepare_new(arguments)}\n")
+            if arguments.command == "prepare-task":
+                sys.stdout.write(f"{_prepare_task(arguments)}\n")
                 return 0
             if arguments.command == "prepare-history":
                 sys.stdout.write(f"{_prepare_history(arguments)}\n")

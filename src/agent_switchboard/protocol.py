@@ -18,28 +18,33 @@ from .domain import (
     ActivityReason,
     Attachment,
     BindingConfidence,
+    CheckoutId,
+    CheckoutKind,
     HandoffId,
     HandoffSource,
     HostId,
     LaunchId,
-    LocationId,
     PresentationContext,
     ProjectId,
     ProviderId,
+    RepositoryId,
+    RepositoryKind,
     Resumability,
     RuntimePresence,
     SessionKey,
     StateConfidence,
     SurfaceId,
     SurfaceRole,
+    TaskId,
+    TaskStatus,
     Transport,
     ValidationError,
     handoff_content_hash,
     normalize_handoff_text,
 )
 
-SCHEMA_VERSION = 1
-PROTOCOL_VERSION = 1
+SCHEMA_VERSION = 2
+PROTOCOL_VERSION = 2
 MAX_JSON_DEPTH = 32
 MAX_JSON_BYTES = 8 * 1024 * 1024
 MAX_JSON_STRING_LENGTH = 64 * 1024
@@ -114,11 +119,13 @@ _SENSITIVE_KEYS = {
 }
 _KEY_NORMALIZER = re.compile(r"[^a-z0-9]")
 _SAFE_DETAIL_STRING_FIELDS = frozenset({"capability", "fallback"})
+_SAFE_DETAIL_UUID_FIELDS = frozenset({"projectId", "repositoryId"})
 _SAFE_DETAIL_INTEGER_FIELDS = frozenset({"emittedCount", "retainedCount"})
 _SAFE_DETAIL_NUMBER_FIELDS = frozenset({"latency"})
 _SAFE_DETAIL_HASH_FIELDS = frozenset({"payloadHash"})
 _SAFE_DETAIL_FIELDS = (
     _SAFE_DETAIL_STRING_FIELDS
+    | _SAFE_DETAIL_UUID_FIELDS
     | _SAFE_DETAIL_INTEGER_FIELDS
     | _SAFE_DETAIL_NUMBER_FIELDS
     | _SAFE_DETAIL_HASH_FIELDS
@@ -367,9 +374,16 @@ def _record(value: object, path: str) -> dict[str, JsonValue]:
     return safe_table
 
 
-def _uuid[T: HostId | ProjectId | LocationId | LaunchId | HandoffId | SurfaceId](
-    value: object, path: str, value_type: type[T]
-) -> T:
+def _uuid[
+    T: HostId
+    | ProjectId
+    | RepositoryId
+    | CheckoutId
+    | TaskId
+    | LaunchId
+    | HandoffId
+    | SurfaceId
+](value: object, path: str, value_type: type[T]) -> T:
     try:
         return value_type(_string(value, path))
     except ValidationError as exc:
@@ -458,6 +472,9 @@ def _details_record(value: object, path: str) -> dict[str, JsonValue]:
         field_path = f"{path}.{key}"
         if key in _SAFE_DETAIL_STRING_FIELDS:
             result[key] = _string(value, field_path, maximum=512)
+        elif key in _SAFE_DETAIL_UUID_FIELDS:
+            value_type = ProjectId if key == "projectId" else RepositoryId
+            result[key] = str(_uuid(value, field_path, value_type))
         elif key in _SAFE_DETAIL_INTEGER_FIELDS:
             result[key] = _integer(value, field_path)
         elif key in _SAFE_DETAIL_NUMBER_FIELDS:
@@ -479,9 +496,16 @@ def _details_record(value: object, path: str) -> dict[str, JsonValue]:
     return result
 
 
-def _uuid_text[T: HostId | ProjectId | LocationId | LaunchId | HandoffId | SurfaceId](
-    value: object, path: str, value_type: type[T]
-) -> str:
+def _uuid_text[
+    T: HostId
+    | ProjectId
+    | RepositoryId
+    | CheckoutId
+    | TaskId
+    | LaunchId
+    | HandoffId
+    | SurfaceId
+](value: object, path: str, value_type: type[T]) -> str:
     return str(_uuid(value, path, value_type))
 
 
@@ -550,7 +574,14 @@ def _optional_boolean(
 
 
 def _optional_uuid[
-    T: HostId | ProjectId | LocationId | LaunchId | HandoffId | SurfaceId
+    T: HostId
+    | ProjectId
+    | RepositoryId
+    | CheckoutId
+    | TaskId
+    | LaunchId
+    | HandoffId
+    | SurfaceId
 ](
     result: dict[str, JsonValue],
     table: Mapping[str, Any],
@@ -589,19 +620,52 @@ def _project_record(value: object, path: str) -> dict[str, JsonValue]:
         result["defaultTransport"] = _enum(
             table["defaultTransport"], f"{path}.defaultTransport", Transport
         )
-    if "contextSources" in table:
-        result["contextSources"] = _string_array(
-            table["contextSources"],
-            f"{path}.contextSources",
-            maximum_string=1024,
-        )
     _optional_boolean(result, table, "declared", path)
     _optional_integer(result, table, "createdAt", path)
     _optional_integer(result, table, "updatedAt", path)
     return result
 
 
-def _location_record(
+def _project_repository_record(value: object, path: str) -> dict[str, JsonValue]:
+    table = _object(value, path)
+    _json_value(table, path)
+    return {
+        "projectId": _uuid_text(
+            _required(table, "projectId", path), f"{path}.projectId", ProjectId
+        ),
+        "repositoryId": _uuid_text(
+            _required(table, "repositoryId", path),
+            f"{path}.repositoryId",
+            RepositoryId,
+        ),
+        "isPrimary": _boolean(_required(table, "isPrimary", path), f"{path}.isPrimary"),
+    }
+
+
+def _repository_record(value: object, path: str) -> dict[str, JsonValue]:
+    table = _object(value, path)
+    _json_value(table, path)
+    result: dict[str, JsonValue] = {
+        "repositoryId": _uuid_text(
+            _required(table, "repositoryId", path),
+            f"{path}.repositoryId",
+            RepositoryId,
+        ),
+        "name": _string(_required(table, "name", path), f"{path}.name", maximum=256),
+        "kind": _enum(_required(table, "kind", path), f"{path}.kind", RepositoryKind),
+        "contextSources": _string_array(
+            _required(table, "contextSources", path),
+            f"{path}.contextSources",
+            maximum_string=1024,
+        ),
+    }
+    _optional_boolean(result, table, "declared", path)
+    _optional_integer(result, table, "createdAt", path)
+    _optional_integer(result, table, "updatedAt", path)
+    return result
+
+
+def _checkout_record(
     value: object, path: str, *, expected_host_id: HostId
 ) -> dict[str, JsonValue]:
     table = _object(value, path)
@@ -610,17 +674,21 @@ def _location_record(
     if host_id != expected_host_id:
         raise ProtocolError(f"{path}.hostId does not match envelope.host.hostId")
     result: dict[str, JsonValue] = {
-        "locationId": _uuid_text(
-            _required(table, "locationId", path), f"{path}.locationId", LocationId
+        "checkoutId": _uuid_text(
+            _required(table, "checkoutId", path), f"{path}.checkoutId", CheckoutId
         ),
-        "projectId": _uuid_text(
-            _required(table, "projectId", path), f"{path}.projectId", ProjectId
+        "repositoryId": _uuid_text(
+            _required(table, "repositoryId", path),
+            f"{path}.repositoryId",
+            RepositoryId,
         ),
         "hostId": str(host_id),
         "path": _string(_required(table, "path", path), f"{path}.path", maximum=4096),
+        "kind": _enum(_required(table, "kind", path), f"{path}.kind", CheckoutKind),
     }
     _optional_string(result, table, "displayName", path, maximum=256)
-    _optional_string(result, table, "repositoryIdentity", path, maximum=2048)
+    _optional_string(result, table, "branch", path, maximum=1024)
+    _optional_string(result, table, "headOid", path, maximum=1024)
     if "providerOverride" in table:
         result["providerOverride"] = (
             None
@@ -639,9 +707,61 @@ def _location_record(
         )
     _optional_boolean(result, table, "isDefault", path)
     _optional_boolean(result, table, "declared", path)
+    _optional_boolean(result, table, "present", path)
     _optional_integer(result, table, "lastObservedAt", path)
     _optional_integer(result, table, "createdAt", path)
     _optional_integer(result, table, "updatedAt", path)
+    return result
+
+
+def _task_record(
+    value: object, path: str, *, expected_host_id: HostId
+) -> dict[str, JsonValue]:
+    table = _object(value, path)
+    _json_value(table, path, allow_explicit_multiline=True)
+    host_id = _uuid(_required(table, "hostId", path), f"{path}.hostId", HostId)
+    if host_id != expected_host_id:
+        raise ProtocolError(f"{path}.hostId does not match envelope.host.hostId")
+    result: dict[str, JsonValue] = {
+        "taskId": _uuid_text(
+            _required(table, "taskId", path), f"{path}.taskId", TaskId
+        ),
+        "hostId": str(host_id),
+        "projectId": _uuid_text(
+            _required(table, "projectId", path), f"{path}.projectId", ProjectId
+        ),
+        "title": _string(_required(table, "title", path), f"{path}.title", maximum=256),
+        "status": _enum(_required(table, "status", path), f"{path}.status", TaskStatus),
+        "pinned": _boolean(_required(table, "pinned", path), f"{path}.pinned"),
+        "createdAt": _integer(_required(table, "createdAt", path), f"{path}.createdAt"),
+        "updatedAt": _integer(_required(table, "updatedAt", path), f"{path}.updatedAt"),
+    }
+    _optional_uuid(result, table, "checkoutId", path, CheckoutId)
+    if "purpose" in table:
+        result["purpose"] = (
+            None
+            if table["purpose"] is None
+            else _multiline_string(table["purpose"], f"{path}.purpose", maximum=4096)
+        )
+    if "preferredProvider" in table:
+        result["preferredProvider"] = (
+            None
+            if table["preferredProvider"] is None
+            else _provider(table["preferredProvider"], f"{path}.preferredProvider")
+        )
+    if "currentSessionKey" in table:
+        result["currentSessionKey"] = (
+            None
+            if table["currentSessionKey"] is None
+            else str(
+                _session_key(table["currentSessionKey"], f"{path}.currentSessionKey")
+            )
+        )
+    _optional_integer(result, table, "closedAt", path)
+    if result["status"] is TaskStatus.CLOSED and result.get("closedAt") is None:
+        raise ProtocolError(f"{path}.closedAt is required for a closed task")
+    if result["status"] is TaskStatus.OPEN and result.get("closedAt") is not None:
+        raise ProtocolError(f"{path}.closedAt is invalid for an open task")
     return result
 
 
@@ -705,7 +825,8 @@ def _session_record(
         ),
     }
     _optional_uuid(result, table, "projectId", path, ProjectId)
-    _optional_uuid(result, table, "locationId", path, LocationId)
+    _optional_uuid(result, table, "taskId", path, TaskId)
+    _optional_uuid(result, table, "checkoutId", path, CheckoutId)
     _optional_string(result, table, "name", path, maximum=512)
     _optional_string(result, table, "purpose", path, maximum=4096)
     _optional_string(result, table, "cwd", path, maximum=4096)
@@ -1710,8 +1831,8 @@ def _agent_project(value: object, path: str) -> dict[str, JsonValue]:
             _required(table, "projectId", path), f"{path}.projectId", ProjectId
         ),
         "name": _string(_required(table, "name", path), f"{path}.name", maximum=256),
-        "locationId": _uuid_text(
-            _required(table, "locationId", path), f"{path}.locationId", LocationId
+        "checkoutId": _uuid_text(
+            _required(table, "checkoutId", path), f"{path}.checkoutId", CheckoutId
         ),
         "path": project_path,
         "contextSources": canonical_sources,
@@ -2341,7 +2462,10 @@ class SnapshotEnvelope:
     generated_at: int
     host: HostRecord
     projects: tuple[dict[str, JsonValue], ...] = ()
-    locations: tuple[dict[str, JsonValue], ...] = ()
+    project_repositories: tuple[dict[str, JsonValue], ...] = ()
+    repositories: tuple[dict[str, JsonValue], ...] = ()
+    checkouts: tuple[dict[str, JsonValue], ...] = ()
+    tasks: tuple[dict[str, JsonValue], ...] = ()
     sessions: tuple[dict[str, JsonValue], ...] = ()
     runtimes: tuple[dict[str, JsonValue], ...] = ()
     surfaces: tuple[dict[str, JsonValue], ...] = ()
@@ -2351,7 +2475,7 @@ class SnapshotEnvelope:
     @classmethod
     def from_dict(cls, value: object) -> Self:
         table = _object(value, "envelope")
-        _versions(table)
+        _versions(table, allow_explicit_multiline=True)
         host = HostRecord.from_dict(_required(table, "host", "envelope"))
 
         def record_values(name: str) -> Sequence[Any]:
@@ -2364,13 +2488,29 @@ class SnapshotEnvelope:
             _project_record(item, f"envelope.projects[{index}]")
             for index, item in enumerate(record_values("projects"))
         )
-        locations = tuple(
-            _location_record(
+        project_repositories = tuple(
+            _project_repository_record(item, f"envelope.projectRepositories[{index}]")
+            for index, item in enumerate(record_values("projectRepositories"))
+        )
+        repositories = tuple(
+            _repository_record(item, f"envelope.repositories[{index}]")
+            for index, item in enumerate(record_values("repositories"))
+        )
+        checkouts = tuple(
+            _checkout_record(
                 item,
-                f"envelope.locations[{index}]",
+                f"envelope.checkouts[{index}]",
                 expected_host_id=host.host_id,
             )
-            for index, item in enumerate(record_values("locations"))
+            for index, item in enumerate(record_values("checkouts"))
+        )
+        tasks = tuple(
+            _task_record(
+                item,
+                f"envelope.tasks[{index}]",
+                expected_host_id=host.host_id,
+            )
+            for index, item in enumerate(record_values("tasks"))
         )
         sessions = tuple(
             _session_record(
@@ -2417,7 +2557,9 @@ class SnapshotEnvelope:
             return set(values)
 
         project_ids = unique(projects, "projectId")
-        unique(locations, "locationId")
+        repository_ids = unique(repositories, "repositoryId")
+        unique(checkouts, "checkoutId")
+        unique(tasks, "taskId")
         session_keys = unique(sessions, "sessionKey")
         surface_ids = unique(surfaces, "surfaceId")
         if len({capability.provider for capability in capabilities}) != len(
@@ -2425,30 +2567,90 @@ class SnapshotEnvelope:
         ):
             raise ProtocolError("envelope contains duplicate provider capabilities")
 
-        locations_by_id = {
-            str(location["locationId"]): location for location in locations
+        memberships = {
+            (str(item["projectId"]), str(item["repositoryId"])): item
+            for item in project_repositories
         }
-        for index, location in enumerate(locations):
-            if str(location["projectId"]) not in project_ids:
+        if len(memberships) != len(project_repositories):
+            raise ProtocolError("envelope contains duplicate project memberships")
+        primary_count: dict[str, int] = {}
+        for index, membership in enumerate(project_repositories):
+            project_id = str(membership["projectId"])
+            repository_id = str(membership["repositoryId"])
+            if project_id not in project_ids or repository_id not in repository_ids:
                 raise ProtocolError(
-                    f"envelope.locations[{index}].projectId is not in projects"
+                    f"envelope.projectRepositories[{index}] references unknown identity"
                 )
+            primary_count[project_id] = primary_count.get(project_id, 0) + int(
+                bool(membership["isPrimary"])
+            )
+        for project_id in project_ids:
+            member_count = sum(1 for key in memberships if key[0] == project_id)
+            if member_count and primary_count.get(project_id) != 1:
+                raise ProtocolError(
+                    f"envelope project {project_id} requires one primary repository"
+                )
+
+        checkouts_by_id = {
+            str(checkout["checkoutId"]): checkout for checkout in checkouts
+        }
+        for index, checkout in enumerate(checkouts):
+            if str(checkout["repositoryId"]) not in repository_ids:
+                raise ProtocolError(
+                    f"envelope.checkouts[{index}].repositoryId is not in repositories"
+                )
+        tasks_by_id = {str(task["taskId"]): task for task in tasks}
+        for index, task in enumerate(tasks):
+            project_id = str(task["projectId"])
+            if project_id not in project_ids:
+                raise ProtocolError(
+                    f"envelope.tasks[{index}].projectId is not in projects"
+                )
+            checkout_id = task.get("checkoutId")
+            if checkout_id is not None:
+                checkout = checkouts_by_id.get(str(checkout_id))
+                if checkout is None:
+                    raise ProtocolError(
+                        f"envelope.tasks[{index}].checkoutId is not in checkouts"
+                    )
+                if (project_id, str(checkout["repositoryId"])) not in memberships:
+                    raise ProtocolError(
+                        f"envelope.tasks[{index}] checkout/project disagree"
+                    )
         for index, session in enumerate(sessions):
             project_id = session.get("projectId")
-            location_id = session.get("locationId")
+            task_id = session.get("taskId")
+            checkout_id = session.get("checkoutId")
             if project_id is not None and str(project_id) not in project_ids:
                 raise ProtocolError(
                     f"envelope.sessions[{index}].projectId is not in projects"
                 )
-            if location_id is not None:
-                location = locations_by_id.get(str(location_id))
-                if location is None:
+            if checkout_id is not None:
+                checkout = checkouts_by_id.get(str(checkout_id))
+                if checkout is None:
                     raise ProtocolError(
-                        f"envelope.sessions[{index}].locationId is not in locations"
+                        f"envelope.sessions[{index}].checkoutId is not in checkouts"
                     )
-                if project_id is None or location["projectId"] != project_id:
+                if (
+                    project_id is None
+                    or (str(project_id), str(checkout["repositoryId"]))
+                    not in memberships
+                ):
                     raise ProtocolError(
-                        f"envelope.sessions[{index}] location/project disagree"
+                        f"envelope.sessions[{index}] checkout/project disagree"
+                    )
+            if task_id is not None:
+                task = tasks_by_id.get(str(task_id))
+                if task is None:
+                    raise ProtocolError(
+                        f"envelope.sessions[{index}].taskId is not in tasks"
+                    )
+                if (
+                    task["projectId"] != project_id
+                    or task.get("checkoutId") != checkout_id
+                ):
+                    raise ProtocolError(
+                        f"envelope.sessions[{index}] task context disagrees"
                     )
             if int(session["lastObservedAt"]) < int(session["firstObservedAt"]):
                 raise ProtocolError(
@@ -2471,6 +2673,15 @@ class SnapshotEnvelope:
                         "is not in sessions"
                     )
         sessions_by_key = {str(session["sessionKey"]): session for session in sessions}
+        for index, task in enumerate(tasks):
+            current_session_key = task.get("currentSessionKey")
+            if current_session_key is None:
+                continue
+            session = sessions_by_key.get(str(current_session_key))
+            if session is None or session.get("taskId") != task["taskId"]:
+                raise ProtocolError(
+                    f"envelope.tasks[{index}] current session backreference disagrees"
+                )
         surfaces_by_id = {str(surface["surfaceId"]): surface for surface in surfaces}
         for index, session in enumerate(sessions):
             surface_id = session.get("surfaceId")
@@ -2515,7 +2726,10 @@ class SnapshotEnvelope:
             ),
             host=host,
             projects=projects,
-            locations=locations,
+            project_repositories=project_repositories,
+            repositories=repositories,
+            checkouts=checkouts,
+            tasks=tasks,
             sessions=sessions,
             runtimes=runtimes,
             surfaces=surfaces,
@@ -2533,7 +2747,10 @@ class SnapshotEnvelope:
                 "generatedAt": self.generated_at,
                 "host": self.host.to_dict(),
                 "projects": list(self.projects),
-                "locations": list(self.locations),
+                "projectRepositories": list(self.project_repositories),
+                "repositories": list(self.repositories),
+                "checkouts": list(self.checkouts),
+                "tasks": list(self.tasks),
                 "sessions": list(self.sessions),
                 "runtimes": list(self.runtimes),
                 "surfaces": list(self.surfaces),
@@ -2547,4 +2764,4 @@ class SnapshotEnvelope:
         return normalized._raw_dict()
 
     def to_json(self) -> str:
-        return _dump(self.to_dict())
+        return _dump(self.to_dict(), allow_explicit_multiline=True)

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 import socket
 import tomllib
@@ -13,18 +14,26 @@ from pathlib import Path
 from typing import Any, Never
 
 from .domain import (
+    Checkout,
+    CheckoutId,
+    CheckoutKind,
     HostId,
-    LocationId,
     Project,
     ProjectId,
-    ProjectLocation,
+    ProjectRepository,
     ProviderId,
+    Repository,
+    RepositoryId,
+    RepositoryKind,
     Transport,
     ValidationError,
-    merge_locations,
+    merge_checkouts,
+    merge_project_repositories,
     merge_projects,
+    merge_repositories,
 )
 from .paths import config_path, load_or_create_host_id
+from .repository_discovery import RepositoryDiscoveryError, probe_git_repository
 
 _MAX_CONTEXT_SOURCES = 32
 _DEFAULT_HOOK_LATENCY_BUDGET_MS = 125
@@ -95,7 +104,9 @@ class MemoryConfig:
 @dataclass(frozen=True, slots=True)
 class ProjectCatalog:
     projects: tuple[Project, ...]
-    locations: tuple[ProjectLocation, ...]
+    repositories: tuple[Repository, ...]
+    project_repositories: tuple[ProjectRepository, ...]
+    checkouts: tuple[Checkout, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -114,8 +125,16 @@ class SwitchboardConfig:
         return self.catalog.projects
 
     @property
-    def locations(self) -> tuple[ProjectLocation, ...]:
-        return self.catalog.locations
+    def checkouts(self) -> tuple[Checkout, ...]:
+        return self.catalog.checkouts
+
+    @property
+    def repositories(self) -> tuple[Repository, ...]:
+        return self.catalog.repositories
+
+    @property
+    def project_repositories(self) -> tuple[ProjectRepository, ...]:
+        return self.catalog.project_repositories
 
 
 def _fail(path: str, message: str) -> Never:
@@ -191,7 +210,7 @@ def _transport(value: object, path: str) -> Transport:
         _fail(path, "must be 'tmux'")
 
 
-def _uuid[T: HostId | ProjectId | LocationId](
+def _uuid[T: HostId | ProjectId | RepositoryId | CheckoutId](
     value: object, path: str, value_type: type[T]
 ) -> T:
     try:
@@ -292,7 +311,9 @@ def _parse_context_sources(raw: object, path: str) -> tuple[str, ...]:
 def _parse_projects(raw: object, host_id: HostId) -> ProjectCatalog:
     table = _table(raw, "projects")
     projects: list[Project] = []
-    locations: list[ProjectLocation] = []
+    repositories: list[Repository] = []
+    memberships: list[ProjectRepository] = []
+    checkouts: list[Checkout] = []
     for project_key in sorted(table):
         project_path = f'projects."{project_key}"'
         project_id = _uuid(project_key, project_path, ProjectId)
@@ -304,8 +325,7 @@ def _parse_projects(raw: object, host_id: HostId) -> ProjectCatalog:
                 "aliases",
                 "default_provider",
                 "default_transport",
-                "context_sources",
-                "locations",
+                "repositories",
             },
             project_path,
         )
@@ -322,9 +342,6 @@ def _parse_projects(raw: object, host_id: HostId) -> ProjectCatalog:
             assert alias is not None
             parsed_aliases.append(alias)
         aliases = tuple(parsed_aliases)
-        context_sources = _parse_context_sources(
-            project.get("context_sources"), f"{project_path}.context_sources"
-        )
         try:
             project_record = Project(
                 project_id=project_id,
@@ -342,88 +359,155 @@ def _parse_projects(raw: object, host_id: HostId) -> ProjectCatalog:
                     project.get("default_transport", "tmux"),
                     f"{project_path}.default_transport",
                 ),
-                context_sources=context_sources,
             )
         except ValidationError as exc:
             raise ConfigError(f"{project_path}: {exc}") from exc
         projects.append(project_record)
 
-        locations_raw = project.get("locations", [])
-        if not isinstance(locations_raw, list):
-            _fail(f"{project_path}.locations", "must be an array of tables")
-        for index, location_raw in enumerate(locations_raw):
-            location_path = f"{project_path}.locations[{index}]"
-            location = _table(location_raw, location_path)
+        repositories_raw = project.get("repositories", [])
+        if not isinstance(repositories_raw, list):
+            _fail(f"{project_path}.repositories", "must be an array of tables")
+        for repository_index, repository_raw in enumerate(repositories_raw):
+            repository_path = f"{project_path}.repositories[{repository_index}]"
+            repository = _table(repository_raw, repository_path)
             _known(
-                location,
+                repository,
                 {
-                    "location_id",
-                    "path",
-                    "display_name",
-                    "repository_identity",
-                    "provider_override",
-                    "transport_override",
-                    "is_default",
+                    "repository_id",
+                    "name",
+                    "kind",
+                    "is_primary",
+                    "context_sources",
+                    "checkouts",
                 },
-                location_path,
+                repository_path,
             )
-            for required in ("location_id", "path"):
-                if required not in location:
-                    _fail(f"{location_path}.{required}", "is required")
-            location_id = _uuid(
-                location["location_id"],
-                f"{location_path}.location_id",
-                LocationId,
+            for required in ("repository_id", "name"):
+                if required not in repository:
+                    _fail(f"{repository_path}.{required}", "is required")
+            repository_id = _uuid(
+                repository["repository_id"],
+                f"{repository_path}.repository_id",
+                RepositoryId,
             )
-            local_path = _string(
-                location["path"], f"{location_path}.path", maximum=4096
+            repository_name = _string(
+                repository["name"], f"{repository_path}.name", maximum=256
             )
-            assert local_path is not None
+            assert repository_name is not None
             try:
-                locations.append(
-                    ProjectLocation(
-                        location_id=location_id,
-                        project_id=project_id,
-                        host_id=host_id,
-                        path=Path(local_path),
-                        display_name=_string(
-                            location.get("display_name"),
-                            f"{location_path}.display_name",
-                            maximum=256,
-                            optional=True,
-                        ),
-                        repository_identity=_string(
-                            location.get("repository_identity"),
-                            f"{location_path}.repository_identity",
-                            maximum=1024,
-                            optional=True,
-                        ),
-                        provider_override=(
-                            _provider(
-                                location["provider_override"],
-                                f"{location_path}.provider_override",
-                            )
-                            if "provider_override" in location
-                            else None
-                        ),
-                        transport_override=(
-                            _transport(
-                                location["transport_override"],
-                                f"{location_path}.transport_override",
-                            )
-                            if "transport_override" in location
-                            else None
-                        ),
-                        is_default=_boolean(
-                            location.get("is_default", False),
-                            f"{location_path}.is_default",
-                        ),
-                    )
+                repository_record = Repository(
+                    repository_id=repository_id,
+                    name=repository_name,
+                    kind=RepositoryKind(
+                        _string(
+                            repository.get("kind", "git"),
+                            f"{repository_path}.kind",
+                        )
+                    ),
+                    context_sources=_parse_context_sources(
+                        repository.get("context_sources"),
+                        f"{repository_path}.context_sources",
+                    ),
                 )
-            except ValidationError as exc:
-                raise ConfigError(f"{location_path}: {exc}") from exc
+                membership = ProjectRepository(
+                    project_id=project_id,
+                    repository_id=repository_id,
+                    is_primary=_boolean(
+                        repository.get("is_primary", False),
+                        f"{repository_path}.is_primary",
+                    ),
+                )
+            except (ValueError, ValidationError) as exc:
+                raise ConfigError(f"{repository_path}: {exc}") from exc
+            repositories.append(repository_record)
+            memberships.append(membership)
+
+            checkouts_raw = repository.get("checkouts", [])
+            if not isinstance(checkouts_raw, list):
+                _fail(f"{repository_path}.checkouts", "must be an array of tables")
+            for checkout_index, checkout_raw in enumerate(checkouts_raw):
+                checkout_path = f"{repository_path}.checkouts[{checkout_index}]"
+                checkout = _table(checkout_raw, checkout_path)
+                _known(
+                    checkout,
+                    {
+                        "checkout_id",
+                        "path",
+                        "kind",
+                        "display_name",
+                        "provider_override",
+                        "transport_override",
+                        "is_default",
+                    },
+                    checkout_path,
+                )
+                for required in ("checkout_id", "path"):
+                    if required not in checkout:
+                        _fail(f"{checkout_path}.{required}", "is required")
+                checkout_id = _uuid(
+                    checkout["checkout_id"],
+                    f"{checkout_path}.checkout_id",
+                    CheckoutId,
+                )
+                local_path = _string(
+                    checkout["path"], f"{checkout_path}.path", maximum=4096
+                )
+                assert local_path is not None
+                default_kind = (
+                    "directory"
+                    if repository_record.kind is RepositoryKind.DIRECTORY
+                    else "main"
+                )
+                try:
+                    checkouts.append(
+                        Checkout(
+                            checkout_id=checkout_id,
+                            repository_id=repository_id,
+                            host_id=host_id,
+                            path=Path(local_path),
+                            kind=CheckoutKind(
+                                _string(
+                                    checkout.get("kind", default_kind),
+                                    f"{checkout_path}.kind",
+                                )
+                            ),
+                            display_name=_string(
+                                checkout.get("display_name"),
+                                f"{checkout_path}.display_name",
+                                maximum=256,
+                                optional=True,
+                            ),
+                            provider_override=(
+                                _provider(
+                                    checkout["provider_override"],
+                                    f"{checkout_path}.provider_override",
+                                )
+                                if "provider_override" in checkout
+                                else None
+                            ),
+                            transport_override=(
+                                _transport(
+                                    checkout["transport_override"],
+                                    f"{checkout_path}.transport_override",
+                                )
+                                if "transport_override" in checkout
+                                else None
+                            ),
+                            is_default=_boolean(
+                                checkout.get("is_default", False),
+                                f"{checkout_path}.is_default",
+                            ),
+                        )
+                    )
+                except (ValueError, ValidationError) as exc:
+                    raise ConfigError(f"{checkout_path}: {exc}") from exc
     try:
-        return ProjectCatalog(merge_projects(projects), merge_locations(locations))
+        return ProjectCatalog(
+            merge_projects(projects),
+            merge_repositories(repositories),
+            merge_project_repositories(memberships),
+            merge_checkouts(checkouts),
+        )
     except ValidationError as exc:
         raise ConfigError(str(exc)) from exc
 
@@ -570,9 +654,19 @@ def parse_config(data: bytes | str, *, host_id: HostId) -> SwitchboardConfig:
         raise ConfigError(f"invalid TOML: {exc}") from exc
     except ValueError as exc:
         raise ConfigError(f"invalid TOML value: {exc}") from exc
+    if document:
+        version = document.get("config_version")
+        if version != 2:
+            if "projects" in document:
+                raise ConfigError(
+                    "configuration: config_migration_required; run "
+                    "'swbctl config migrate-v2 --print'"
+                )
+            raise ConfigError("configuration.config_version: must be 2")
     _known(
         document,
         {
+            "config_version",
             "host",
             "providers",
             "remotes",
@@ -620,6 +714,391 @@ def load_config(
     return parse_config(data, host_id=host_id or load_or_create_host_id())
 
 
+def _toml_string(value: str) -> str:
+    return json.dumps(value, ensure_ascii=False)
+
+
+def _toml_array(values: tuple[str, ...] | list[str]) -> str:
+    return "[" + ", ".join(_toml_string(value) for value in values) + "]"
+
+
+def _legacy_projects(raw: object, host_id: HostId) -> ProjectCatalog:
+    table = _table(raw, "projects")
+    projects: list[Project] = []
+    repositories: list[Repository] = []
+    memberships: list[ProjectRepository] = []
+    checkouts: list[Checkout] = []
+    for project_key in sorted(table):
+        path = f'projects."{project_key}"'
+        project_id = _uuid(project_key, path, ProjectId)
+        value = _table(table[project_key], path)
+        _known(
+            value,
+            {
+                "name",
+                "aliases",
+                "default_provider",
+                "default_transport",
+                "context_sources",
+                "locations",
+            },
+            path,
+        )
+        if "name" not in value:
+            _fail(f"{path}.name", "is required")
+        name = _string(value["name"], f"{path}.name", maximum=256)
+        assert name is not None
+        aliases_raw = value.get("aliases", [])
+        if not isinstance(aliases_raw, list):
+            _fail(f"{path}.aliases", "must be an array of strings")
+        aliases = tuple(
+            str(_string(alias, f"{path}.aliases[{index}]", maximum=128))
+            for index, alias in enumerate(aliases_raw)
+        )
+        try:
+            project = Project(
+                project_id=project_id,
+                name=name,
+                aliases=aliases,
+                default_provider=(
+                    _provider(value["default_provider"], f"{path}.default_provider")
+                    if "default_provider" in value
+                    else None
+                ),
+                default_transport=_transport(
+                    value.get("default_transport", "tmux"),
+                    f"{path}.default_transport",
+                ),
+            )
+        except ValidationError as error:
+            raise ConfigError(f"{path}: {error}") from error
+        projects.append(project)
+        locations_raw = value.get("locations", [])
+        if not isinstance(locations_raw, list):
+            _fail(f"{path}.locations", "must be an array of tables")
+        parsed_locations: list[dict[str, object]] = []
+        observations = []
+        directory_location = False
+        for index, raw_location in enumerate(locations_raw):
+            location_path = f"{path}.locations[{index}]"
+            location = _table(raw_location, location_path)
+            _known(
+                location,
+                {
+                    "location_id",
+                    "path",
+                    "display_name",
+                    "repository_identity",
+                    "provider_override",
+                    "transport_override",
+                    "is_default",
+                },
+                location_path,
+            )
+            for required in ("location_id", "path"):
+                if required not in location:
+                    _fail(f"{location_path}.{required}", "is required")
+            checkout_id = _uuid(
+                location["location_id"],
+                f"{location_path}.location_id",
+                CheckoutId,
+            )
+            raw_local_path = _string(
+                location["path"], f"{location_path}.path", maximum=4096
+            )
+            assert raw_local_path is not None
+            local_path = Path(raw_local_path).resolve(strict=False)
+            if not local_path.is_dir():
+                _fail(
+                    location_path, "configured location is not an available directory"
+                )
+            try:
+                observation = probe_git_repository(local_path)
+            except RepositoryDiscoveryError as error:
+                if error.code != "git_probe_failed":
+                    raise ConfigError(f"{location_path}: {error}") from error
+                directory_location = True
+                observation = None
+            if observation is not None:
+                exact = next(
+                    (item for item in observation.checkouts if item.path == local_path),
+                    None,
+                )
+                if exact is None:
+                    _fail(
+                        location_path,
+                        "path must be the exact Git worktree root before migration",
+                    )
+                observations.append(observation)
+            parsed_locations.append(
+                {
+                    "checkout_id": checkout_id,
+                    "path": local_path,
+                    "display_name": _string(
+                        location.get("display_name"),
+                        f"{location_path}.display_name",
+                        maximum=256,
+                        optional=True,
+                    ),
+                    "provider_override": (
+                        _provider(
+                            location["provider_override"],
+                            f"{location_path}.provider_override",
+                        )
+                        if "provider_override" in location
+                        else None
+                    ),
+                    "transport_override": (
+                        _transport(
+                            location["transport_override"],
+                            f"{location_path}.transport_override",
+                        )
+                        if "transport_override" in location
+                        else None
+                    ),
+                    "is_default": _boolean(
+                        location.get("is_default", False),
+                        f"{location_path}.is_default",
+                    ),
+                }
+            )
+        if directory_location and (observations or len(parsed_locations) > 1):
+            _fail(
+                path,
+                "legacy locations do not prove one repository; split them manually",
+            )
+        common_dirs = {observation.git_common_dir for observation in observations}
+        if len(common_dirs) > 1:
+            _fail(
+                path,
+                "legacy locations belong to different Git stores; split them manually",
+            )
+        repository_kind = (
+            RepositoryKind.DIRECTORY if directory_location else RepositoryKind.GIT
+        )
+        repository = Repository(
+            repository_id=RepositoryId(str(project_id)),
+            name=name,
+            kind=repository_kind,
+            context_sources=_parse_context_sources(
+                value.get("context_sources"), f"{path}.context_sources"
+            ),
+        )
+        repositories.append(repository)
+        memberships.append(
+            ProjectRepository(project_id, repository.repository_id, True)
+        )
+        for location in parsed_locations:
+            local_path = location["path"]
+            assert isinstance(local_path, Path)
+            kind = CheckoutKind.DIRECTORY
+            if repository_kind is RepositoryKind.GIT:
+                evidence = next(
+                    item
+                    for observation in observations
+                    for item in observation.checkouts
+                    if item.path == local_path
+                )
+                kind = CheckoutKind(evidence.kind)
+            checkouts.append(
+                Checkout(
+                    checkout_id=location["checkout_id"],
+                    repository_id=repository.repository_id,
+                    host_id=host_id,
+                    path=local_path,
+                    kind=kind,
+                    display_name=location["display_name"],
+                    provider_override=location["provider_override"],
+                    transport_override=location["transport_override"],
+                    is_default=bool(location["is_default"]),
+                )
+            )
+    try:
+        return ProjectCatalog(
+            merge_projects(projects),
+            merge_repositories(repositories),
+            merge_project_repositories(memberships),
+            merge_checkouts(checkouts),
+        )
+    except ValidationError as error:
+        raise ConfigError(str(error)) from error
+
+
+def _render_v2_config(config: SwitchboardConfig) -> str:
+    lines = [
+        "config_version = 2",
+        "",
+        "[host]",
+        f"display_name = {_toml_string(config.host.display_name)}",
+    ]
+    for provider in config.providers:
+        lines.extend(("", f"[providers.{provider.provider.value}]"))
+        lines.append(f"enabled = {'true' if provider.enabled else 'false'}")
+        if provider.executable is not None:
+            lines.append(f"executable = {_toml_string(provider.executable)}")
+    for remote in config.remotes:
+        lines.extend(
+            (
+                "",
+                f"[remotes.{remote.alias}]",
+                f"ssh_target = {_toml_string(remote.ssh_target)}",
+                f"display_name = {_toml_string(remote.display_name)}",
+            )
+        )
+    repositories = {
+        repository.repository_id: repository for repository in config.repositories
+    }
+    memberships = sorted(
+        config.project_repositories,
+        key=lambda item: (
+            str(item.project_id),
+            not item.is_primary,
+            str(item.repository_id),
+        ),
+    )
+    for project in config.projects:
+        project_path = f'projects."{project.project_id}"'
+        lines.extend(("", f"[{project_path}]", f"name = {_toml_string(project.name)}"))
+        if project.aliases:
+            lines.append(f"aliases = {_toml_array(list(project.aliases))}")
+        if project.default_provider is not None:
+            lines.append(
+                f"default_provider = {_toml_string(project.default_provider.value)}"
+            )
+        lines.append(
+            f"default_transport = {_toml_string(project.default_transport.value)}"
+        )
+        for membership in (
+            item for item in memberships if item.project_id == project.project_id
+        ):
+            repository = repositories[membership.repository_id]
+            lines.extend(
+                (
+                    "",
+                    f"[[{project_path}.repositories]]",
+                    f"repository_id = {_toml_string(str(repository.repository_id))}",
+                    f"name = {_toml_string(repository.name)}",
+                    f"kind = {_toml_string(repository.kind.value)}",
+                    f"is_primary = {'true' if membership.is_primary else 'false'}",
+                    "context_sources = "
+                    f"{_toml_array(list(repository.context_sources))}",
+                )
+            )
+            for checkout in sorted(
+                (
+                    item
+                    for item in config.checkouts
+                    if item.repository_id == repository.repository_id
+                ),
+                key=lambda item: str(item.checkout_id),
+            ):
+                lines.extend(
+                    (
+                        "",
+                        f"[[{project_path}.repositories.checkouts]]",
+                        f"checkout_id = {_toml_string(str(checkout.checkout_id))}",
+                        f"path = {_toml_string(str(checkout.path))}",
+                        f"kind = {_toml_string(checkout.kind.value)}",
+                    )
+                )
+                if checkout.display_name is not None:
+                    lines.append(
+                        f"display_name = {_toml_string(checkout.display_name)}"
+                    )
+                if checkout.provider_override is not None:
+                    lines.append(
+                        "provider_override = "
+                        f"{_toml_string(checkout.provider_override.value)}"
+                    )
+                if checkout.transport_override is not None:
+                    lines.append(
+                        "transport_override = "
+                        f"{_toml_string(checkout.transport_override.value)}"
+                    )
+                lines.append(
+                    f"is_default = {'true' if checkout.is_default else 'false'}"
+                )
+    defaults = config.defaults
+    lines.extend(
+        (
+            "",
+            "[defaults]",
+            f"transport = {_toml_string(defaults.transport.value)}",
+            f"refresh_interval_seconds = {defaults.refresh_interval_seconds}",
+            f"staleness_interval_seconds = {defaults.staleness_interval_seconds}",
+            f"recent_parked_limit = {defaults.recent_parked_limit}",
+            f"working_directory = {_toml_string(defaults.working_directory.value)}",
+            "",
+            "[tmux]",
+            f"naming_prefix = {_toml_string(config.tmux.naming_prefix)}",
+            f"launch_timeout_seconds = {config.tmux.launch_timeout_seconds}",
+            "",
+            "[hooks]",
+            f"timeout_seconds = {config.hooks.timeout_seconds}",
+            f"latency_budget_ms = {config.hooks.latency_budget_ms}",
+            "",
+            "[memory]",
+            f"enabled = {'true' if config.memory.enabled else 'false'}",
+            f"command = {_toml_array(list(config.memory.command))}",
+            f"tool = {_toml_string(config.memory.tool)}",
+            f"timeout_seconds = {config.memory.timeout_seconds}",
+        )
+    )
+    return "\n".join(lines) + "\n"
+
+
+def migrate_legacy_config(data: bytes | str, *, host_id: HostId) -> str:
+    """Validate one v1 document and return a non-mutating canonical v2 TOML form."""
+
+    if isinstance(data, str):
+        data = data.encode("utf-8")
+    try:
+        document = tomllib.loads(data.decode("utf-8"))
+    except (UnicodeDecodeError, tomllib.TOMLDecodeError) as error:
+        raise ConfigError(f"invalid legacy TOML: {error}") from error
+    if document.get("config_version") not in {None, 1}:
+        raise ConfigError("legacy configuration version must be absent or 1")
+    _known(
+        document,
+        {
+            "config_version",
+            "host",
+            "providers",
+            "remotes",
+            "projects",
+            "defaults",
+            "tmux",
+            "hooks",
+            "memory",
+        },
+        "configuration",
+    )
+    base = SwitchboardConfig(
+        host=_parse_host(document.get("host", {}), host_id),
+        providers=_parse_providers(document.get("providers", {})),
+        remotes=_parse_remotes(document.get("remotes", {})),
+        catalog=ProjectCatalog((), (), (), ()),
+        defaults=_parse_defaults(document.get("defaults", {})),
+        tmux=_parse_tmux(document.get("tmux", {})),
+        hooks=_parse_hooks(document.get("hooks", {})),
+        memory=_parse_memory(document.get("memory", {})),
+    )
+    catalog = _legacy_projects(document.get("projects", {}), host_id)
+    migrated = SwitchboardConfig(
+        host=base.host,
+        providers=base.providers,
+        remotes=base.remotes,
+        catalog=catalog,
+        defaults=base.defaults,
+        tmux=base.tmux,
+        hooks=base.hooks,
+        memory=base.memory,
+    )
+    rendered = _render_v2_config(migrated)
+    parse_config(rendered, host_id=host_id)
+    return rendered.rstrip("\n")
+
+
 def merge_project_catalogs(
     configs: list[SwitchboardConfig] | tuple[SwitchboardConfig, ...],
 ) -> ProjectCatalog:
@@ -630,8 +1109,18 @@ def merge_project_catalogs(
             projects=merge_projects(
                 [project for config in configs for project in config.projects]
             ),
-            locations=merge_locations(
-                [location for config in configs for location in config.locations]
+            repositories=merge_repositories(
+                [repository for config in configs for repository in config.repositories]
+            ),
+            project_repositories=merge_project_repositories(
+                [
+                    membership
+                    for config in configs
+                    for membership in config.project_repositories
+                ]
+            ),
+            checkouts=merge_checkouts(
+                [checkout for config in configs for checkout in config.checkouts]
             ),
         )
     except ValidationError as exc:

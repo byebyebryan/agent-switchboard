@@ -38,18 +38,18 @@ class ProjectConflictError(ValidationError):
         )
 
 
-class LocationConflictError(ValidationError):
-    """Location declarations with one stable ID disagree."""
+class CheckoutConflictError(ValidationError):
+    """Checkout declarations with one stable ID disagree."""
 
 
-class AmbiguousLocationError(ValidationError):
-    """A path has more than one equally specific configured location."""
+class AmbiguousCheckoutError(ValidationError):
+    """A path has more than one equally specific configured checkout."""
 
-    def __init__(self, path: Path, locations: tuple[ProjectLocation, ...]) -> None:
+    def __init__(self, path: Path, checkouts: tuple[Checkout, ...]) -> None:
         self.path = path
-        self.locations = locations
-        ids = ", ".join(str(location.location_id) for location in locations)
-        super().__init__(f"path {path} matches equally specific locations: {ids}")
+        self.checkouts = checkouts
+        ids = ", ".join(str(checkout.checkout_id) for checkout in checkouts)
+        super().__init__(f"path {path} matches equally specific checkouts: {ids}")
 
 
 class LaunchTransitionError(ValidationError):
@@ -95,7 +95,15 @@ class ProjectId(UUIDId):
     __slots__ = ()
 
 
-class LocationId(UUIDId):
+class RepositoryId(UUIDId):
+    __slots__ = ()
+
+
+class CheckoutId(UUIDId):
+    __slots__ = ()
+
+
+class TaskId(UUIDId):
     __slots__ = ()
 
 
@@ -118,6 +126,22 @@ class ProviderId(StrEnum):
 
 class Transport(StrEnum):
     TMUX = "tmux"
+
+
+class RepositoryKind(StrEnum):
+    GIT = "git"
+    DIRECTORY = "directory"
+
+
+class CheckoutKind(StrEnum):
+    MAIN = "main"
+    WORKTREE = "worktree"
+    DIRECTORY = "directory"
+
+
+class TaskStatus(StrEnum):
+    OPEN = "open"
+    CLOSED = "closed"
 
 
 class LaunchAction(StrEnum):
@@ -225,6 +249,25 @@ def _text(value: str, field: str, *, maximum: int = MAX_NAME_LENGTH) -> str:
     return normalized
 
 
+def _optional_multiline_text(
+    value: str | None, field: str, *, maximum: int = 4096
+) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ValidationError(f"{field} must be a string")
+    normalized = unicodedata.normalize("NFC", value).strip()
+    if not normalized:
+        return None
+    if len(normalized) > maximum:
+        raise ValidationError(f"{field} exceeds {maximum} characters")
+    if any(
+        unicodedata.category(char) == "Cc" and char not in "\n\t" for char in normalized
+    ):
+        raise ValidationError(f"{field} contains control characters")
+    return normalized
+
+
 def sanitize_alias(value: str) -> str:
     """Normalize a user-facing alias without turning it into an identifier."""
 
@@ -281,7 +324,6 @@ class Project:
     aliases: tuple[str, ...] = ()
     default_provider: ProviderId | None = None
     default_transport: Transport = Transport.TMUX
-    context_sources: tuple[str, ...] = ()
     created_at: datetime | None = None
     updated_at: datetime | None = None
 
@@ -301,49 +343,99 @@ class Project:
             "default_transport",
             _enum_value(Transport, self.default_transport, "default transport"),
         )
-        context_sources = tuple(
-            dict.fromkeys(
-                validate_context_source(value) for value in self.context_sources
-            )
-        )
-        object.__setattr__(self, "context_sources", context_sources)
         object.__setattr__(self, "created_at", _aware(self.created_at, "created_at"))
         object.__setattr__(self, "updated_at", _aware(self.updated_at, "updated_at"))
 
 
 @dataclass(frozen=True, slots=True)
-class ProjectLocation:
-    location_id: LocationId
+class Repository:
+    repository_id: RepositoryId
+    name: str
+    kind: RepositoryKind = RepositoryKind.GIT
+    context_sources: tuple[str, ...] = ()
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.repository_id, RepositoryId):
+            object.__setattr__(self, "repository_id", RepositoryId(self.repository_id))
+        object.__setattr__(self, "name", _text(self.name, "repository name"))
+        object.__setattr__(
+            self, "kind", _enum_value(RepositoryKind, self.kind, "repository kind")
+        )
+        object.__setattr__(
+            self,
+            "context_sources",
+            tuple(
+                dict.fromkeys(
+                    validate_context_source(value) for value in self.context_sources
+                )
+            ),
+        )
+        object.__setattr__(self, "created_at", _aware(self.created_at, "created_at"))
+        object.__setattr__(self, "updated_at", _aware(self.updated_at, "updated_at"))
+
+
+@dataclass(frozen=True, slots=True)
+class ProjectRepository:
     project_id: ProjectId
-    host_id: HostId
-    path: Path
-    display_name: str | None = None
-    repository_identity: str | None = None
-    provider_override: ProviderId | None = None
-    transport_override: Transport | None = None
-    is_default: bool = False
-    last_observed_at: datetime | None = None
+    repository_id: RepositoryId
+    is_primary: bool = False
 
     def __post_init__(self) -> None:
         for field_name, field_type in (
-            ("location_id", LocationId),
             ("project_id", ProjectId),
+            ("repository_id", RepositoryId),
+        ):
+            value = getattr(self, field_name)
+            if not isinstance(value, field_type):
+                object.__setattr__(self, field_name, field_type(value))
+        if not isinstance(self.is_primary, bool):
+            raise ValidationError("is_primary must be boolean")
+
+
+@dataclass(frozen=True, slots=True)
+class Checkout:
+    checkout_id: CheckoutId
+    repository_id: RepositoryId
+    host_id: HostId
+    path: Path
+    kind: CheckoutKind = CheckoutKind.MAIN
+    display_name: str | None = None
+    branch: str | None = None
+    head_oid: str | None = None
+    provider_override: ProviderId | None = None
+    transport_override: Transport | None = None
+    is_default: bool = False
+    declared: bool = True
+    present: bool = True
+    last_observed_at: datetime | None = None
+    git_common_dir: Path | None = None
+    git_dir: Path | None = None
+
+    def __post_init__(self) -> None:
+        for field_name, field_type in (
+            ("checkout_id", CheckoutId),
+            ("repository_id", RepositoryId),
             ("host_id", HostId),
         ):
             value = getattr(self, field_name)
             if not isinstance(value, field_type):
                 object.__setattr__(self, field_name, field_type(value))
         object.__setattr__(self, "path", canonical_path(self.path))
+        object.__setattr__(
+            self, "kind", _enum_value(CheckoutKind, self.kind, "checkout kind")
+        )
         if self.display_name is not None:
             object.__setattr__(
-                self, "display_name", _text(self.display_name, "location display name")
+                self, "display_name", _text(self.display_name, "checkout display name")
             )
-        if self.repository_identity is not None:
-            object.__setattr__(
-                self,
-                "repository_identity",
-                _text(self.repository_identity, "repository identity", maximum=1024),
-            )
+        for field_name in ("branch", "head_oid"):
+            value = getattr(self, field_name)
+            if value is not None:
+                object.__setattr__(
+                    self, field_name, _text(value, field_name, maximum=1024)
+                )
         if self.provider_override is not None:
             object.__setattr__(
                 self,
@@ -356,8 +448,13 @@ class ProjectLocation:
                 "transport_override",
                 _enum_value(Transport, self.transport_override, "transport override"),
             )
-        if not isinstance(self.is_default, bool):
-            raise ValidationError("is_default must be boolean")
+        for field_name in ("is_default", "declared", "present"):
+            if not isinstance(getattr(self, field_name), bool):
+                raise ValidationError(f"{field_name} must be boolean")
+        for field_name in ("git_common_dir", "git_dir"):
+            value = getattr(self, field_name)
+            if value is not None:
+                object.__setattr__(self, field_name, canonical_path(value))
         object.__setattr__(
             self,
             "last_observed_at",
@@ -596,7 +693,8 @@ class AgentSession:
     key: SessionKey
     cwd: Path
     project_id: ProjectId | None = None
-    location_id: LocationId | None = None
+    task_id: TaskId | None = None
+    checkout_id: CheckoutId | None = None
     name: str | None = None
     purpose: str | None = None
     created_at: datetime | None = None
@@ -625,7 +723,8 @@ class AgentSession:
         object.__setattr__(self, "cwd", canonical_path(self.cwd))
         for field_name, field_type in (
             ("project_id", ProjectId),
-            ("location_id", LocationId),
+            ("task_id", TaskId),
+            ("checkout_id", CheckoutId),
             ("surface_id", SurfaceId),
             ("latest_handoff_id", HandoffId),
             ("continued_from_handoff_id", HandoffId),
@@ -682,6 +781,71 @@ class AgentSession:
     @property
     def provider_session_id(self) -> UUID:
         return self.key.provider_session_id
+
+
+@dataclass(frozen=True, slots=True)
+class Task:
+    task_id: TaskId
+    host_id: HostId
+    project_id: ProjectId
+    title: str
+    checkout_id: CheckoutId | None = None
+    purpose: str | None = None
+    preferred_provider: ProviderId | None = None
+    status: TaskStatus = TaskStatus.OPEN
+    pinned: bool = False
+    current_session_key: SessionKey | None = None
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+    closed_at: datetime | None = None
+
+    def __post_init__(self) -> None:
+        for field_name, field_type in (
+            ("task_id", TaskId),
+            ("host_id", HostId),
+            ("project_id", ProjectId),
+            ("checkout_id", CheckoutId),
+        ):
+            value = getattr(self, field_name)
+            if value is not None and not isinstance(value, field_type):
+                object.__setattr__(self, field_name, field_type(value))
+        object.__setattr__(self, "title", _text(self.title, "task title"))
+        object.__setattr__(
+            self,
+            "purpose",
+            _optional_multiline_text(self.purpose, "task purpose"),
+        )
+        if self.preferred_provider is not None:
+            object.__setattr__(
+                self,
+                "preferred_provider",
+                _enum_value(
+                    ProviderId,
+                    self.preferred_provider,
+                    "preferred provider",
+                ),
+            )
+        object.__setattr__(
+            self, "status", _enum_value(TaskStatus, self.status, "task status")
+        )
+        if not isinstance(self.pinned, bool):
+            raise ValidationError("pinned must be boolean")
+        if self.current_session_key is not None and not isinstance(
+            self.current_session_key, SessionKey
+        ):
+            object.__setattr__(
+                self,
+                "current_session_key",
+                SessionKey.parse(self.current_session_key),
+            )
+        for field_name in ("created_at", "updated_at", "closed_at"):
+            object.__setattr__(
+                self, field_name, _aware(getattr(self, field_name), field_name)
+            )
+        if self.status is TaskStatus.OPEN and self.closed_at is not None:
+            raise ValidationError("open task cannot have closed_at")
+        if self.status is TaskStatus.CLOSED and self.closed_at is None:
+            raise ValidationError("closed task requires closed_at")
 
 
 def normalize_handoff_text(value: str, field: str) -> str:
@@ -897,7 +1061,8 @@ class LaunchIntent:
     provider: ProviderId
     action: LaunchAction
     project_id: ProjectId | None
-    location_id: LocationId | None
+    task_id: TaskId | None
+    checkout_id: CheckoutId | None
     cwd: Path | None
     source_handoff_id: HandoffId | None
     target_session_key: SessionKey | None
@@ -916,7 +1081,8 @@ class LaunchIntent:
             ("launch_id", LaunchId),
             ("host_id", HostId),
             ("project_id", ProjectId),
-            ("location_id", LocationId),
+            ("task_id", TaskId),
+            ("checkout_id", CheckoutId),
             ("source_handoff_id", HandoffId),
             ("surface_id", SurfaceId),
         ):
@@ -955,13 +1121,16 @@ class LaunchIntent:
             if self.target_session_key.provider is not self.provider:
                 raise ValidationError("target session belongs to a different provider")
         if self.action in {LaunchAction.NEW, LaunchAction.HISTORY}:
-            if not all((self.project_id, self.location_id, self.cwd)):
+            if not all((self.project_id, self.checkout_id, self.cwd)):
                 raise ValidationError(
-                    f"{self.action} launch requires project, location, and cwd"
+                    f"{self.action} launch requires project, checkout, and cwd"
                 )
+            if self.action is LaunchAction.NEW and self.task_id is None:
+                raise ValidationError("new launch requires task")
             if self.action is LaunchAction.HISTORY and (
                 self.provider is not ProviderId.CLAUDE
                 or self.source_handoff_id is not None
+                or self.task_id is not None
             ):
                 raise ValidationError(
                     "history launch requires Claude without a source handoff"
@@ -980,7 +1149,8 @@ class LaunchIntent:
             if any(
                 (
                     self.project_id,
-                    self.location_id,
+                    self.task_id,
+                    self.checkout_id,
                     self.cwd,
                     self.source_handoff_id,
                     self.target_session_key,
@@ -1191,7 +1361,8 @@ class LaunchRequest:
     provider: ProviderId
     target_session_key: SessionKey | None = None
     project_id: ProjectId | None = None
-    location_id: LocationId | None = None
+    task_id: TaskId | None = None
+    checkout_id: CheckoutId | None = None
     cwd: Path | None = None
     source_handoff_id: HandoffId | None = None
 
@@ -1206,7 +1377,8 @@ class LaunchRequest:
         )
         for field_name, field_type in (
             ("project_id", ProjectId),
-            ("location_id", LocationId),
+            ("task_id", TaskId),
+            ("checkout_id", CheckoutId),
             ("source_handoff_id", HandoffId),
         ):
             value = getattr(self, field_name)
@@ -1226,23 +1398,32 @@ class LaunchRequest:
             if self.target_session_key is None:
                 raise ValidationError("open request requires target_session_key")
             if any(
-                (self.project_id, self.location_id, self.cwd, self.source_handoff_id)
+                (
+                    self.project_id,
+                    self.task_id,
+                    self.checkout_id,
+                    self.cwd,
+                    self.source_handoff_id,
+                )
             ):
                 raise ValidationError("open request cannot include new-session context")
         elif self.kind is LaunchRequestKind.NEW:
-            if not all((self.project_id, self.location_id, self.cwd)):
-                raise ValidationError("new request requires project, location, and cwd")
+            if not all((self.project_id, self.task_id, self.checkout_id, self.cwd)):
+                raise ValidationError(
+                    "new request requires project, task, checkout, and cwd"
+                )
             if self.target_session_key is not None:
                 raise ValidationError("new request cannot target an existing session")
         elif self.kind is LaunchRequestKind.HISTORY:
-            if not all((self.project_id, self.location_id, self.cwd)):
+            if not all((self.project_id, self.checkout_id, self.cwd)):
                 raise ValidationError(
-                    "history request requires project, location, and cwd"
+                    "history request requires project, checkout, and cwd"
                 )
             if (
                 self.provider is not ProviderId.CLAUDE
                 or self.target_session_key is not None
                 or self.source_handoff_id is not None
+                or self.task_id is not None
             ):
                 raise ValidationError(
                     "history request requires unbound Claude project context"
@@ -1252,7 +1433,8 @@ class LaunchRequest:
                 (
                     self.target_session_key,
                     self.project_id,
-                    self.location_id,
+                    self.task_id,
+                    self.checkout_id,
                     self.cwd,
                     self.source_handoff_id,
                 )
@@ -1268,7 +1450,8 @@ class LaunchRequest:
         optional: tuple[tuple[str, Any], ...] = (
             ("targetSessionKey", self.target_session_key),
             ("projectId", self.project_id),
-            ("locationId", self.location_id),
+            ("taskId", self.task_id),
+            ("checkoutId", self.checkout_id),
             ("cwd", self.cwd),
             ("sourceHandoffId", self.source_handoff_id),
         )
@@ -1329,7 +1512,6 @@ def merge_projects(
                 "name",
                 "default_provider",
                 "default_transport",
-                "context_sources",
             )
             if getattr(current, field_name) != getattr(project, field_name)
         )
@@ -1351,93 +1533,154 @@ def merge_projects(
     return tuple(merged[key] for key in sorted(merged, key=str))
 
 
-def merge_locations(
-    locations: list[ProjectLocation] | tuple[ProjectLocation, ...],
-) -> tuple[ProjectLocation, ...]:
-    merged: dict[LocationId, ProjectLocation] = {}
-    for location in locations:
-        current = merged.get(location.location_id)
+def merge_repositories(
+    repositories: list[Repository] | tuple[Repository, ...],
+) -> tuple[Repository, ...]:
+    merged: dict[RepositoryId, Repository] = {}
+    for repository in repositories:
+        current = merged.get(repository.repository_id)
+        if current is not None and any(
+            getattr(current, field_name) != getattr(repository, field_name)
+            for field_name in ("name", "kind", "context_sources")
+        ):
+            raise ValidationError(
+                f"repository {repository.repository_id} has conflicting declarations"
+            )
+        merged[repository.repository_id] = current or repository
+    return tuple(merged[key] for key in sorted(merged, key=str))
+
+
+def merge_project_repositories(
+    memberships: list[ProjectRepository] | tuple[ProjectRepository, ...],
+) -> tuple[ProjectRepository, ...]:
+    merged: dict[tuple[ProjectId, RepositoryId], ProjectRepository] = {}
+    primary_by_project: dict[ProjectId, RepositoryId] = {}
+    for membership in memberships:
+        key = (membership.project_id, membership.repository_id)
+        current = merged.get(key)
+        if current is not None and current != membership:
+            raise ValidationError(
+                "project repository membership has conflicting declarations"
+            )
+        if membership.is_primary:
+            existing = primary_by_project.get(membership.project_id)
+            if existing is not None and existing != membership.repository_id:
+                raise ValidationError(
+                    f"project {membership.project_id} has multiple primary repositories"
+                )
+            primary_by_project[membership.project_id] = membership.repository_id
+        merged[key] = membership
+    projects_with_memberships = {item.project_id for item in merged.values()}
+    missing_primary = projects_with_memberships - set(primary_by_project)
+    if missing_primary:
+        project_id = sorted(missing_primary, key=str)[0]
+        raise ValidationError(f"project {project_id} has no primary repository")
+    return tuple(
+        merged[key] for key in sorted(merged, key=lambda item: tuple(map(str, item)))
+    )
+
+
+def merge_checkouts(
+    checkouts: list[Checkout] | tuple[Checkout, ...],
+) -> tuple[Checkout, ...]:
+    merged: dict[CheckoutId, Checkout] = {}
+    for checkout in checkouts:
+        current = merged.get(checkout.checkout_id)
         if current is not None:
             declaration_fields = (
-                "project_id",
+                "repository_id",
                 "host_id",
                 "path",
+                "kind",
                 "display_name",
-                "repository_identity",
+                "branch",
+                "head_oid",
                 "provider_override",
                 "transport_override",
                 "is_default",
+                "declared",
+                "present",
+                "git_common_dir",
+                "git_dir",
             )
             if any(
-                getattr(current, field_name) != getattr(location, field_name)
+                getattr(current, field_name) != getattr(checkout, field_name)
                 for field_name in declaration_fields
             ):
-                raise LocationConflictError(
-                    f"location {location.location_id} has conflicting declarations"
+                raise CheckoutConflictError(
+                    f"checkout {checkout.checkout_id} has conflicting declarations"
                 )
             observed = [
                 value
-                for value in (current.last_observed_at, location.last_observed_at)
+                for value in (current.last_observed_at, checkout.last_observed_at)
                 if value is not None
             ]
-            location = replace(
+            checkout = replace(
                 current, last_observed_at=max(observed) if observed else None
             )
-        merged[location.location_id] = location
-    defaults: set[tuple[ProjectId, HostId]] = set()
-    for location in merged.values():
-        if not location.is_default:
+        merged[checkout.checkout_id] = checkout
+    defaults: set[tuple[RepositoryId, HostId]] = set()
+    for checkout in merged.values():
+        if not checkout.is_default:
             continue
-        key = (location.project_id, location.host_id)
+        key = (checkout.repository_id, checkout.host_id)
         if key in defaults:
-            raise LocationConflictError(
-                f"project {location.project_id} has multiple defaults "
-                f"on {location.host_id}"
+            raise CheckoutConflictError(
+                f"repository {checkout.repository_id} has multiple defaults "
+                f"on {checkout.host_id}"
             )
         defaults.add(key)
     return tuple(merged[key] for key in sorted(merged, key=str))
 
 
-def match_project_location(
+def match_checkout(
     cwd: str | Path,
     host_id: HostId,
-    locations: list[ProjectLocation] | tuple[ProjectLocation, ...],
-) -> ProjectLocation | None:
+    checkouts: list[Checkout] | tuple[Checkout, ...],
+) -> Checkout | None:
     """Apply canonical same-host longest-path containment matching."""
 
     path = canonical_path(cwd)
     if not isinstance(host_id, HostId):
         host_id = HostId(host_id)
     matches = [
-        location
-        for location in locations
-        if location.host_id == host_id
-        and (path == location.path or location.path in path.parents)
+        checkout
+        for checkout in checkouts
+        if checkout.host_id == host_id
+        and (path == checkout.path or checkout.path in path.parents)
     ]
     if not matches:
         return None
-    depth = max(len(location.path.parts) for location in matches)
+    depth = max(len(checkout.path.parts) for checkout in matches)
     most_specific = tuple(
-        location for location in matches if len(location.path.parts) == depth
+        checkout for checkout in matches if len(checkout.path.parts) == depth
     )
-    unique = {location.location_id: location for location in most_specific}
+    unique = {checkout.checkout_id: checkout for checkout in most_specific}
     if len(unique) > 1:
-        raise AmbiguousLocationError(path, tuple(unique.values()))
+        raise AmbiguousCheckoutError(path, tuple(unique.values()))
     return next(iter(unique.values()))
 
 
-def assign_location(
+def assign_checkout(
     session: AgentSession,
-    locations: list[ProjectLocation] | tuple[ProjectLocation, ...],
+    checkouts: list[Checkout] | tuple[Checkout, ...],
+    memberships: list[ProjectRepository] | tuple[ProjectRepository, ...],
 ) -> AgentSession:
-    if session.project_id is not None or session.location_id is not None:
+    if session.project_id is not None or session.checkout_id is not None:
         return session
-    location = match_project_location(session.cwd, session.host_id, locations)
-    if location is None:
+    checkout = match_checkout(session.cwd, session.host_id, checkouts)
+    if checkout is None:
+        return session
+    projects = {
+        membership.project_id
+        for membership in memberships
+        if membership.repository_id == checkout.repository_id
+    }
+    if len(projects) != 1:
         return session
     return replace(
         session,
-        project_id=location.project_id,
-        location_id=location.location_id,
-        metadata_source="location_match",
+        project_id=next(iter(projects)),
+        checkout_id=checkout.checkout_id,
+        metadata_source="checkout_match",
     )

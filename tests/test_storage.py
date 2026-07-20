@@ -27,6 +27,7 @@ from agent_switchboard.storage import (
     Registry,
     RequestConflict,
     StorageError,
+    TaskConflict,
     launch_request_fingerprint,
 )
 
@@ -37,7 +38,8 @@ def stable_uuid(label: str) -> str:
 
 HOST_ID = "11111111-1111-4111-8111-111111111111"
 PROJECT_ID = stable_uuid("project-switchboard")
-LOCATION_ID = stable_uuid("location-main")
+LOCATION_ID = stable_uuid("checkout-main")
+TASK_ID = stable_uuid("task-main")
 SESSION_ID = "22222222-2222-4222-8222-222222222222"
 SECOND_SESSION_ID = "33333333-3333-4333-8333-333333333333"
 SESSION_KEY = f"{HOST_ID}:codex:{SESSION_ID}"
@@ -60,9 +62,9 @@ def project_catalog(path: str = "/work/switchboard") -> list[dict[str, object]]:
             "default_provider": "codex",
             "default_transport": "tmux",
             "context_sources": ["AGENTS.md", "README.md"],
-            "locations": [
+            "checkouts": [
                 {
-                    "location_id": LOCATION_ID,
+                    "checkout_id": LOCATION_ID,
                     "path": path,
                     "display_name": "main checkout",
                     "repository_identity": "example/agent-switchboard",
@@ -78,6 +80,14 @@ def registry(tmp_path) -> Registry:
     value = Registry(tmp_path / "switchboard.db")
     value.upsert_host(HOST_ID, "starship", is_local=True, observed_at=10)
     value.materialize_projects(HOST_ID, project_catalog(), observed_at=20)
+    value.create_task(
+        task_id=TASK_ID,
+        host_id=HOST_ID,
+        project_id=PROJECT_ID,
+        checkout_id=LOCATION_ID,
+        title="Storage test task",
+        observed_at=21,
+    )
     yield value
     value.close()
 
@@ -96,7 +106,7 @@ def add_session(
             "provider": provider,
             "provider_session_id": provider_session_id,
             "project_id": PROJECT_ID,
-            "location_id": LOCATION_ID,
+            "checkout_id": LOCATION_ID,
             "cwd": "/work/switchboard",
             "runtime_presence": "live",
             "resumability": "resumable",
@@ -117,7 +127,7 @@ def resume_request(session_key: str = SESSION_KEY) -> dict[str, object]:
         "provider": "codex",
         "action": "resume",
         "project_id": PROJECT_ID,
-        "location_id": LOCATION_ID,
+        "checkout_id": LOCATION_ID,
         "cwd": "/work/switchboard",
         "source_handoff_id": None,
         "target_session_key": session_key,
@@ -131,12 +141,87 @@ def new_request() -> dict[str, object]:
         "provider": "codex",
         "action": "new",
         "project_id": PROJECT_ID,
-        "location_id": LOCATION_ID,
+        "task_id": TASK_ID,
+        "checkout_id": LOCATION_ID,
         "cwd": "/work/switchboard",
         "source_handoff_id": None,
         "target_session_key": None,
         "transport": "tmux",
     }
+
+
+def test_task_creation_and_launch_reservation_are_atomic_and_idempotent(
+    registry: Registry,
+) -> None:
+    task_id = stable_uuid("atomic-created-task")
+    request_id = stable_uuid("atomic-created-request")
+    request = new_request() | {"task_id": task_id}
+    creation = {
+        "task_id": task_id,
+        "title": "Atomic task creation",
+        "purpose": "Prove retries do not duplicate tasks",
+        "preferred_provider": "codex",
+    }
+
+    first = registry.reserve_launch(
+        request,
+        request_id=request_id,
+        launch_id=stable_uuid("atomic-created-launch"),
+        lease_owner="atomic-test",
+        capability_hash=digest("atomic-created"),
+        task_create=creation,
+        created_at=100,
+        expires_at=200,
+    )
+    retry = registry.reserve_launch(
+        request,
+        request_id=request_id,
+        launch_id=stable_uuid("ignored-retry-launch"),
+        lease_owner="atomic-retry",
+        capability_hash=digest("ignored-retry"),
+        task_create=creation,
+        created_at=110,
+        expires_at=210,
+    )
+
+    assert first.kind == "created"
+    assert retry.kind == "idempotent"
+    assert retry.launch["launch_id"] == first.launch["launch_id"]
+    assert registry.get_task(task_id)["title"] == "Atomic task creation"
+    assert (
+        len(
+            [
+                task
+                for task in registry.list_tasks(host_id=HOST_ID)
+                if task["task_id"] == task_id
+            ]
+        )
+        == 1
+    )
+
+    conflicting_task_id = stable_uuid("atomic-conflicting-task")
+    with pytest.raises(RequestConflict):
+        registry.reserve_launch(
+            request | {"task_id": conflicting_task_id},
+            request_id=request_id,
+            lease_owner="atomic-conflict",
+            capability_hash=digest("atomic-conflict"),
+            task_create=creation | {"task_id": conflicting_task_id},
+            created_at=120,
+            expires_at=220,
+        )
+    assert registry.get_task(conflicting_task_id) is None
+
+    with pytest.raises(TaskConflict) as missing_task:
+        registry.reserve_launch(
+            new_request() | {"task_id": None},
+            request_id=stable_uuid("taskless-request"),
+            lease_owner="taskless",
+            capability_hash=digest("taskless"),
+            created_at=120,
+            expires_at=220,
+        )
+    assert missing_task.value.code == "task_required"
 
 
 def remote_snapshot(
@@ -145,12 +230,15 @@ def remote_snapshot(
     host_id: str = REMOTE_HOST_ID,
 ) -> dict[str, object]:
     return {
-        "schemaVersion": 1,
-        "protocolVersion": 1,
+        "schemaVersion": 2,
+        "protocolVersion": 2,
         "generatedAt": generated_at,
         "host": {"hostId": host_id, "displayName": "remote host"},
         "projects": [],
-        "locations": [],
+        "projectRepositories": [],
+        "repositories": [],
+        "checkouts": [],
+        "tasks": [],
         "sessions": [],
         "runtimes": [],
         "surfaces": [],
@@ -265,9 +353,9 @@ def test_project_materialization_marks_removed_rows_undeclared_and_keeps_history
     second_project = {
         "project_id": stable_uuid("project-old"),
         "name": "old project",
-        "locations": [
+        "checkouts": [
             {
-                "location_id": stable_uuid("location-old"),
+                "checkout_id": stable_uuid("checkout-old"),
                 "path": "/work/old",
                 "is_default": True,
             }
@@ -283,7 +371,7 @@ def test_project_materialization_marks_removed_rows_undeclared_and_keeps_history
             "provider": "codex",
             "provider_session_id": "66666666-6666-4666-8666-666666666666",
             "project_id": stable_uuid("project-old"),
-            "location_id": stable_uuid("location-old"),
+            "checkout_id": stable_uuid("checkout-old"),
             "first_observed_at": 41,
             "last_observed_at": 41,
         }
@@ -296,10 +384,19 @@ def test_project_materialization_marks_removed_rows_undeclared_and_keeps_history
     )
     by_id = {project["project_id"]: project for project in materialized}
     assert by_id[PROJECT_ID]["declared"] == 1
-    assert by_id[PROJECT_ID]["locations"][0]["location_id"] == LOCATION_ID
-    assert by_id[PROJECT_ID]["locations"][0]["path"] == "/work/moved-switchboard"
+    assert (
+        by_id[PROJECT_ID]["repositories"][0]["checkouts"][0]["checkout_id"]
+        == LOCATION_ID
+    )
+    assert (
+        by_id[PROJECT_ID]["repositories"][0]["checkouts"][0]["path"]
+        == "/work/moved-switchboard"
+    )
     assert by_id[stable_uuid("project-old")]["declared"] == 0
-    assert by_id[stable_uuid("project-old")]["locations"][0]["declared"] == 0
+    assert (
+        by_id[stable_uuid("project-old")]["repositories"][0]["checkouts"][0]["declared"]
+        == 0
+    )
     assert (
         registry.get_session(f"{HOST_ID}:codex:66666666-6666-4666-8666-666666666666")
         is not None
@@ -324,9 +421,9 @@ def test_materialization_rejects_identity_conflicts_without_partial_changes(
         {
             "project_id": stable_uuid("another-project"),
             "name": "another",
-            "locations": [
+            "checkouts": [
                 {
-                    "location_id": LOCATION_ID,
+                    "checkout_id": LOCATION_ID,
                     "path": "/work/another",
                     "is_default": True,
                 }
@@ -336,9 +433,34 @@ def test_materialization_rejects_identity_conflicts_without_partial_changes(
     with pytest.raises(IdentityConflict, match="already belongs"):
         registry.materialize_projects(HOST_ID, conflicting, observed_at=40)
 
+    changed_repository_kind = [
+        {
+            "project_id": PROJECT_ID,
+            "name": "switchboard",
+            "repositories": [
+                {
+                    "repository_id": PROJECT_ID,
+                    "name": "switchboard",
+                    "kind": "directory",
+                    "is_primary": True,
+                    "checkouts": [
+                        {
+                            "checkout_id": LOCATION_ID,
+                            "path": "/work/switchboard",
+                            "kind": "directory",
+                            "is_default": True,
+                        }
+                    ],
+                }
+            ],
+        }
+    ]
+    with pytest.raises(IdentityConflict, match="changed kind"):
+        registry.materialize_projects(HOST_ID, changed_repository_kind, observed_at=41)
+
     projects = registry.list_projects()
     assert [project["project_id"] for project in projects] == [PROJECT_ID]
-    assert projects[0]["locations"][0]["path"] == "/work/switchboard"
+    assert projects[0]["repositories"][0]["checkouts"][0]["path"] == "/work/switchboard"
 
     with pytest.raises(StorageError, match="must be absolute"):
         registry.materialize_projects(
@@ -359,13 +481,16 @@ def test_storage_rejects_unicode_controls_before_retaining_metadata(
         )
     assert registry.get_host(new_host_id) is None
 
-    with pytest.raises(StorageError, match="location path contains terminal control"):
+    with pytest.raises(StorageError, match="checkout path contains terminal control"):
         registry.materialize_projects(
             HOST_ID,
             project_catalog(f"/work/{controlled}switchboard"),
             observed_at=30,
         )
-    assert registry.list_projects()[0]["locations"][0]["path"] == "/work/switchboard"
+    assert (
+        registry.list_projects()[0]["repositories"][0]["checkouts"][0]["path"]
+        == "/work/switchboard"
+    )
 
     launch_id = stable_uuid("controlled-launch")
     with pytest.raises(StorageError, match="cwd contains terminal control"):
@@ -418,7 +543,7 @@ def test_storage_rejects_unicode_controls_before_retaining_metadata(
     assert failed["error_detail"] == "line one\nline two\tcontext"
 
 
-def test_session_upsert_preserves_unsupplied_curation_and_checks_location(
+def test_session_upsert_preserves_unsupplied_curation_and_checks_checkout(
     registry: Registry,
 ) -> None:
     first = add_session(registry)
@@ -539,11 +664,11 @@ def test_session_upsert_preserves_unsupplied_curation_and_checks_location(
     other_host_id = "77777777-7777-4777-8777-777777777777"
     other_session_id = "88888888-8888-4888-8888-888888888888"
     registry.upsert_host(other_host_id, "other", observed_at=60)
-    with pytest.raises(sqlite3.IntegrityError, match="location does not match"):
+    with pytest.raises(sqlite3.IntegrityError, match="checkout does not match"):
         registry.connection.execute(
             """
             INSERT INTO sessions(
-                session_key, project_id, location_id, provider,
+                session_key, project_id, checkout_id, provider,
                 provider_session_id, host_id, first_observed_at, last_observed_at
             ) VALUES (?, ?, ?, 'claude', ?, ?, 60, 60)
             """,
@@ -901,6 +1026,7 @@ def test_continuation_source_resolution_and_atomic_latest_reservation(
     registry: Registry,
 ) -> None:
     add_session(registry)
+    registry.adopt_session(task_id=TASK_ID, session_key=SESSION_KEY, observed_at=90)
     first = registry.curate_session_handoff(
         SESSION_KEY,
         host_id=HOST_ID,
@@ -924,6 +1050,7 @@ def test_continuation_source_resolution_and_atomic_latest_reservation(
         handoff_id=stable_uuid("continuation-second"),
         summary="Second handoff.",
         next_action="Reserve the exact continuation.",
+        wrap=True,
         observed_at=110,
     )
     assert second.handoff is not None
@@ -986,14 +1113,14 @@ def test_continuation_reservation_rejects_missing_or_changed_source(
         host_id=HOST_ID,
         handoff_id=stable_uuid("changed-source"),
         summary="Source before change.",
-        next_action="Detect changed location.",
+        next_action="Detect changed checkout.",
         observed_at=110,
     )
     assert handoff.handoff is not None
     request = new_request()
     request["source_handoff_id"] = handoff.handoff["handoff_id"]
     request["cwd"] = "/work/other"
-    with pytest.raises(StorageError, match="project location changed"):
+    with pytest.raises(StorageError, match="project checkout changed"):
         registry.reserve_launch(
             request,
             request_id=stable_uuid("changed-source-request"),
@@ -1171,7 +1298,7 @@ def test_launch_state_machine_and_manager_uniqueness(registry: Registry) -> None
         "provider": "claude",
         "action": "manage",
         "project_id": None,
-        "location_id": None,
+        "checkout_id": None,
         "cwd": None,
         "source_handoff_id": None,
         "target_session_key": None,
@@ -1373,7 +1500,7 @@ def test_new_launch_atomically_binds_provider_session_and_surface(
     )
     assert result.launch["lease_owner"] is None
     assert result.session["project_id"] == PROJECT_ID
-    assert result.session["location_id"] == LOCATION_ID
+    assert result.session["checkout_id"] == LOCATION_ID
     assert result.session["cwd"] == "/work/switchboard"
     assert result.session["metadata_source"] == "launch"
     assert result.session["name"] == "Provider launch title"
@@ -2230,7 +2357,7 @@ def test_observation_and_event_links_require_coherent_identity(
                     "provider": provider,
                     "action": "manage",
                     "project_id": None,
-                    "location_id": None,
+                    "checkout_id": None,
                     "cwd": None,
                     "source_handoff_id": None,
                     "target_session_key": None,
@@ -2476,8 +2603,8 @@ def test_remote_failure_retains_last_successful_snapshot(registry: Registry) -> 
         "snap",
         snapshot,
         remote_host_id=REMOTE_HOST_ID,
-        schema_version=1,
-        protocol_version=1,
+        schema_version=2,
+        protocol_version=2,
         observed_at=110,
         received_at=120,
     )
@@ -2519,8 +2646,8 @@ def test_remote_snapshot_is_canonical_and_atomically_replaced(
         "remote",
         first_snapshot,
         remote_host_id=REMOTE_HOST_ID,
-        schema_version=1,
-        protocol_version=1,
+        schema_version=2,
+        protocol_version=2,
         observed_at=110,
         received_at=120,
     )
@@ -2530,8 +2657,8 @@ def test_remote_snapshot_is_canonical_and_atomically_replaced(
         "remote",
         remote_snapshot(130),
         remote_host_id=REMOTE_HOST_ID,
-        schema_version=1,
-        protocol_version=1,
+        schema_version=2,
+        protocol_version=2,
         observed_at=130,
         received_at=140,
     )
@@ -2548,8 +2675,8 @@ def test_remote_completions_and_snapshot_observations_are_monotonic(
         "ordered",
         remote_snapshot(110),
         remote_host_id=REMOTE_HOST_ID,
-        schema_version=1,
-        protocol_version=1,
+        schema_version=2,
+        protocol_version=2,
         observed_at=110,
         received_at=120,
     )
@@ -2564,8 +2691,8 @@ def test_remote_completions_and_snapshot_observations_are_monotonic(
         "ordered",
         remote_snapshot(130),
         remote_host_id=REMOTE_HOST_ID,
-        schema_version=1,
-        protocol_version=1,
+        schema_version=2,
+        protocol_version=2,
         observed_at=130,
         received_at=140,
     )
@@ -2575,8 +2702,8 @@ def test_remote_completions_and_snapshot_observations_are_monotonic(
             "ordered",
             remote_snapshot(125),
             remote_host_id=REMOTE_HOST_ID,
-            schema_version=1,
-            protocol_version=1,
+            schema_version=2,
+            protocol_version=2,
             observed_at=125,
             received_at=150,
         )
@@ -2589,8 +2716,8 @@ def test_remote_completions_and_snapshot_observations_are_monotonic(
             "ordered",
             conflicting,
             remote_host_id=REMOTE_HOST_ID,
-            schema_version=1,
-            protocol_version=1,
+            schema_version=2,
+            protocol_version=2,
             observed_at=130,
             received_at=160,
         )
@@ -2604,8 +2731,8 @@ def test_remote_completions_and_snapshot_observations_are_monotonic(
             "ordered",
             remote_snapshot(180),
             remote_host_id=REMOTE_HOST_ID,
-            schema_version=1,
-            protocol_version=1,
+            schema_version=2,
+            protocol_version=2,
             observed_at=180,
             received_at=169,
         )
@@ -2624,8 +2751,8 @@ def test_remote_snapshot_rejects_unsafe_or_mismatched_envelopes(
             "remote",
             unsafe,
             remote_host_id=REMOTE_HOST_ID,
-            schema_version=1,
-            protocol_version=1,
+            schema_version=2,
+            protocol_version=2,
             observed_at=110,
         )
     controlled = remote_snapshot(110)
@@ -2638,18 +2765,18 @@ def test_remote_snapshot_rejects_unsafe_or_mismatched_envelopes(
             "remote",
             controlled,
             remote_host_id=REMOTE_HOST_ID,
-            schema_version=1,
-            protocol_version=1,
+            schema_version=2,
+            protocol_version=2,
             observed_at=110,
         )
-    incompatible = {**remote_snapshot(110), "protocolVersion": 2}
+    incompatible = {**remote_snapshot(110), "protocolVersion": 1}
     with pytest.raises(ProtocolError, match="not supported"):
         registry.store_remote_snapshot(
             "remote",
             incompatible,
             remote_host_id=REMOTE_HOST_ID,
-            schema_version=1,
-            protocol_version=2,
+            schema_version=2,
+            protocol_version=1,
             observed_at=110,
         )
     with pytest.raises(IdentityConflict, match="expected remote host"):
@@ -2657,8 +2784,8 @@ def test_remote_snapshot_rejects_unsafe_or_mismatched_envelopes(
             "remote",
             remote_snapshot(110),
             remote_host_id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
-            schema_version=1,
-            protocol_version=1,
+            schema_version=2,
+            protocol_version=2,
             observed_at=110,
         )
     with pytest.raises(StorageError, match="schema argument"):
@@ -2666,8 +2793,8 @@ def test_remote_snapshot_rejects_unsafe_or_mismatched_envelopes(
             "remote",
             remote_snapshot(110),
             remote_host_id=REMOTE_HOST_ID,
-            schema_version=2,
-            protocol_version=1,
+            schema_version=1,
+            protocol_version=2,
             observed_at=110,
         )
     with pytest.raises(StorageError, match="observed_at"):
@@ -2675,8 +2802,8 @@ def test_remote_snapshot_rejects_unsafe_or_mismatched_envelopes(
             "remote",
             remote_snapshot(110),
             remote_host_id=REMOTE_HOST_ID,
-            schema_version=1,
-            protocol_version=1,
+            schema_version=2,
+            protocol_version=2,
             observed_at=111,
         )
 

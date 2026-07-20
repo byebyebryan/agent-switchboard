@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 2,
+  "protocolVersion": 2,
+  "capability": {
+    "provider": "claude",
+    "available": true,
+    "providerVersion": "2.1.210",
+    "testedContractRange": {"minimum": "2.1.210", "maximum": "2.1.210"},
+    "features": ["hooks", "native_resume", "tmux_runtime"],
+    "schemaFingerprint": null,
+    "degradedReasons": [],
+    "futureField": "ignored"
+  },
+  "futureEnvelopeField": true
+}

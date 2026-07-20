@@ -69,15 +69,15 @@ def test_hooks_config_defaults_custom_values_and_validation() -> None:
     assert default.hooks == HooksConfig(timeout_seconds=1, latency_budget_ms=125)
 
     custom = parse_config(
-        "[hooks]\ntimeout_seconds=3\nlatency_budget_ms=750\n",
+        "config_version=2\n[hooks]\ntimeout_seconds=3\nlatency_budget_ms=750\n",
         host_id=HOST_ID,
     )
     assert custom.hooks == HooksConfig(timeout_seconds=3, latency_budget_ms=750)
 
     for document in (
-        "[hooks]\ntimeout_seconds=0\n",
-        "[hooks]\nlatency_budget_ms=0\n",
-        "[hooks]\nunknown=true\n",
+        "config_version=2\n[hooks]\ntimeout_seconds=0\n",
+        "config_version=2\n[hooks]\nlatency_budget_ms=0\n",
+        "config_version=2\n[hooks]\nunknown=true\n",
     ):
         with pytest.raises(ConfigError):
             parse_config(document, host_id=HOST_ID)
@@ -899,6 +899,11 @@ def test_doctor_cli_returns_health_exit_status(
     swbctl = tmp_path / "swbctl"
     swbctl.touch(mode=0o755)
     monkeypatch.setattr(cli_module, "resolve_swbctl_executable", lambda: swbctl)
+    monkeypatch.setattr(
+        cli_module,
+        "load_config",
+        lambda **_options: parse_config("", host_id=HOST_ID),
+    )
     monkeypatch.setattr(
         cli_module,
         "run_all_doctors",

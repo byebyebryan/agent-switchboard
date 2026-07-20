@@ -13,7 +13,7 @@ from agent_switchboard.migrations import (
     MigrationError,
     migrate,
 )
-from agent_switchboard.storage import connect_database
+from agent_switchboard.storage import Registry, connect_database
 
 
 def configured_connection(path: str) -> sqlite3.Connection:
@@ -43,7 +43,7 @@ def test_migrations_are_explicit_contiguous_and_idempotent(tmp_path) -> None:
     database = tmp_path / "switchboard.db"
     connection = configured_connection(str(database))
 
-    assert [migration.version for migration in MIGRATIONS] == [1, 2, 3, 4, 5, 6]
+    assert [migration.version for migration in MIGRATIONS] == [1, 2, 3, 4, 5, 6, 7, 8]
     assert [migration.name for migration in MIGRATIONS] == [
         "initial_registry",
         "remote_snapshot_cache",
@@ -51,6 +51,8 @@ def test_migrations_are_explicit_contiguous_and_idempotent(tmp_path) -> None:
         "runtime_truth_ordering",
         "history_launch",
         "agent_tools",
+        "repository_checkouts",
+        "tasks",
     ]
     assert migrate(connection, now=100) == CURRENT_SCHEMA_VERSION
     assert migrate(connection, now=200) == CURRENT_SCHEMA_VERSION
@@ -65,11 +67,13 @@ def test_migrations_are_explicit_contiguous_and_idempotent(tmp_path) -> None:
         (4, "runtime_truth_ordering", 100),
         (5, "history_launch", 100),
         (6, "agent_tools", 100),
+        (7, "repository_checkouts", 100),
+        (8, "tasks", 100),
     ]
-    assert connection.execute("PRAGMA user_version").fetchone()[0] == 6
+    assert connection.execute("PRAGMA user_version").fetchone()[0] == 8
     assert dict(
         connection.execute("SELECT key, value FROM registry_metadata").fetchall()
-    ) == {"protocol_version": "1", "schema_version": "6"}
+    ) == {"protocol_version": "2", "schema_version": "8"}
     assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
     connection.close()
 
@@ -86,7 +90,7 @@ def test_concurrent_first_open_is_serialized_across_32_processes(tmp_path) -> No
             (
                 CURRENT_SCHEMA_VERSION,
                 {
-                    "protocol_version": "1",
+                    "protocol_version": "2",
                     "schema_version": str(CURRENT_SCHEMA_VERSION),
                 },
             )
@@ -116,7 +120,7 @@ def test_upgrade_from_v1_preserves_registry_rows(tmp_path) -> None:
     connection.close()
 
     upgraded = connect_database(database)
-    assert upgraded.execute("PRAGMA user_version").fetchone()[0] == 6
+    assert upgraded.execute("PRAGMA user_version").fetchone()[0] == 8
     assert (
         upgraded.execute(
             """
@@ -141,6 +145,120 @@ def test_upgrade_from_v1_preserves_registry_rows(tmp_path) -> None:
     )
     assert upgraded.execute("PRAGMA foreign_key_check").fetchall() == []
     upgraded.close()
+
+
+def test_v6_to_v8_preserves_identity_and_leaves_sessions_in_inbox(tmp_path) -> None:
+    database = tmp_path / "switchboard.db"
+    connection = configured_connection(str(database))
+    assert migrate(connection, target_version=6, now=10) == 6
+    host_id = "11111111-1111-4111-8111-111111111111"
+    project_id = stable_uuid("v6-project")
+    location_id = stable_uuid("v6-location")
+    session_id = stable_uuid("v6-session")
+    session_key = f"{host_id}:codex:{session_id}"
+    connection.execute(
+        """
+        INSERT INTO hosts(host_id, display_name, is_local, created_at, updated_at)
+        VALUES (?, 'host', 1, 10, 10)
+        """,
+        (host_id,),
+    )
+    connection.execute(
+        """
+        INSERT INTO projects(
+            project_id, name, aliases_json, default_provider,
+            default_transport, context_sources_json, declared,
+            created_at, updated_at
+        ) VALUES (?, 'Switchboard', '[]', 'codex', 'tmux',
+                  '["README.md"]', 1, 11, 11)
+        """,
+        (project_id,),
+    )
+    connection.execute(
+        """
+        INSERT INTO project_locations(
+            location_id, project_id, host_id, path, display_name,
+            is_default, declared, last_observed_at, created_at, updated_at
+        ) VALUES (?, ?, ?, '/work/switchboard', 'main', 1, 1, 12, 12, 12)
+        """,
+        (location_id, project_id, host_id),
+    )
+    connection.execute(
+        """
+        INSERT INTO sessions(
+            session_key, project_id, location_id, provider,
+            provider_session_id, cwd, host_id, first_observed_at,
+            last_observed_at
+        ) VALUES (?, ?, ?, 'codex', ?, '/work/switchboard', ?, 13, 13)
+        """,
+        (session_key, project_id, location_id, session_id, host_id),
+    )
+
+    assert migrate(connection, now=20) == 8
+
+    repository = connection.execute(
+        "SELECT * FROM repositories WHERE repository_id = ?", (project_id,)
+    ).fetchone()
+    membership = connection.execute(
+        "SELECT * FROM project_repositories WHERE project_id = ?", (project_id,)
+    ).fetchone()
+    checkout = connection.execute(
+        "SELECT * FROM checkouts WHERE checkout_id = ?", (location_id,)
+    ).fetchone()
+    session = connection.execute(
+        "SELECT * FROM sessions WHERE session_key = ?", (session_key,)
+    ).fetchone()
+    assert repository["context_sources_json"] == '["README.md"]'
+    assert repository["kind"] == "git"
+    assert repository["kind_provisional"] == 1
+    assert membership["repository_id"] == project_id
+    assert membership["is_primary"] == 1
+    assert checkout["repository_id"] == project_id
+    assert checkout["kind"] == "main"
+    assert session["checkout_id"] == location_id
+    assert session["task_id"] is None
+    assert connection.execute("SELECT COUNT(*) FROM tasks").fetchone()[0] == 0
+    assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
+    connection.close()
+
+    with Registry(database) as registry:
+        registry.materialize_projects(
+            host_id,
+            [
+                {
+                    "project_id": project_id,
+                    "name": "Switchboard",
+                    "default_provider": "codex",
+                    "default_transport": "tmux",
+                    "repositories": [
+                        {
+                            "repository_id": project_id,
+                            "name": "Switchboard",
+                            "kind": "directory",
+                            "is_primary": True,
+                            "context_sources": ["README.md"],
+                            "checkouts": [
+                                {
+                                    "checkout_id": location_id,
+                                    "path": "/work/switchboard",
+                                    "kind": "directory",
+                                    "is_default": True,
+                                }
+                            ],
+                        }
+                    ],
+                }
+            ],
+            observed_at=30,
+        )
+    verified = configured_connection(str(database))
+    corrected = verified.execute(
+        "SELECT kind, kind_provisional FROM repositories WHERE repository_id = ?",
+        (project_id,),
+    ).fetchone()
+    assert (corrected["kind"], corrected["kind_provisional"]) == ("directory", 0)
+    assert verified.execute("PRAGMA foreign_key_check").fetchall() == []
+    verified.close()
 
 
 def test_upgrade_from_v4_preserves_launches_and_adds_claude_history(tmp_path) -> None:
@@ -213,7 +331,7 @@ def test_upgrade_from_v4_preserves_launches_and_adds_claude_history(tmp_path) ->
         """
         INSERT INTO launch_intents(
             launch_id, request_id, request_fingerprint, host_id, provider,
-            action, project_id, location_id, cwd, transport, state,
+            action, project_id, checkout_id, cwd, transport, state,
             lease_owner, capability_hash, created_at, updated_at, expires_at
         ) VALUES (?, ?, ?, ?, 'claude', 'history', ?, ?, '/work/project',
                   'tmux', 'reserved', 'worker', ?, 20, 20, 100)

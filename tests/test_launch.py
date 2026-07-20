@@ -8,6 +8,7 @@ from uuid import UUID
 import pytest
 
 from agent_switchboard.domain import (
+    CheckoutId,
     HandoffId,
     HostId,
     LaunchAction,
@@ -18,12 +19,12 @@ from agent_switchboard.domain import (
     LaunchState,
     LaunchTransitionError,
     LeaseError,
-    LocationId,
     ProjectId,
     ProviderId,
     RequestConflictError,
     SessionKey,
     SurfaceId,
+    TaskId,
     Transport,
     ValidationError,
     ensure_same_launch_request,
@@ -31,7 +32,8 @@ from agent_switchboard.domain import (
 
 HOST = HostId("11111111-1111-4111-8111-111111111111")
 PROJECT = ProjectId("22222222-2222-4222-8222-222222222222")
-LOCATION = LocationId("33333333-3333-4333-8333-333333333333")
+LOCATION = CheckoutId("33333333-3333-4333-8333-333333333333")
+TASK = TaskId("99999999-9999-4999-8999-999999999999")
 LAUNCH = LaunchId("44444444-4444-4444-8444-444444444444")
 REQUEST = UUID("55555555-5555-4555-8555-555555555555")
 SESSION = SessionKey(
@@ -57,7 +59,8 @@ def make_intent(
             provider=ProviderId.CODEX,
             action=action,
             project_id=PROJECT if action is LaunchAction.NEW else None,
-            location_id=LOCATION if action is LaunchAction.NEW else None,
+            task_id=TASK if action is LaunchAction.NEW else None,
+            checkout_id=LOCATION if action is LaunchAction.NEW else None,
             cwd=tmp_path if action is LaunchAction.NEW else None,
             source_handoff_id=None,
             target_session_key=target,
@@ -179,7 +182,8 @@ def test_launch_request_normalization_and_retry_semantics(tmp_path: Path) -> Non
         HOST,
         ProviderId.CODEX,
         project_id=PROJECT,
-        location_id=LOCATION,
+        task_id=TASK,
+        checkout_id=LOCATION,
         cwd=tmp_path,
         source_handoff_id=handoff,
     )
@@ -188,7 +192,8 @@ def test_launch_request_normalization_and_retry_semantics(tmp_path: Path) -> Non
         str(HOST),
         "codex",
         project_id=str(PROJECT),
-        location_id=str(LOCATION),
+        task_id=str(TASK),
+        checkout_id=str(LOCATION),
         cwd=tmp_path / ".",
         source_handoff_id=str(handoff),
     )
@@ -200,7 +205,8 @@ def test_launch_request_normalization_and_retry_semantics(tmp_path: Path) -> Non
         HOST,
         ProviderId.CLAUDE,
         project_id=PROJECT,
-        location_id=LOCATION,
+        task_id=TASK,
+        checkout_id=LOCATION,
         cwd=tmp_path,
     )
     with pytest.raises(RequestConflictError, match="request_conflict"):
@@ -242,7 +248,8 @@ def test_request_variant_validation(tmp_path: Path) -> None:
             provider=ProviderId.CODEX,
             action=LaunchAction.RESUME,
             project_id=None,
-            location_id=None,
+            task_id=None,
+            checkout_id=None,
             cwd=None,
             source_handoff_id=None,
             target_session_key=SESSION,

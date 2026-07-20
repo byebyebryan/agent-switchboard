@@ -65,9 +65,9 @@ def registry(tmp_path) -> Registry:
                 "default_provider": "codex",
                 "default_transport": "tmux",
                 "context_sources": ("AGENTS.md",),
-                "locations": (
+                "checkouts": (
                     {
-                        "location_id": LOCATION_ID,
+                        "checkout_id": LOCATION_ID,
                         "path": "/work/project",
                         "display_name": "main checkout",
                         "repository_identity": "example/switchboard",
@@ -78,7 +78,7 @@ def registry(tmp_path) -> Registry:
             {
                 "project_id": EMPTY_PROJECT_ID,
                 "name": "project without a checkout",
-                "locations": (),
+                "checkouts": (),
             },
         ),
         observed_at=10,
@@ -90,7 +90,7 @@ def registry(tmp_path) -> Registry:
             "provider": "codex",
             "provider_session_id": FIRST_ID,
             "project_id": PROJECT_ID,
-            "location_id": LOCATION_ID,
+            "checkout_id": LOCATION_ID,
             "name": "first",
             "purpose": "snapshot test",
             "cwd": "/work/project",
@@ -226,7 +226,7 @@ def test_snapshot_is_host_local_camel_case_and_protocol_valid(
         PROJECT_ID,
         EMPTY_PROJECT_ID,
     ]
-    assert [item["locationId"] for item in data["locations"]] == [LOCATION_ID]
+    assert [item["checkoutId"] for item in data["checkouts"]] == [LOCATION_ID]
     assert [item["sessionKey"] for item in data["sessions"]] == [
         FIRST_KEY,
         SECOND_KEY,
@@ -240,7 +240,7 @@ def test_snapshot_is_host_local_camel_case_and_protocol_valid(
 
     first = data["sessions"][0]
     assert first["projectId"] == PROJECT_ID
-    assert first["locationId"] == LOCATION_ID
+    assert first["checkoutId"] == LOCATION_ID
     assert first["runtimeLocator"] == {
         "observedAt": 30,
         "pid": 1234,
@@ -280,14 +280,14 @@ def test_snapshot_read_is_one_transaction_and_filters_relevance(
     ]
     assert transaction_statements == ["BEGIN", "COMMIT"]
     assert rows.projects == ()
-    assert rows.locations == ()
+    assert rows.checkouts == ()
     assert [row["session_key"] for row in rows.sessions] == [REMOTE_KEY]
     assert rows.runtimes == ()
     assert [row["surface_id"] for row in rows.surfaces] == [REMOTE_SURFACE_ID]
 
     snapshot = build_host_snapshot(registry, REMOTE_HOST_ID, generated_at=100)
     assert snapshot.projects == ()
-    assert snapshot.locations == ()
+    assert snapshot.checkouts == ()
     assert [item["sessionKey"] for item in snapshot.sessions] == [REMOTE_KEY]
 
 
@@ -426,6 +426,37 @@ def test_snapshot_session_budget_uses_actual_utf8_size_and_filters_references(
     assert snapshot.runtimes == ()
     assert snapshot.surfaces == ()
     assert error.details == {"emittedCount": 0, "retainedCount": 2}
+
+
+def test_snapshot_task_budget_is_structural_and_keeps_catalog_references(
+    registry: Registry,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    task_id = "99999999-9999-4999-8999-999999999999"
+    registry.create_task(
+        task_id=task_id,
+        host_id=HOST_ID,
+        project_id=PROJECT_ID,
+        checkout_id=LOCATION_ID,
+        title="Bounded task",
+        observed_at=40,
+    )
+    registry.materialize_projects(HOST_ID, [], observed_at=41)
+
+    retained = build_host_snapshot(registry, HOST_ID, generated_at=42)
+    assert [task["taskId"] for task in retained.tasks] == [task_id]
+    assert [project["projectId"] for project in retained.projects] == [PROJECT_ID]
+
+    monkeypatch.setattr(
+        "agent_switchboard.snapshot._SNAPSHOT_TASK_BYTE_BUDGET",
+        2,
+    )
+    bounded = build_host_snapshot(registry, HOST_ID, generated_at=43)
+    error = next(
+        item for item in bounded.errors if item.code == "snapshot_tasks_truncated"
+    )
+    assert bounded.tasks == ()
+    assert error.details == {"emittedCount": 0, "retainedCount": 1}
 
 
 def test_worst_case_utf8_sessions_are_selected_by_encoded_byte_budget(tmp_path) -> None:

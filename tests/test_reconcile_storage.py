@@ -4,7 +4,7 @@ from copy import deepcopy
 
 import pytest
 
-from agent_switchboard.domain import AmbiguousLocationError
+from agent_switchboard.domain import AmbiguousCheckoutError
 from agent_switchboard.storage import IdentityConflict, Registry, StorageError
 
 HOST_ID = "11111111-1111-4111-8111-111111111111"
@@ -162,9 +162,9 @@ def test_reconcile_preserves_project_handoff_and_surface_links(
             {
                 "project_id": PROJECT_ID,
                 "name": "project",
-                "locations": (
+                "checkouts": (
                     {
-                        "location_id": LOCATION_ID,
+                        "checkout_id": LOCATION_ID,
                         "path": "/work/project",
                         "is_default": True,
                     },
@@ -178,7 +178,7 @@ def test_reconcile_preserves_project_handoff_and_surface_links(
         {
             "session_key": FIRST_KEY,
             "project_id": PROJECT_ID,
-            "location_id": LOCATION_ID,
+            "checkout_id": LOCATION_ID,
             "last_observed_at": 51,
         }
     )
@@ -213,7 +213,7 @@ def test_reconcile_preserves_project_handoff_and_surface_links(
     observed = registry.get_session(FIRST_KEY)
     assert observed is not None
     assert observed["project_id"] == PROJECT_ID
-    assert observed["location_id"] == LOCATION_ID
+    assert observed["checkout_id"] == LOCATION_ID
     assert observed["latest_handoff_id"] == handoff["handoff_id"]
     assert observed["surface_id"] == SURFACE_ID
     assert observed["purpose"] == "keep this purpose"
@@ -222,7 +222,7 @@ def test_reconcile_preserves_project_handoff_and_surface_links(
     missing = registry.get_session(FIRST_KEY)
     assert missing is not None
     assert missing["project_id"] == PROJECT_ID
-    assert missing["location_id"] == LOCATION_ID
+    assert missing["checkout_id"] == LOCATION_ID
     assert missing["latest_handoff_id"] == handoff["handoff_id"]
     assert missing["surface_id"] == SURFACE_ID
     assert missing["activity"] == "working"
@@ -230,7 +230,7 @@ def test_reconcile_preserves_project_handoff_and_surface_links(
     assert missing["state_observed_at"] == 50
 
 
-def test_reconcile_assigns_deepest_declared_location_and_leaves_unmatched(
+def test_reconcile_assigns_deepest_declared_checkout_and_leaves_unmatched(
     registry: Registry,
 ) -> None:
     registry.materialize_projects(
@@ -239,9 +239,9 @@ def test_reconcile_assigns_deepest_declared_location_and_leaves_unmatched(
             {
                 "project_id": PROJECT_ID,
                 "name": "root project",
-                "locations": (
+                "checkouts": (
                     {
-                        "location_id": LOCATION_ID,
+                        "checkout_id": LOCATION_ID,
                         "path": "/work",
                     },
                 ),
@@ -249,9 +249,9 @@ def test_reconcile_assigns_deepest_declared_location_and_leaves_unmatched(
             {
                 "project_id": SECOND_PROJECT_ID,
                 "name": "nested project",
-                "locations": (
+                "checkouts": (
                     {
-                        "location_id": SECOND_LOCATION_ID,
+                        "checkout_id": SECOND_LOCATION_ID,
                         "path": "/work/nested",
                     },
                 ),
@@ -273,12 +273,12 @@ def test_reconcile_assigns_deepest_declared_location_and_leaves_unmatched(
     matched = registry.get_session(FIRST_KEY)
     assert matched is not None
     assert matched["project_id"] == SECOND_PROJECT_ID
-    assert matched["location_id"] == SECOND_LOCATION_ID
-    assert matched["metadata_source"] == "location_match"
+    assert matched["checkout_id"] == SECOND_LOCATION_ID
+    assert matched["metadata_source"] == "checkout_match"
     unmatched = registry.get_session(SECOND_KEY)
     assert unmatched is not None
     assert unmatched["project_id"] is None
-    assert unmatched["location_id"] is None
+    assert unmatched["checkout_id"] is None
     assert unmatched["metadata_source"] == "provider"
 
 
@@ -294,7 +294,7 @@ def test_reconcile_assigns_previously_unassigned_session_after_catalog_appears(
     initial = registry.get_session(FIRST_KEY)
     assert initial is not None
     assert initial["project_id"] is None
-    assert initial["location_id"] is None
+    assert initial["checkout_id"] is None
 
     registry.materialize_projects(
         HOST_ID,
@@ -302,9 +302,9 @@ def test_reconcile_assigns_previously_unassigned_session_after_catalog_appears(
             {
                 "project_id": PROJECT_ID,
                 "name": "later project",
-                "locations": (
+                "checkouts": (
                     {
-                        "location_id": LOCATION_ID,
+                        "checkout_id": LOCATION_ID,
                         "path": "/later/project",
                     },
                 ),
@@ -322,8 +322,8 @@ def test_reconcile_assigns_previously_unassigned_session_after_catalog_appears(
     assigned = registry.get_session(FIRST_KEY)
     assert assigned is not None
     assert assigned["project_id"] == PROJECT_ID
-    assert assigned["location_id"] == LOCATION_ID
-    assert assigned["metadata_source"] == "location_match"
+    assert assigned["checkout_id"] == LOCATION_ID
+    assert assigned["metadata_source"] == "checkout_match"
 
 
 def test_reconcile_preserves_existing_full_and_project_only_assignments(
@@ -335,9 +335,9 @@ def test_reconcile_preserves_existing_full_and_project_only_assignments(
             {
                 "project_id": PROJECT_ID,
                 "name": "matching project",
-                "locations": (
+                "checkouts": (
                     {
-                        "location_id": LOCATION_ID,
+                        "checkout_id": LOCATION_ID,
                         "path": "/provider/path",
                     },
                 ),
@@ -345,9 +345,9 @@ def test_reconcile_preserves_existing_full_and_project_only_assignments(
             {
                 "project_id": SECOND_PROJECT_ID,
                 "name": "curated project",
-                "locations": (
+                "checkouts": (
                     {
-                        "location_id": SECOND_LOCATION_ID,
+                        "checkout_id": SECOND_LOCATION_ID,
                         "path": "/curated/path",
                     },
                 ),
@@ -362,7 +362,7 @@ def test_reconcile_preserves_existing_full_and_project_only_assignments(
             "provider": "codex",
             "provider_session_id": FIRST_ID,
             "project_id": SECOND_PROJECT_ID,
-            "location_id": SECOND_LOCATION_ID,
+            "checkout_id": SECOND_LOCATION_ID,
             "cwd": "/old/full",
             "metadata_source": "curated",
             "first_observed_at": 50,
@@ -396,16 +396,16 @@ def test_reconcile_preserves_existing_full_and_project_only_assignments(
     full = registry.get_session(FIRST_KEY)
     assert full is not None
     assert full["project_id"] == SECOND_PROJECT_ID
-    assert full["location_id"] == SECOND_LOCATION_ID
+    assert full["checkout_id"] == SECOND_LOCATION_ID
     assert full["metadata_source"] == "curated"
     project_only = registry.get_session(SECOND_KEY)
     assert project_only is not None
     assert project_only["project_id"] == SECOND_PROJECT_ID
-    assert project_only["location_id"] is None
+    assert project_only["checkout_id"] is None
     assert project_only["metadata_source"] == "curated"
 
 
-def test_ambiguous_location_match_fails_before_reconciliation_writes(
+def test_ambiguous_checkout_match_fails_before_reconciliation_writes(
     registry: Registry,
     tmp_path,
 ) -> None:
@@ -427,9 +427,9 @@ def test_ambiguous_location_match_fails_before_reconciliation_writes(
             {
                 "project_id": PROJECT_ID,
                 "name": "canonical project",
-                "locations": (
+                "checkouts": (
                     {
-                        "location_id": LOCATION_ID,
+                        "checkout_id": LOCATION_ID,
                         "path": str(canonical),
                     },
                 ),
@@ -437,9 +437,9 @@ def test_ambiguous_location_match_fails_before_reconciliation_writes(
             {
                 "project_id": SECOND_PROJECT_ID,
                 "name": "alias project",
-                "locations": (
+                "checkouts": (
                     {
-                        "location_id": SECOND_LOCATION_ID,
+                        "checkout_id": SECOND_LOCATION_ID,
                         "path": str(alias),
                     },
                 ),
@@ -448,7 +448,7 @@ def test_ambiguous_location_match_fails_before_reconciliation_writes(
         observed_at=60,
     )
 
-    with pytest.raises(AmbiguousLocationError):
+    with pytest.raises(AmbiguousCheckoutError):
         registry.reconcile_provider_sessions(
             HOST_ID,
             "codex",
@@ -520,7 +520,7 @@ def test_provider_owned_name_can_update_and_clear(registry: Registry) -> None:
     registry.upsert_session(
         {
             "session_key": FIRST_KEY,
-            "metadata_source": "location_match",
+            "metadata_source": "checkout_match",
             "last_observed_at": 150,
         }
     )
@@ -535,7 +535,7 @@ def test_provider_owned_name_can_update_and_clear(registry: Registry) -> None:
     assert updated["name"] == "second name"
     assert updated["provider_name"] == "second name"
     assert updated["name_source"] == "provider"
-    assert updated["metadata_source"] == "location_match"
+    assert updated["metadata_source"] == "checkout_match"
 
     registry.reconcile_provider_sessions(
         HOST_ID,
@@ -548,7 +548,7 @@ def test_provider_owned_name_can_update_and_clear(registry: Registry) -> None:
     assert cleared["name"] is None
     assert cleared["provider_name"] is None
     assert cleared["name_source"] == "provider"
-    assert cleared["metadata_source"] == "location_match"
+    assert cleared["metadata_source"] == "checkout_match"
 
 
 def test_source_only_curated_claim_protects_consistent_provider_name(

@@ -33,11 +33,13 @@ from agent_switchboard.protocol import (
     SnapshotEnvelope,
 )
 
-FIXTURES = Path(__file__).parent / "fixtures/protocol/v1"
+FIXTURES = Path(__file__).parent / "fixtures/protocol/v2"
 HOST = HostId("11111111-1111-4111-8111-111111111111")
 PROJECT = "22222222-2222-4222-8222-222222222222"
 SURFACE = SurfaceId("33333333-3333-4333-8333-333333333333")
 LOCATION = "44444444-4444-4444-8444-444444444444"
+REPOSITORY = "77777777-7777-4777-8777-777777777777"
+TASK = "88888888-8888-4888-8888-888888888888"
 SESSION_ID = "55555555-5555-4555-8555-555555555555"
 LAUNCH = "66666666-6666-4666-8666-666666666666"
 SESSION_KEY = f"{HOST}:codex:{SESSION_ID}"
@@ -55,8 +57,8 @@ def session_detail_value() -> dict[str, object]:
     second_summary = "First summary."
     second_next = "Design the protocol."
     return {
-        "schemaVersion": 1,
-        "protocolVersion": 1,
+        "schemaVersion": 2,
+        "protocolVersion": 2,
         "generatedAt": 100,
         "session": session,
         "handoffs": [
@@ -204,8 +206,8 @@ def test_unavailable_capability_requires_degraded_reason() -> None:
 @pytest.mark.parametrize(
     ("field", "value", "error"),
     [
-        ("schemaVersion", 2, IncompatibleSchemaError),
-        ("protocolVersion", 2, IncompatibleProtocolError),
+        ("schemaVersion", 1, IncompatibleSchemaError),
+        ("protocolVersion", 1, IncompatibleProtocolError),
         ("schemaVersion", True, ProtocolError),
     ],
 )
@@ -238,14 +240,17 @@ def test_snapshot_validates_known_records_and_strips_safe_additions() -> None:
             "futureProjectField": {"safe": True},
         }
     ]
-    data["locations"] = [
+    data["checkouts"] = [
         {
-            "locationId": LOCATION,
-            "projectId": PROJECT,
+            "checkoutId": LOCATION,
+            "repositoryId": REPOSITORY,
             "hostId": str(HOST),
             "path": "/work/example",
+            "kind": "main",
             "isDefault": True,
-            "futureLocationField": 1,
+            "declared": True,
+            "present": True,
+            "futureCheckoutField": 1,
         }
     ]
     data["sessions"] = [
@@ -255,7 +260,8 @@ def test_snapshot_validates_known_records_and_strips_safe_additions() -> None:
             "provider": "codex",
             "providerSessionId": SESSION_ID,
             "projectId": PROJECT,
-            "locationId": LOCATION,
+            "taskId": TASK,
+            "checkoutId": LOCATION,
             "firstObservedAt": 10,
             "lastObservedAt": 20,
             "runtimePresence": "live",
@@ -307,7 +313,7 @@ def test_snapshot_validates_known_records_and_strips_safe_additions() -> None:
     assert canonical["surfaces"][0]["provider"] == "codex"
     assert not any(
         key.startswith("future")
-        for collection in ("projects", "locations", "sessions", "runtimes", "surfaces")
+        for collection in ("projects", "checkouts", "sessions", "runtimes", "surfaces")
         for record in canonical[collection]
         for key in record
     )
@@ -454,9 +460,9 @@ def test_snapshot_rejects_generic_records_and_cross_host_rows() -> None:
 
     data = json.loads((FIXTURES / "snapshot.json").read_text())
     data["projects"] = [{"projectId": PROJECT, "name": "example"}]
-    data["locations"] = [
+    data["checkouts"] = [
         {
-            "locationId": LOCATION,
+            "checkoutId": LOCATION,
             "projectId": PROJECT,
             "hostId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
             "path": "/work/example",

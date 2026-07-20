@@ -25,6 +25,7 @@ LOCATION_ID = "66666666-6666-4666-8666-666666666666"
 LAUNCH_ID = "77777777-7777-4777-8777-777777777777"
 SURFACE_ID = "88888888-8888-4888-8888-888888888888"
 REQUEST_ID = "99999999-9999-4999-8999-999999999999"
+TASK_ID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
 
 
 def payload(event: str, **extra: object) -> dict[str, object]:
@@ -150,9 +151,9 @@ def test_new_claude_session_start_binds_launch_project_and_surface(
                     "name": "Switchboard",
                     "default_provider": "codex",
                     "default_transport": "tmux",
-                    "locations": [
+                    "checkouts": [
                         {
-                            "location_id": LOCATION_ID,
+                            "checkout_id": LOCATION_ID,
                             "path": "/work/switchboard",
                             "is_default": True,
                         }
@@ -161,13 +162,22 @@ def test_new_claude_session_start_binds_launch_project_and_surface(
             ],
             observed_at=20,
         )
+        registry.create_task(
+            task_id=TASK_ID,
+            host_id=HOST_ID,
+            project_id=PROJECT_ID,
+            checkout_id=LOCATION_ID,
+            title="Claude lifecycle",
+            observed_at=21,
+        )
         registry.reserve_launch(
             {
                 "host_id": HOST_ID,
                 "provider": "claude",
                 "action": "new",
                 "project_id": PROJECT_ID,
-                "location_id": LOCATION_ID,
+                "task_id": TASK_ID,
+                "checkout_id": LOCATION_ID,
                 "cwd": "/work/switchboard",
                 "source_handoff_id": None,
                 "target_session_key": None,
@@ -212,7 +222,7 @@ def test_new_claude_session_start_binds_launch_project_and_surface(
         assert result.launch is not None and result.launch["state"] == "bound"
         assert result.launch["target_session_key"] == SESSION_KEY
         assert result.session["project_id"] == PROJECT_ID
-        assert result.session["location_id"] == LOCATION_ID
+        assert result.session["checkout_id"] == LOCATION_ID
         assert result.session["surface_id"] == SURFACE_ID
         assert result.surface is not None
         assert result.surface["provider"] == "claude"

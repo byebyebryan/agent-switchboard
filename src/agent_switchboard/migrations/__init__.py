@@ -14,9 +14,11 @@ from . import (
     v0004_runtime_truth_ordering,
     v0005_history_launch,
     v0006_agent_tools,
+    v0007_repository_checkouts,
+    v0008_tasks,
 )
 
-PROTOCOL_VERSION = 1
+PROTOCOL_VERSION = 2
 
 
 class MigrationError(RuntimeError):
@@ -62,8 +64,26 @@ MIGRATIONS = (
         v0006_agent_tools.STATEMENTS,
         requires_foreign_keys_off=v0006_agent_tools.REQUIRES_FOREIGN_KEYS_OFF,
     ),
+    Migration(
+        v0007_repository_checkouts.VERSION,
+        v0007_repository_checkouts.NAME,
+        v0007_repository_checkouts.STATEMENTS,
+        requires_foreign_keys_off=(
+            v0007_repository_checkouts.REQUIRES_FOREIGN_KEYS_OFF
+        ),
+    ),
+    Migration(
+        v0008_tasks.VERSION,
+        v0008_tasks.NAME,
+        v0008_tasks.STATEMENTS,
+        requires_foreign_keys_off=v0008_tasks.REQUIRES_FOREIGN_KEYS_OFF,
+    ),
 )
 CURRENT_SCHEMA_VERSION = MIGRATIONS[-1].version
+
+
+def _protocol_for_schema(schema_version: int) -> int:
+    return 1 if schema_version <= 6 else 2
 
 
 def _validate_migrations(migrations: Iterable[Migration]) -> tuple[Migration, ...]:
@@ -138,7 +158,7 @@ def _validated_current(
             ).fetchall()
         )
         expected_metadata = {
-            "protocol_version": str(PROTOCOL_VERSION),
+            "protocol_version": str(_protocol_for_schema(current)),
             "schema_version": str(current),
         }
         if metadata != expected_metadata:
@@ -168,7 +188,7 @@ def _apply_migration(
             INSERT INTO registry_metadata(key, value, updated_at)
             VALUES ('protocol_version', ?, ?)
             """,
-            (str(PROTOCOL_VERSION), applied_at),
+            (str(_protocol_for_schema(1)), applied_at),
         )
     connection.execute(
         """

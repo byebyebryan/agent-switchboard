@@ -9,20 +9,22 @@ import secrets
 import sqlite3
 import time
 import uuid
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from contextlib import suppress
 from pathlib import Path
 from typing import Never
 
 from .domain import (
+    Checkout,
+    CheckoutId,
     HostId,
-    LocationId,
     PresentationContext,
     Project,
     ProjectId,
-    ProjectLocation,
+    ProjectRepository,
     ProviderId,
     SessionKey,
+    TaskId,
     Transport,
     ValidationError,
 )
@@ -32,7 +34,13 @@ from .protocol import (
     PresentationPlan,
     PresentationPlanKind,
 )
-from .storage import ContinuationError, Registry, RequestConflict, StorageError
+from .storage import (
+    ContinuationError,
+    Registry,
+    RequestConflict,
+    StorageError,
+    TaskConflict,
+)
 from .tmux import (
     TmuxController,
     TmuxError,
@@ -141,7 +149,8 @@ class LaunchCoordinator:
         codex_executable: str | None = "codex",
         claude_executable: str | None = "claude",
         projects: Sequence[Project] = (),
-        locations: Sequence[ProjectLocation] = (),
+        project_repositories: Sequence[ProjectRepository] = (),
+        checkouts: Sequence[Checkout] = (),
         naming_prefix: str = "as",
         launch_timeout_seconds: int = 30,
         clock: Clock = _now_ms,
@@ -158,7 +167,24 @@ class LaunchCoordinator:
         self.codex_executable = codex_executable
         self.claude_executable = claude_executable
         self.projects = {str(project.project_id): project for project in projects}
-        self.locations = {str(location.location_id): location for location in locations}
+        self.project_repository_ids = {
+            str(project_id): {
+                str(membership.repository_id)
+                for membership in project_repositories
+                if membership.project_id == project_id
+            }
+            for project_id in {item.project_id for item in project_repositories}
+        }
+        if not self.project_repository_ids:
+            self.project_repository_ids = {
+                project_id: {
+                    str(checkout.repository_id)
+                    for checkout in checkouts
+                    if str(checkout.repository_id) == project_id
+                }
+                for project_id in self.projects
+            }
+        self.checkouts = {str(checkout.checkout_id): checkout for checkout in checkouts}
         self.naming_prefix = naming_prefix.replace(".", "-")
         self.launch_timeout_seconds = launch_timeout_seconds
         self.clock = clock
@@ -198,14 +224,21 @@ class LaunchCoordinator:
         self,
         project_id: str | None,
         *,
-        location_id: str | None,
+        task_id: str | None,
+        checkout_id: str | None,
         provider: str | None,
         source_ref: str | None = None,
         request_id: str,
         context: PresentationContext,
+        task_create: Mapping[str, object] | None = None,
     ) -> PresentationPlan:
         request_id = self._request_id(request_id)
         now = self.clock()
+        if task_id is None:
+            return self._blocked_new(
+                "task_required", "A new session must belong to a task.", now
+            )
+        parsed_task_id = self._stable_id(task_id, TaskId, "task ID")
         source = None
         if source_ref is not None:
             try:
@@ -220,21 +253,21 @@ class LaunchCoordinator:
                 )
                 return self._blocked_new(code, str(error), now)
             source_project_id = str(source.session["project_id"])
-            source_location_id = str(source.session["location_id"])
+            source_checkout_id = str(source.session["checkout_id"])
             if project_id is not None and project_id != source_project_id:
                 return self._blocked_new(
                     "continuation_project_conflict",
                     "Continuation cannot change the source project.",
                     now,
                 )
-            if location_id is not None and location_id != source_location_id:
+            if checkout_id is not None and checkout_id != source_checkout_id:
                 return self._blocked_new(
-                    "continuation_location_conflict",
-                    "Continuation cannot change the source project location.",
+                    "continuation_checkout_conflict",
+                    "Continuation cannot change the source project checkout.",
                     now,
                 )
             project_id = source_project_id
-            location_id = source_location_id
+            checkout_id = source_checkout_id
         if project_id is None:
             return self._blocked_new(
                 "project_missing",
@@ -242,9 +275,9 @@ class LaunchCoordinator:
                 now,
             )
         parsed_project_id = self._stable_id(project_id, ProjectId, "project ID")
-        parsed_location_id = (
-            self._stable_id(location_id, LocationId, "location ID")
-            if location_id is not None
+        parsed_checkout_id = (
+            self._stable_id(checkout_id, CheckoutId, "checkout ID")
+            if checkout_id is not None
             else None
         )
         project = self.projects.get(str(parsed_project_id))
@@ -257,45 +290,47 @@ class LaunchCoordinator:
 
         candidates = sorted(
             (
-                location
-                for location in self.locations.values()
-                if location.project_id == parsed_project_id
-                and location.host_id == self.host_id
+                checkout
+                for checkout in self.checkouts.values()
+                if str(checkout.repository_id)
+                in self.project_repository_ids.get(str(parsed_project_id), set())
+                and checkout.host_id == self.host_id
             ),
-            key=lambda location: str(location.location_id),
+            key=lambda checkout: str(checkout.checkout_id),
         )
-        location: ProjectLocation | None = None
-        if parsed_location_id is not None:
-            location = self.locations.get(str(parsed_location_id))
+        checkout: Checkout | None = None
+        if parsed_checkout_id is not None:
+            checkout = self.checkouts.get(str(parsed_checkout_id))
             if (
-                location is None
-                or location.project_id != parsed_project_id
-                or location.host_id != self.host_id
+                checkout is None
+                or str(checkout.repository_id)
+                not in self.project_repository_ids.get(str(parsed_project_id), set())
+                or checkout.host_id != self.host_id
             ):
                 return self._blocked_new(
-                    "location_not_found",
-                    "The selected location does not belong to this local project.",
+                    "checkout_not_found",
+                    "The selected checkout does not belong to this local project.",
                     now,
                 )
         elif len(candidates) == 1:
-            location = candidates[0]
+            checkout = candidates[0]
         else:
             defaults = [candidate for candidate in candidates if candidate.is_default]
             if len(defaults) == 1:
-                location = defaults[0]
+                checkout = defaults[0]
             elif not candidates:
                 return self._blocked_new(
-                    "project_location_missing",
-                    "The selected project has no location on this host.",
+                    "project_checkout_missing",
+                    "The selected project has no checkout on this host.",
                     now,
                 )
             else:
                 return self._blocked_new(
-                    "project_location_ambiguous",
-                    "The selected project requires an explicit location.",
+                    "project_checkout_ambiguous",
+                    "The selected project requires an explicit checkout.",
                     now,
                 )
-        assert location is not None
+        assert checkout is not None
 
         resolved_provider: ProviderId | None
         if provider is not None:
@@ -311,7 +346,7 @@ class LaunchCoordinator:
             resolved_provider = (
                 ProviderId(str(source.session["provider"]))
                 if source is not None
-                else location.provider_override or project.default_provider
+                else checkout.provider_override or project.default_provider
             )
         if resolved_provider is None:
             return self._blocked_new(
@@ -327,7 +362,7 @@ class LaunchCoordinator:
                 now,
                 provider=resolved_provider,
             )
-        transport = location.transport_override or project.default_transport
+        transport = checkout.transport_override or project.default_transport
         if transport is not Transport.TMUX:
             return self._blocked_new(
                 "transport_not_supported",
@@ -335,16 +370,17 @@ class LaunchCoordinator:
                 now,
                 provider=resolved_provider,
             )
-        if not location.path.is_absolute() or not location.path.is_dir():
+        if not checkout.path.is_absolute() or not checkout.path.is_dir():
             return self._blocked_new(
                 "working_directory_unavailable",
-                "The selected project location is unavailable.",
+                "The selected project checkout is unavailable.",
                 now,
                 provider=resolved_provider,
             )
         return self._prepare_new(
             project,
-            location,
+            checkout,
+            task_id=str(parsed_task_id),
             provider=resolved_provider,
             request_id=request_id,
             context=context,
@@ -357,20 +393,139 @@ class LaunchCoordinator:
                 if source is not None and source.from_session
                 else None
             ),
+            task_create=task_create,
+        )
+
+    def prepare_task_create(
+        self,
+        *,
+        task_id: str,
+        project_id: str,
+        title: str,
+        checkout_id: str | None,
+        provider: str,
+        purpose: str | None = None,
+        request_id: str,
+        context: PresentationContext,
+    ) -> PresentationPlan:
+        """Atomically create a task and reserve its first provider launch."""
+
+        return self.prepare_new(
+            project_id,
+            task_id=task_id,
+            checkout_id=checkout_id,
+            provider=provider,
+            request_id=request_id,
+            context=context,
+            task_create={
+                "task_id": task_id,
+                "title": title,
+                "purpose": purpose,
+                "preferred_provider": provider,
+            },
+        )
+
+    def prepare_task(
+        self,
+        task_id: str,
+        *,
+        provider: str | None,
+        request_id: str,
+        context: PresentationContext,
+    ) -> PresentationPlan:
+        """Open a task's current session or start its first/next session."""
+
+        parsed_task_id = self._stable_id(task_id, TaskId, "task ID")
+        task = self.registry.get_task(str(parsed_task_id))
+        now = self.clock()
+        if task is None or task["host_id"] != str(self.host_id):
+            return self._blocked_new("task_not_found", "The task is not local.", now)
+        if task["status"] != "open":
+            return self._blocked_new("task_closed", "The task is closed.", now)
+        current_session_key = task.get("current_session_key")
+        if isinstance(current_session_key, str):
+            current = self.registry.get_session(current_session_key)
+            if current is None:
+                return self._blocked_new(
+                    "task_current_session_missing",
+                    "The task's current session is missing.",
+                    now,
+                )
+            if provider is None or provider == current["provider"]:
+                return self.prepare_open(
+                    current_session_key,
+                    request_id=request_id,
+                    context=context,
+                )
+            if current["wrapped_at"] is None:
+                return self._blocked_new(
+                    "task_current_session_active",
+                    "Close or hand off the current session before switching provider.",
+                    now,
+                )
+            source_ref: str | None = current_session_key
+        else:
+            source_ref = None
+        selected_provider = provider or task.get("preferred_provider")
+        if task["checkout_id"] is None:
+            project_id = str(task["project_id"])
+            candidates = sorted(
+                (
+                    checkout
+                    for checkout in self.checkouts.values()
+                    if str(checkout.repository_id)
+                    in self.project_repository_ids.get(project_id, set())
+                    and checkout.host_id == self.host_id
+                ),
+                key=lambda checkout: str(checkout.checkout_id),
+            )
+            defaults = [checkout for checkout in candidates if checkout.is_default]
+            selected_checkout = (
+                candidates[0]
+                if len(candidates) == 1
+                else defaults[0]
+                if len(defaults) == 1
+                else None
+            )
+            if selected_checkout is None:
+                return self._blocked_new(
+                    "task_checkout_missing",
+                    "The task requires an explicit checkout before it can start.",
+                    now,
+                )
+            try:
+                task = self.registry.route_task(
+                    str(parsed_task_id),
+                    host_id=str(self.host_id),
+                    checkout_id=str(selected_checkout.checkout_id),
+                    observed_at=now,
+                )
+            except TaskConflict as error:
+                return self._blocked_new(error.code, str(error), now)
+        return self.prepare_new(
+            str(task["project_id"]),
+            task_id=str(parsed_task_id),
+            checkout_id=(
+                None if task["checkout_id"] is None else str(task["checkout_id"])
+            ),
+            provider=(None if selected_provider is None else str(selected_provider)),
+            source_ref=source_ref,
+            request_id=request_id,
+            context=context,
         )
 
     def prepare_history(
         self,
         project_id: str,
         *,
-        location_id: str | None,
+        checkout_id: str | None,
         request_id: str,
         context: PresentationContext,
     ) -> PresentationPlan:
         parsed_project_id = self._stable_id(project_id, ProjectId, "project ID")
-        parsed_location_id = (
-            self._stable_id(location_id, LocationId, "location ID")
-            if location_id is not None
+        parsed_checkout_id = (
+            self._stable_id(checkout_id, CheckoutId, "checkout ID")
+            if checkout_id is not None
             else None
         )
         request_id = self._request_id(request_id)
@@ -385,48 +540,50 @@ class LaunchCoordinator:
             )
         candidates = sorted(
             (
-                location
-                for location in self.locations.values()
-                if location.project_id == parsed_project_id
-                and location.host_id == self.host_id
+                checkout
+                for checkout in self.checkouts.values()
+                if str(checkout.repository_id)
+                in self.project_repository_ids.get(str(parsed_project_id), set())
+                and checkout.host_id == self.host_id
             ),
-            key=lambda location: str(location.location_id),
+            key=lambda checkout: str(checkout.checkout_id),
         )
-        location: ProjectLocation | None = None
-        if parsed_location_id is not None:
-            location = self.locations.get(str(parsed_location_id))
+        checkout: Checkout | None = None
+        if parsed_checkout_id is not None:
+            checkout = self.checkouts.get(str(parsed_checkout_id))
             if (
-                location is None
-                or location.project_id != parsed_project_id
-                or location.host_id != self.host_id
+                checkout is None
+                or str(checkout.repository_id)
+                not in self.project_repository_ids.get(str(parsed_project_id), set())
+                or checkout.host_id != self.host_id
             ):
                 return self._blocked_new(
-                    "location_not_found",
-                    "The selected location does not belong to this local project.",
+                    "checkout_not_found",
+                    "The selected checkout does not belong to this local project.",
                     now,
                     provider=ProviderId.CLAUDE,
                 )
         elif len(candidates) == 1:
-            location = candidates[0]
+            checkout = candidates[0]
         else:
             defaults = [candidate for candidate in candidates if candidate.is_default]
             if len(defaults) == 1:
-                location = defaults[0]
+                checkout = defaults[0]
             elif not candidates:
                 return self._blocked_new(
-                    "project_location_missing",
-                    "The selected project has no location on this host.",
+                    "project_checkout_missing",
+                    "The selected project has no checkout on this host.",
                     now,
                     provider=ProviderId.CLAUDE,
                 )
             else:
                 return self._blocked_new(
-                    "project_location_ambiguous",
-                    "The selected project requires an explicit location.",
+                    "project_checkout_ambiguous",
+                    "The selected project requires an explicit checkout.",
                     now,
                     provider=ProviderId.CLAUDE,
                 )
-        assert location is not None
+        assert checkout is not None
         if self.claude_executable is None:
             return self._blocked_new(
                 "provider_unavailable",
@@ -434,7 +591,7 @@ class LaunchCoordinator:
                 now,
                 provider=ProviderId.CLAUDE,
             )
-        transport = location.transport_override or project.default_transport
+        transport = checkout.transport_override or project.default_transport
         if transport is not Transport.TMUX:
             return self._blocked_new(
                 "transport_not_supported",
@@ -442,16 +599,16 @@ class LaunchCoordinator:
                 now,
                 provider=ProviderId.CLAUDE,
             )
-        if not location.path.is_absolute() or not location.path.is_dir():
+        if not checkout.path.is_absolute() or not checkout.path.is_dir():
             return self._blocked_new(
                 "working_directory_unavailable",
-                "The selected project location is unavailable.",
+                "The selected project checkout is unavailable.",
                 now,
                 provider=ProviderId.CLAUDE,
             )
         return self._prepare_unbound(
             project,
-            location,
+            checkout,
             provider=ProviderId.CLAUDE,
             action="history",
             capability_hash=PREPARE_CLAUDE_HISTORY_CAPABILITY_HASH,
@@ -461,7 +618,7 @@ class LaunchCoordinator:
         )
 
     @staticmethod
-    def _stable_id[T: ProjectId | LocationId](
+    def _stable_id[T: ProjectId | CheckoutId | TaskId](
         value: str,
         value_type: type[T],
         field: str,
@@ -769,7 +926,7 @@ class LaunchCoordinator:
             "provider": provider.value,
             "action": "resume",
             "project_id": None,
-            "location_id": None,
+            "checkout_id": None,
             "cwd": None,
             "source_handoff_id": None,
             "target_session_key": str(session_key),
@@ -857,14 +1014,16 @@ class LaunchCoordinator:
     def _prepare_new(
         self,
         project: Project,
-        location: ProjectLocation,
+        checkout: Checkout,
         *,
+        task_id: str | None = None,
         provider: ProviderId,
         request_id: str,
         context: PresentationContext,
         now: int,
         source_handoff_id: str | None = None,
         source_session_key: str | None = None,
+        task_create: Mapping[str, object] | None = None,
     ) -> PresentationPlan:
         capability_hash = (
             PREPARE_NEW_CAPABILITY_HASH
@@ -873,7 +1032,8 @@ class LaunchCoordinator:
         )
         return self._prepare_unbound(
             project,
-            location,
+            checkout,
+            task_id=task_id,
             provider=provider,
             action="new",
             capability_hash=capability_hash,
@@ -882,13 +1042,15 @@ class LaunchCoordinator:
             now=now,
             source_handoff_id=source_handoff_id,
             source_session_key=source_session_key,
+            task_create=task_create,
         )
 
     def _prepare_unbound(
         self,
         project: Project,
-        location: ProjectLocation,
+        checkout: Checkout,
         *,
+        task_id: str | None = None,
         provider: ProviderId,
         action: str,
         capability_hash: str,
@@ -897,6 +1059,7 @@ class LaunchCoordinator:
         now: int,
         source_handoff_id: str | None = None,
         source_session_key: str | None = None,
+        task_create: Mapping[str, object] | None = None,
     ) -> PresentationPlan:
         if action not in {"new", "history"}:
             raise PresentationError("unbound launch action is unsupported")
@@ -910,8 +1073,9 @@ class LaunchCoordinator:
             "provider": provider.value,
             "action": action,
             "project_id": str(project.project_id),
-            "location_id": str(location.location_id),
-            "cwd": str(location.path),
+            "task_id": task_id,
+            "checkout_id": str(checkout.checkout_id),
+            "cwd": str(checkout.path),
             "source_handoff_id": source_handoff_id,
             "target_session_key": None,
             "transport": "tmux",
@@ -927,6 +1091,7 @@ class LaunchCoordinator:
                 agent_capability_hash=agent_capability_hash,
                 created_at=now,
                 source_session_key=source_session_key,
+                task_create=task_create,
             )
         except RequestConflict:
             return self._blocked_new(
@@ -936,6 +1101,13 @@ class LaunchCoordinator:
                 provider=provider,
             )
         except ContinuationError as error:
+            return self._blocked_new(
+                error.code,
+                str(error),
+                now,
+                provider=provider,
+            )
+        except TaskConflict as error:
             return self._blocked_new(
                 error.code,
                 str(error),
@@ -960,7 +1132,7 @@ class LaunchCoordinator:
         try:
             observed = self.tmux.create_surface(
                 name=session_name,
-                cwd=location.path,
+                cwd=checkout.path,
                 command=(self.swbctl_executable, "bootstrap", launch_id),
                 environment=environment,
                 surface_id=surface_id,
@@ -1472,29 +1644,30 @@ class LaunchCoordinator:
 
     def _new_target_is_current(self, launch: dict[str, object]) -> bool:
         project_id = launch.get("project_id")
-        location_id = launch.get("location_id")
+        checkout_id = launch.get("checkout_id")
         cwd = launch.get("cwd")
-        if not all(isinstance(value, str) for value in (project_id, location_id, cwd)):
+        if not all(isinstance(value, str) for value in (project_id, checkout_id, cwd)):
             return False
         project = self.projects.get(str(project_id))
-        location = self.locations.get(str(location_id))
-        if project is None or location is None:
+        checkout = self.checkouts.get(str(checkout_id))
+        if project is None or checkout is None:
             return False
         if (
-            location.project_id != project.project_id
-            or location.host_id != self.host_id
-            or str(location.path) != cwd
-            or not location.path.is_dir()
+            str(checkout.repository_id)
+            not in self.project_repository_ids.get(str(project.project_id), set())
+            or checkout.host_id != self.host_id
+            or str(checkout.path) != cwd
+            or not checkout.path.is_dir()
         ):
             return False
-        transport = location.transport_override or project.default_transport
+        transport = checkout.transport_override or project.default_transport
         if transport is not Transport.TMUX:
             return False
         try:
             process_cwd = self.cwd_reader().resolve(strict=False)
         except OSError:
             return False
-        return process_cwd == location.path
+        return process_cwd == checkout.path
 
 
 def actionable_surface_locator(

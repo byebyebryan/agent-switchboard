@@ -1,0 +1,137 @@
+{
+  "schemaVersion": 2,
+  "protocolVersion": 2,
+  "generatedAt": 1784142000000,
+  "host": {
+    "hostId": "11111111-1111-4111-8111-111111111111",
+    "displayName": "starship",
+    "futureHostField": "ignored"
+  },
+  "projects": [
+    {
+      "projectId": "22222222-2222-4222-8222-222222222222",
+      "name": "example",
+      "aliases": ["router"],
+      "defaultProvider": "codex",
+      "defaultTransport": "tmux",
+      "futureProjectField": true
+    }
+  ],
+  "projectRepositories": [
+    {
+      "projectId": "22222222-2222-4222-8222-222222222222",
+      "repositoryId": "77777777-7777-4777-8777-777777777777",
+      "isPrimary": true
+    }
+  ],
+  "repositories": [
+    {
+      "repositoryId": "77777777-7777-4777-8777-777777777777",
+      "name": "example",
+      "kind": "git",
+      "contextSources": ["README.md"],
+      "futureRepositoryField": true
+    }
+  ],
+  "checkouts": [
+    {
+      "checkoutId": "44444444-4444-4444-8444-444444444444",
+      "repositoryId": "77777777-7777-4777-8777-777777777777",
+      "hostId": "11111111-1111-4111-8111-111111111111",
+      "path": "/work/example",
+      "kind": "main",
+      "isDefault": true,
+      "declared": true,
+      "present": true,
+      "futureCheckoutField": 1
+    }
+  ],
+  "tasks": [
+    {
+      "taskId": "88888888-8888-4888-8888-888888888888",
+      "hostId": "11111111-1111-4111-8111-111111111111",
+      "projectId": "22222222-2222-4222-8222-222222222222",
+      "checkoutId": "44444444-4444-4444-8444-444444444444",
+      "title": "Improve the example",
+      "preferredProvider": "codex",
+      "status": "open",
+      "pinned": false,
+      "currentSessionKey": "11111111-1111-4111-8111-111111111111:codex:55555555-5555-4555-8555-555555555555",
+      "createdAt": 1784141900000,
+      "updatedAt": 1784142000000,
+      "futureTaskField": true
+    }
+  ],
+  "sessions": [
+    {
+      "sessionKey": "11111111-1111-4111-8111-111111111111:codex:55555555-5555-4555-8555-555555555555",
+      "hostId": "11111111-1111-4111-8111-111111111111",
+      "provider": "codex",
+      "providerSessionId": "55555555-5555-4555-8555-555555555555",
+      "projectId": "22222222-2222-4222-8222-222222222222",
+      "taskId": "88888888-8888-4888-8888-888888888888",
+      "checkoutId": "44444444-4444-4444-8444-444444444444",
+      "cwd": "/work/example",
+      "firstObservedAt": 1784141900000,
+      "lastObservedAt": 1784142000000,
+      "runtimePresence": "live",
+      "resumability": "resumable",
+      "activity": "working",
+      "activityReason": "unknown",
+      "attachment": "detached",
+      "surfaceId": "33333333-3333-4333-8333-333333333333",
+      "metadataSource": "provider",
+      "stateConfidence": "confirmed",
+      "futureSessionField": ["safe"]
+    }
+  ],
+  "runtimes": [
+    {
+      "hostId": "11111111-1111-4111-8111-111111111111",
+      "provider": "codex",
+      "sessionKey": "11111111-1111-4111-8111-111111111111:codex:55555555-5555-4555-8555-555555555555",
+      "runtimePresence": "live",
+      "resumability": "resumable",
+      "activity": "working",
+      "activityReason": "unknown",
+      "attachment": "detached",
+      "pid": 1234,
+      "observedAt": 1784142000000,
+      "futureRuntimeField": false
+    }
+  ],
+  "surfaces": [
+    {
+      "surfaceId": "33333333-3333-4333-8333-333333333333",
+      "hostId": "11111111-1111-4111-8111-111111111111",
+      "provider": "codex",
+      "transport": "tmux",
+      "transportLocator": "as-codex:@1.%1",
+      "role": "session",
+      "currentSessionKey": "11111111-1111-4111-8111-111111111111:codex:55555555-5555-4555-8555-555555555555",
+      "bindingConfidence": "confirmed",
+      "launchId": "66666666-6666-4666-8666-666666666666",
+      "createdAt": 1784141900000,
+      "lastObservedAt": 1784142000000,
+      "clientAttached": false,
+      "futureSurfaceField": "safe"
+    }
+  ],
+  "capabilities": [
+    {
+      "provider": "codex",
+      "available": true,
+      "providerVersion": "0.144.4",
+      "testedContractRange": {
+        "minimum": "0.144.4",
+        "maximum": "0.144.4"
+      },
+      "features": ["app_server_thread_list", "schema_fingerprint"],
+      "schemaFingerprint": "5d8251e1e2f713a3c567c927386f84f2f94692d4721b90d8ff36d0ff92877621",
+      "degradedReasons": [],
+      "futureCapabilityField": true
+    }
+  ],
+  "errors": [],
+  "futureEnvelopeField": {"ignored": true}
+}

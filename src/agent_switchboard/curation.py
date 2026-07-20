@@ -70,8 +70,8 @@ def detail_envelope(
     timestamp = time.time_ns() // 1_000_000 if generated_at is None else generated_at
     return SessionDetailEnvelope.from_dict(
         {
-            "schemaVersion": 1,
-            "protocolVersion": 1,
+            "schemaVersion": 2,
+            "protocolVersion": 2,
             "generatedAt": timestamp,
             "session": session_record(rows.session),
             "handoffs": [_handoff_record(row) for row in rows.handoffs],

@@ -10,18 +10,20 @@ import pytest
 from agent_switchboard.domain import (
     Activity,
     AgentSession,
-    AmbiguousLocationError,
+    AmbiguousCheckoutError,
     Attachment,
+    Checkout,
+    CheckoutConflictError,
+    CheckoutId,
     Handoff,
     HandoffSource,
     HostId,
-    LocationConflictError,
-    LocationId,
     Project,
     ProjectConflictError,
     ProjectId,
-    ProjectLocation,
+    ProjectRepository,
     ProviderId,
+    RepositoryId,
     Resumability,
     RuntimeLocator,
     RuntimePresence,
@@ -32,17 +34,18 @@ from agent_switchboard.domain import (
     SurfaceRole,
     Transport,
     ValidationError,
-    assign_location,
-    match_project_location,
-    merge_locations,
+    assign_checkout,
+    match_checkout,
+    merge_checkouts,
     merge_projects,
 )
 
 HOST_A = HostId("11111111-1111-4111-8111-111111111111")
 HOST_B = HostId("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
 PROJECT_ID = ProjectId("22222222-2222-4222-8222-222222222222")
-LOCATION_A = LocationId("33333333-3333-4333-8333-333333333333")
-LOCATION_B = LocationId("44444444-4444-4444-8444-444444444444")
+REPOSITORY_ID = RepositoryId("66666666-6666-4666-8666-666666666666")
+LOCATION_A = CheckoutId("33333333-3333-4333-8333-333333333333")
+LOCATION_B = CheckoutId("44444444-4444-4444-8444-444444444444")
 SESSION_ID = UUID("55555555-5555-4555-8555-555555555555")
 
 
@@ -90,11 +93,11 @@ def test_agent_session_validates_independent_axes(tmp_path: Path) -> None:
     with pytest.raises(ValidationError, match="path contains control"):
         AgentSession(key, controlled_path)
     with pytest.raises(ValidationError, match="path contains control"):
-        ProjectLocation(LOCATION_A, PROJECT_ID, HOST_A, controlled_path)
+        Checkout(LOCATION_A, REPOSITORY_ID, HOST_A, controlled_path)
     with pytest.raises(ValidationError, match="control"):
-        ProjectLocation(
+        Checkout(
             LOCATION_A,
-            PROJECT_ID,
+            REPOSITORY_ID,
             HOST_A,
             tmp_path,
             display_name="bad\u009bdisplay",
@@ -187,7 +190,6 @@ def test_project_merge_unions_sanitized_aliases_and_detects_conflict() -> None:
         "Switchboard",
         aliases=(" agent router ", "Sessions"),
         default_provider=ProviderId.CODEX,
-        context_sources=("README.md",),
         created_at=newer,
         updated_at=older,
     )
@@ -196,7 +198,6 @@ def test_project_merge_unions_sanitized_aliases_and_detects_conflict() -> None:
         "Switchboard",
         aliases=("Agent   Router", "remote"),
         default_provider=ProviderId.CODEX,
-        context_sources=("README.md",),
         created_at=older,
         updated_at=newer,
     )
@@ -206,29 +207,27 @@ def test_project_merge_unions_sanitized_aliases_and_detects_conflict() -> None:
     assert merged.updated_at == newer
     with pytest.raises(ProjectConflictError) as error:
         merge_projects([first, Project(PROJECT_ID, "Different")])
-    assert {"name", "default_provider", "context_sources"} <= set(error.value.fields)
+    assert {"name", "default_provider"} <= set(error.value.fields)
 
 
-def test_location_merge_rejects_conflicts_and_multiple_defaults(tmp_path: Path) -> None:
-    first = ProjectLocation(LOCATION_A, PROJECT_ID, HOST_A, tmp_path, is_default=True)
-    duplicate = ProjectLocation(
-        LOCATION_A, PROJECT_ID, HOST_A, tmp_path, is_default=True
-    )
-    assert merge_locations([first, duplicate]) == (first,)
-    with pytest.raises(LocationConflictError, match="conflicting"):
-        merge_locations(
+def test_checkout_merge_rejects_conflicts_and_multiple_defaults(tmp_path: Path) -> None:
+    first = Checkout(LOCATION_A, REPOSITORY_ID, HOST_A, tmp_path, is_default=True)
+    duplicate = Checkout(LOCATION_A, REPOSITORY_ID, HOST_A, tmp_path, is_default=True)
+    assert merge_checkouts([first, duplicate]) == (first,)
+    with pytest.raises(CheckoutConflictError, match="conflicting"):
+        merge_checkouts(
             [
                 first,
-                ProjectLocation(LOCATION_A, PROJECT_ID, HOST_B, tmp_path),
+                Checkout(LOCATION_A, REPOSITORY_ID, HOST_B, tmp_path),
             ]
         )
-    with pytest.raises(LocationConflictError, match="multiple defaults"):
-        merge_locations(
+    with pytest.raises(CheckoutConflictError, match="multiple defaults"):
+        merge_checkouts(
             [
                 first,
-                ProjectLocation(
+                Checkout(
                     LOCATION_B,
-                    PROJECT_ID,
+                    REPOSITORY_ID,
                     HOST_A,
                     tmp_path / "worktree",
                     is_default=True,
@@ -237,16 +236,16 @@ def test_location_merge_rejects_conflicts_and_multiple_defaults(tmp_path: Path) 
         )
 
 
-def test_location_merge_keeps_latest_observation(tmp_path: Path) -> None:
+def test_checkout_merge_keeps_latest_observation(tmp_path: Path) -> None:
     older = datetime(2026, 1, 1, tzinfo=UTC)
     newer = older + timedelta(seconds=1)
-    first = ProjectLocation(
-        LOCATION_A, PROJECT_ID, HOST_A, tmp_path, last_observed_at=older
+    first = Checkout(
+        LOCATION_A, REPOSITORY_ID, HOST_A, tmp_path, last_observed_at=older
     )
-    second = ProjectLocation(
-        LOCATION_A, PROJECT_ID, HOST_A, tmp_path, last_observed_at=newer
+    second = Checkout(
+        LOCATION_A, REPOSITORY_ID, HOST_A, tmp_path, last_observed_at=newer
     )
-    assert merge_locations([first, second])[0].last_observed_at == newer
+    assert merge_checkouts([first, second])[0].last_observed_at == newer
 
 
 def test_canonical_longest_path_matching_and_assignment(tmp_path: Path) -> None:
@@ -254,24 +253,28 @@ def test_canonical_longest_path_matching_and_assignment(tmp_path: Path) -> None:
     worktree = repository / "worktrees" / "feature"
     cwd = worktree / "src"
     cwd.mkdir(parents=True)
-    root_location = ProjectLocation(LOCATION_A, PROJECT_ID, HOST_A, repository)
-    worktree_location = ProjectLocation(LOCATION_B, PROJECT_ID, HOST_A, worktree)
+    root_checkout = Checkout(LOCATION_A, REPOSITORY_ID, HOST_A, repository)
+    worktree_checkout = Checkout(LOCATION_B, REPOSITORY_ID, HOST_A, worktree)
     assert (
-        match_project_location(cwd, HOST_A, [root_location, worktree_location])
-        == worktree_location
+        match_checkout(cwd, HOST_A, [root_checkout, worktree_checkout])
+        == worktree_checkout
     )
-    assert match_project_location(cwd, HOST_B, [root_location]) is None
+    assert match_checkout(cwd, HOST_B, [root_checkout]) is None
     session = AgentSession(SessionKey(HOST_A, ProviderId.CODEX, SESSION_ID), cwd)
-    assigned = assign_location(session, [root_location, worktree_location])
+    memberships = [ProjectRepository(PROJECT_ID, REPOSITORY_ID, True)]
+    assigned = assign_checkout(session, [root_checkout, worktree_checkout], memberships)
     assert assigned.project_id == PROJECT_ID
-    assert assigned.location_id == LOCATION_B
-    assert assigned.metadata_source == "location_match"
+    assert assigned.checkout_id == LOCATION_B
+    assert assigned.metadata_source == "checkout_match"
     curated = AgentSession(
         SessionKey(HOST_A, ProviderId.CODEX, SESSION_ID),
         cwd,
         project_id=ProjectId("77777777-7777-4777-8777-777777777777"),
     )
-    assert assign_location(curated, [root_location, worktree_location]) is curated
+    assert (
+        assign_checkout(curated, [root_checkout, worktree_checkout], memberships)
+        is curated
+    )
 
 
 def test_matching_resolves_symlinks_and_reports_equal_ambiguity(tmp_path: Path) -> None:
@@ -279,14 +282,14 @@ def test_matching_resolves_symlinks_and_reports_equal_ambiguity(tmp_path: Path) 
     real.mkdir()
     link = tmp_path / "link"
     link.symlink_to(real, target_is_directory=True)
-    first = ProjectLocation(LOCATION_A, PROJECT_ID, HOST_A, real)
-    assert match_project_location(link, HOST_A, [first]) == first
-    second = ProjectLocation(
+    first = Checkout(LOCATION_A, REPOSITORY_ID, HOST_A, real)
+    assert match_checkout(link, HOST_A, [first]) == first
+    second = Checkout(
         LOCATION_B,
-        ProjectId("77777777-7777-4777-8777-777777777777"),
+        RepositoryId("77777777-7777-4777-8777-777777777777"),
         HOST_A,
         real,
     )
-    with pytest.raises(AmbiguousLocationError) as error:
-        match_project_location(real / "src", HOST_A, [first, second])
-    assert set(error.value.locations) == {first, second}
+    with pytest.raises(AmbiguousCheckoutError) as error:
+        match_checkout(real / "src", HOST_A, [first, second])
+    assert set(error.value.checkouts) == {first, second}

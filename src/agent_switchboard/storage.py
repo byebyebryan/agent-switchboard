@@ -24,20 +24,24 @@ from .domain import (
     Activity,
     ActivityReason,
     Attachment,
+    Checkout,
+    CheckoutId,
+    CheckoutKind,
     HandoffId,
     HostId,
     LaunchId,
-    LocationId,
     NormalizedRuntimeObservation,
     ProjectId,
-    ProjectLocation,
+    ProjectRepository,
     ProviderId,
+    RepositoryId,
     RuntimePresence,
     SessionKey,
     SurfaceId,
+    TaskId,
     UUIDId,
     ValidationError,
-    match_project_location,
+    match_checkout,
     normalize_handoff_text,
 )
 from .domain import (
@@ -59,6 +63,7 @@ DEFAULT_BUSY_TIMEOUT_MS: Final = 5_000
 MAX_BUSY_TIMEOUT_MS: Final = 30_000
 DEFAULT_EVENT_LIMIT: Final = 1_000
 MAX_EVENT_LIMIT: Final = 100_000
+DEFAULT_SNAPSHOT_TASK_LIMIT: Final = 1_000
 DEFAULT_SNAPSHOT_SESSION_LIMIT: Final = 1_000
 DEFAULT_SNAPSHOT_RUNTIME_LIMIT: Final = 10_000
 DEFAULT_LIVENESS_OBSERVATION_LIMIT: Final = 16
@@ -92,7 +97,8 @@ _LAUNCH_REQUEST_FIELDS: Final = (
     "provider",
     "action",
     "project_id",
-    "location_id",
+    "task_id",
+    "checkout_id",
     "cwd",
     "source_handoff_id",
     "target_session_key",
@@ -100,7 +106,8 @@ _LAUNCH_REQUEST_FIELDS: Final = (
 )
 _SESSION_FIELDS: Final = {
     "project_id",
-    "location_id",
+    "task_id",
+    "checkout_id",
     "name",
     "provider_name",
     "name_source",
@@ -252,6 +259,14 @@ class ContinuationError(StorageError):
         self.code = code
 
 
+class TaskConflict(StorageError):
+    """A task lifecycle or ownership invariant blocks an operation."""
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+
+
 class RegistryClosed(StorageError):
     """An operation was attempted after the registry was closed."""
 
@@ -370,7 +385,11 @@ class HostSnapshotRows:
 
     host: dict[str, Any]
     projects: tuple[dict[str, Any], ...]
-    locations: tuple[dict[str, Any], ...]
+    project_repositories: tuple[dict[str, Any], ...]
+    repositories: tuple[dict[str, Any], ...]
+    checkouts: tuple[dict[str, Any], ...]
+    tasks: tuple[dict[str, Any], ...]
+    retained_task_count: int
     sessions: tuple[dict[str, Any], ...]
     retained_session_count: int
     runtimes: tuple[dict[str, Any], ...]
@@ -504,6 +523,19 @@ def _normalize_curation_text(value: str, field: str, *, maximum: int) -> str:
     _reject_controls(normalized, field)
     _reject_invalid_unicode(normalized, field)
     return normalized
+
+
+def _normalize_task_purpose(value: str | None) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise StorageError("task purpose must be a string")
+    normalized = unicodedata.normalize("NFC", value).strip()
+    if len(normalized) > 4096:
+        raise StorageError("task purpose exceeds 4096 characters")
+    _reject_controls(normalized, "task purpose", allow_multiline=True)
+    _reject_invalid_unicode(normalized, "task purpose")
+    return normalized or None
 
 
 def _row_dict(row: sqlite3.Row | None) -> dict[str, Any] | None:
@@ -951,8 +983,8 @@ class Registry:
     ) -> list[dict[str, Any]]:
         """Atomically replace the local host's configured project declarations.
 
-        Missing rows are marked undeclared; no project, location, session, or
-        handoff history is deleted.  Stable location IDs cannot move between a
+        Missing rows are marked undeclared; no project, checkout, session, or
+        handoff history is deleted.  Stable checkout IDs cannot move between a
         project or host, while their configured paths and display fields can
         change authoritatively. Remote catalogs remain cached snapshots and are
         merged at the read layer rather than materialized here.
@@ -979,8 +1011,13 @@ class Registry:
                 (timestamp,),
             )
             connection.execute(
+                "UPDATE repositories SET declared = 0, updated_at = ? "
+                "WHERE declared = 1",
+                (timestamp,),
+            )
+            connection.execute(
                 """
-                UPDATE project_locations
+                UPDATE checkouts
                 SET declared = 0, is_default = 0, updated_at = ?
                 WHERE host_id = ? AND declared = 1
                 """,
@@ -992,15 +1029,13 @@ class Registry:
                     """
                     INSERT INTO projects(
                         project_id, name, aliases_json, default_provider,
-                        default_transport, context_sources_json, declared,
-                        created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?)
+                        default_transport, declared, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, 1, ?, ?)
                     ON CONFLICT(project_id) DO UPDATE SET
                         name = excluded.name,
                         aliases_json = excluded.aliases_json,
                         default_provider = excluded.default_provider,
                         default_transport = excluded.default_transport,
-                        context_sources_json = excluded.context_sources_json,
                         declared = 1,
                         updated_at = excluded.updated_at
                     """,
@@ -1010,67 +1045,127 @@ class Registry:
                         _canonical_json(project["aliases"]),
                         project["default_provider"],
                         project["default_transport"],
-                        _canonical_json(project["context_sources"]),
                         timestamp,
                         timestamp,
                     ),
                 )
-                for location in project["locations"]:
-                    existing = connection.execute(
+                connection.execute(
+                    "DELETE FROM project_repositories WHERE project_id = ?",
+                    (project["project_id"],),
+                )
+                for repository in project["repositories"]:
+                    existing_repository = connection.execute(
                         """
-                        SELECT project_id, host_id
-                        FROM project_locations WHERE location_id = ?
+                        SELECT kind, kind_provisional
+                        FROM repositories WHERE repository_id = ?
                         """,
-                        (location["location_id"],),
+                        (repository["repository_id"],),
                     ).fetchone()
-                    if existing is not None and (
-                        existing["project_id"] != project["project_id"]
-                        or existing["host_id"] != host_id
+                    if (
+                        existing_repository is not None
+                        and existing_repository["kind"] != repository["kind"]
+                        and not bool(existing_repository["kind_provisional"])
                     ):
                         raise IdentityConflict(
-                            f"location ID {location['location_id']!r} already belongs "
-                            "to another project or host"
+                            f"repository ID {repository['repository_id']!r} "
+                            "changed kind"
                         )
-                    try:
-                        connection.execute(
+                    connection.execute(
+                        """
+                        INSERT INTO repositories(
+                            repository_id, name, kind, context_sources_json,
+                            declared, created_at, updated_at
+                        ) VALUES (?, ?, ?, ?, 1, ?, ?)
+                        ON CONFLICT(repository_id) DO UPDATE SET
+                            name = excluded.name,
+                            kind = excluded.kind,
+                            kind_provisional = 0,
+                            context_sources_json = excluded.context_sources_json,
+                            declared = 1,
+                            updated_at = excluded.updated_at
+                        """,
+                        (
+                            repository["repository_id"],
+                            repository["name"],
+                            repository["kind"],
+                            _canonical_json(repository["context_sources"]),
+                            timestamp,
+                            timestamp,
+                        ),
+                    )
+                    connection.execute(
+                        """
+                        INSERT INTO project_repositories(
+                            project_id, repository_id, is_primary,
+                            created_at, updated_at
+                        ) VALUES (?, ?, ?, ?, ?)
+                        """,
+                        (
+                            project["project_id"],
+                            repository["repository_id"],
+                            int(repository["is_primary"]),
+                            timestamp,
+                            timestamp,
+                        ),
+                    )
+                    for checkout in repository["checkouts"]:
+                        existing = connection.execute(
                             """
-                            INSERT INTO project_locations(
-                                location_id, project_id, host_id, path, display_name,
-                                repository_identity, provider_override,
-                                transport_override, is_default, declared,
-                                last_observed_at, created_at, updated_at
-                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)
-                            ON CONFLICT(location_id) DO UPDATE SET
-                                path = excluded.path,
-                                display_name = excluded.display_name,
-                                repository_identity = excluded.repository_identity,
-                                provider_override = excluded.provider_override,
-                                transport_override = excluded.transport_override,
-                                is_default = excluded.is_default,
-                                declared = 1,
-                                last_observed_at = excluded.last_observed_at,
-                                updated_at = excluded.updated_at
-                            """,
-                            (
-                                location["location_id"],
-                                project["project_id"],
-                                host_id,
-                                location["path"],
-                                location["display_name"],
-                                location["repository_identity"],
-                                location["provider_override"],
-                                location["transport_override"],
-                                int(location["is_default"]),
-                                location["last_observed_at"],
-                                timestamp,
-                                timestamp,
-                            ),
-                        )
-                    except sqlite3.IntegrityError as error:
-                        raise IdentityConflict(
-                            "location identity/path conflict for "
-                            f"{location['location_id']!r}"
-                        ) from error
+                        SELECT repository_id, host_id
+                        FROM checkouts WHERE checkout_id = ?
+                        """,
+                            (checkout["checkout_id"],),
+                        ).fetchone()
+                        if existing is not None and (
+                            existing["repository_id"] != repository["repository_id"]
+                            or existing["host_id"] != host_id
+                        ):
+                            raise IdentityConflict(
+                                f"checkout ID {checkout['checkout_id']!r} already "
+                                "belongs to another repository or host"
+                            )
+                        try:
+                            connection.execute(
+                                """
+                                INSERT INTO checkouts(
+                                    checkout_id, repository_id, host_id, path, kind,
+                                    display_name, provider_override,
+                                    transport_override, is_default, declared, present,
+                                    last_observed_at, created_at, updated_at
+                                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)
+                                ON CONFLICT(checkout_id) DO UPDATE SET
+                                    path = excluded.path,
+                                    kind = excluded.kind,
+                                    display_name = excluded.display_name,
+                                    provider_override = excluded.provider_override,
+                                    transport_override = excluded.transport_override,
+                                    is_default = excluded.is_default,
+                                    declared = 1,
+                                    present = excluded.present,
+                                    last_observed_at = excluded.last_observed_at,
+                                    updated_at = excluded.updated_at
+                                """,
+                                (
+                                    checkout["checkout_id"],
+                                    repository["repository_id"],
+                                    host_id,
+                                    checkout["path"],
+                                    checkout["kind"],
+                                    checkout["display_name"],
+                                    checkout["provider_override"],
+                                    checkout["transport_override"],
+                                    int(checkout["is_default"]),
+                                    int(checkout["present"]),
+                                    checkout["last_observed_at"],
+                                    timestamp,
+                                    timestamp,
+                                ),
+                            )
+                        except sqlite3.IntegrityError as error:
+                            raise IdentityConflict(
+                                "checkout identity/path conflict for "
+                                f"{checkout['checkout_id']!r}"
+                            ) from error
 
             connection.execute(
                 """
@@ -1091,7 +1186,8 @@ class Registry:
     ) -> list[dict[str, Any]]:
         normalized: list[dict[str, Any]] = []
         project_ids: set[str] = set()
-        location_ids: set[str] = set()
+        repository_declarations: dict[str, dict[str, Any]] = {}
+        checkout_ids: set[str] = set()
         paths: set[str] = set()
 
         for raw_project in projects:
@@ -1108,71 +1204,137 @@ class Registry:
             project_ids.add(project_id)
 
             raw_aliases = raw_project.get("aliases", ())
-            raw_context = raw_project.get("context_sources", ())
-            raw_locations = raw_project.get("locations", ())
-            if isinstance(raw_aliases, (str, bytes)) or isinstance(
-                raw_context, (str, bytes)
-            ):
-                raise StorageError("aliases and context_sources must be sequences")
-            if isinstance(raw_locations, (str, bytes)):
-                raise StorageError("locations must be a sequence")
+            raw_repositories = raw_project.get("repositories")
+            if raw_repositories is None:
+                # Private migration input used by copied v1 registries and
+                # pre-v2 core callers. Public config/Snapshot parsing remains
+                # strict v2 and never accepts this flattened shape.
+                raw_repositories = (
+                    {
+                        "repository_id": project_id,
+                        "name": name,
+                        "kind": "git",
+                        "is_primary": True,
+                        "context_sources": raw_project.get("context_sources", ()),
+                        "checkouts": raw_project.get("checkouts", ()),
+                    },
+                )
+            if isinstance(raw_aliases, (str, bytes)):
+                raise StorageError("aliases must be a sequence")
+            if isinstance(raw_repositories, (str, bytes)):
+                raise StorageError("repositories must be a sequence")
 
             aliases = sorted({str(alias) for alias in raw_aliases})
-            context_sources = [str(source) for source in raw_context]
             for alias in aliases:
                 _reject_controls(alias, "project alias")
-            for source in context_sources:
-                _reject_controls(source, "context source")
-            locations: list[dict[str, Any]] = []
-            default_count = 0
-            for raw_location in raw_locations:
+            repositories: list[dict[str, Any]] = []
+            primary_count = 0
+            for raw_repository in raw_repositories:
                 try:
-                    location_id = _canonical_uuid_id(
-                        raw_location["location_id"], LocationId, "location_id"
+                    repository_id = _canonical_uuid_id(
+                        raw_repository["repository_id"],
+                        RepositoryId,
+                        "repository_id",
                     )
-                    path = str(raw_location["path"])
+                    repository_name = str(raw_repository["name"])
                 except KeyError as error:
                     raise StorageError(
-                        f"missing project location field: {error.args[0]}"
+                        f"missing project repository field: {error.args[0]}"
                     ) from error
-                if location_id in location_ids:
-                    raise IdentityConflict(f"duplicate location ID: {location_id}")
-                if not Path(path).is_absolute():
+                _reject_controls(repository_name, "repository name")
+                kind = str(raw_repository.get("kind", "git"))
+                if kind not in {"git", "directory"}:
+                    raise StorageError("repository kind must be git or directory")
+                raw_context = raw_repository.get("context_sources", ())
+                raw_checkouts = raw_repository.get("checkouts", ())
+                if isinstance(raw_context, (str, bytes)):
+                    raise StorageError("context_sources must be a sequence")
+                if isinstance(raw_checkouts, (str, bytes)):
+                    raise StorageError("checkouts must be a sequence")
+                context_sources = [str(source) for source in raw_context]
+                for source in context_sources:
+                    _reject_controls(source, "context source")
+                is_primary = bool(raw_repository.get("is_primary", False))
+                primary_count += int(is_primary)
+                checkouts: list[dict[str, Any]] = []
+                default_count = 0
+                for raw_checkout in raw_checkouts:
+                    try:
+                        checkout_id = _canonical_uuid_id(
+                            raw_checkout["checkout_id"], CheckoutId, "checkout_id"
+                        )
+                        path = str(raw_checkout["path"])
+                    except KeyError as error:
+                        raise StorageError(
+                            f"missing repository checkout field: {error.args[0]}"
+                        ) from error
+                    if checkout_id in checkout_ids:
+                        raise IdentityConflict(f"duplicate checkout ID: {checkout_id}")
+                    if not Path(path).is_absolute():
+                        raise StorageError(
+                            f"configured checkout path must be absolute: {path!r}"
+                        )
+                    _reject_controls(path, "checkout path")
+                    _reject_controls(
+                        raw_checkout.get("display_name"), "checkout display_name"
+                    )
+                    if path in paths:
+                        raise IdentityConflict(
+                            f"duplicate configured checkout path: {path}"
+                        )
+                    checkout_kind = str(
+                        raw_checkout.get(
+                            "kind", "directory" if kind == "directory" else "main"
+                        )
+                    )
+                    if checkout_kind not in {"main", "worktree", "directory"}:
+                        raise StorageError("invalid checkout kind")
+                    checkout_ids.add(checkout_id)
+                    paths.add(path)
+                    is_default = bool(raw_checkout.get("is_default", False))
+                    default_count += int(is_default)
+                    checkouts.append(
+                        {
+                            "checkout_id": checkout_id,
+                            "path": path,
+                            "kind": checkout_kind,
+                            "display_name": raw_checkout.get("display_name"),
+                            "provider_override": raw_checkout.get("provider_override"),
+                            "transport_override": raw_checkout.get(
+                                "transport_override"
+                            ),
+                            "is_default": is_default,
+                            "present": bool(raw_checkout.get("present", True)),
+                            "last_observed_at": raw_checkout.get("last_observed_at"),
+                        }
+                    )
+                if default_count > 1:
                     raise StorageError(
-                        f"configured location path must be absolute: {path!r}"
+                        f"repository {repository_id!r} has more than one default "
+                        "checkout on this host"
                     )
-                _reject_controls(path, "location path")
-                _reject_controls(
-                    raw_location.get("display_name"), "location display_name"
-                )
-                _reject_controls(
-                    raw_location.get("repository_identity"),
-                    "location repository_identity",
-                )
-                if path in paths:
+                declaration = {
+                    "repository_id": repository_id,
+                    "name": repository_name,
+                    "kind": kind,
+                    "context_sources": context_sources,
+                }
+                prior = repository_declarations.get(repository_id)
+                if prior is not None and prior != declaration:
                     raise IdentityConflict(
-                        f"duplicate configured location path: {path}"
+                        f"repository ID {repository_id!r} has conflicting declarations"
                     )
-                location_ids.add(location_id)
-                paths.add(path)
-                is_default = bool(raw_location.get("is_default", False))
-                default_count += int(is_default)
-                locations.append(
+                repository_declarations[repository_id] = declaration
+                repositories.append(
                     {
-                        "location_id": location_id,
-                        "path": path,
-                        "display_name": raw_location.get("display_name"),
-                        "repository_identity": raw_location.get("repository_identity"),
-                        "provider_override": raw_location.get("provider_override"),
-                        "transport_override": raw_location.get("transport_override"),
-                        "is_default": is_default,
-                        "last_observed_at": raw_location.get("last_observed_at"),
+                        **declaration,
+                        "is_primary": is_primary,
+                        "checkouts": checkouts,
                     }
                 )
-            if default_count > 1:
+            if repositories and primary_count != 1:
                 raise StorageError(
-                    f"project {project_id!r} has more than one default "
-                    "location on this host"
+                    f"project {project_id!r} must have exactly one primary repository"
                 )
             normalized.append(
                 {
@@ -1181,8 +1343,7 @@ class Registry:
                     "aliases": aliases,
                     "default_provider": raw_project.get("default_provider"),
                     "default_transport": raw_project.get("default_transport"),
-                    "context_sources": context_sources,
-                    "locations": locations,
+                    "repositories": repositories,
                 }
             )
 
@@ -1204,20 +1365,603 @@ class Registry:
         for row in rows:
             project = dict(row)
             project["aliases"] = json.loads(project.pop("aliases_json"))
-            project["context_sources"] = json.loads(project.pop("context_sources_json"))
-            project["locations"] = [
-                dict(location)
-                for location in self.connection.execute(
-                    """
-                    SELECT * FROM project_locations
-                    WHERE project_id = ?
+            repository_rows = self.connection.execute(
+                """
+                SELECT repository.*, membership.is_primary
+                FROM project_repositories AS membership
+                JOIN repositories AS repository
+                  ON repository.repository_id = membership.repository_id
+                WHERE membership.project_id = ?
+                ORDER BY membership.is_primary DESC, repository.repository_id
+                """,
+                (project["project_id"],),
+            ).fetchall()
+            project["repositories"] = []
+            for repository_row in repository_rows:
+                repository = dict(repository_row)
+                repository["context_sources"] = json.loads(
+                    repository.pop("context_sources_json")
+                )
+                repository["checkouts"] = [
+                    dict(checkout)
+                    for checkout in self.connection.execute(
+                        """
+                    SELECT * FROM checkouts
+                    WHERE repository_id = ?
                     ORDER BY host_id, is_default DESC, path
                     """,
-                    (project["project_id"],),
-                ).fetchall()
-            ]
+                        (repository["repository_id"],),
+                    ).fetchall()
+                ]
+                project["repositories"].append(repository)
             projects.append(project)
         return projects
+
+    def reconcile_repository_checkouts(
+        self,
+        *,
+        host_id: str,
+        repository_id: str,
+        observations: Sequence[Mapping[str, Any]],
+        observed_at: int | None = None,
+    ) -> list[dict[str, Any]]:
+        """Apply proven Git checkout evidence without mutating the repository."""
+
+        host_id = _canonical_host_id(host_id)
+        repository_id = _canonical_uuid_id(repository_id, RepositoryId, "repository_id")
+        timestamp = now_ms() if observed_at is None else observed_at
+        normalized: list[dict[str, Any]] = []
+        paths: set[str] = set()
+        git_dirs: set[str] = set()
+        for observation in observations:
+            path = str(Path(str(observation["path"])).resolve(strict=False))
+            git_common_dir = str(
+                Path(str(observation["git_common_dir"])).resolve(strict=False)
+            )
+            git_dir = str(Path(str(observation["git_dir"])).resolve(strict=False))
+            kind = str(observation["kind"])
+            if kind not in {"main", "worktree"}:
+                raise StorageError("discovered Git checkout kind is invalid")
+            branch = observation.get("branch")
+            head_oid = observation.get("head_oid")
+            for value, field in (
+                (path, "checkout path"),
+                (git_common_dir, "Git common directory"),
+                (git_dir, "Git directory"),
+                (branch, "branch"),
+                (head_oid, "HEAD OID"),
+            ):
+                _reject_controls(value, field)
+            if path in paths or git_dir in git_dirs:
+                raise IdentityConflict("duplicate discovered Git checkout evidence")
+            paths.add(path)
+            git_dirs.add(git_dir)
+            normalized.append(
+                {
+                    "path": path,
+                    "kind": kind,
+                    "branch": branch,
+                    "head_oid": head_oid,
+                    "git_common_dir": git_common_dir,
+                    "git_dir": git_dir,
+                }
+            )
+        with self.transaction(immediate=True) as connection:
+            repository = connection.execute(
+                "SELECT * FROM repositories WHERE repository_id = ?",
+                (repository_id,),
+            ).fetchone()
+            if repository is None or repository["kind"] != "git":
+                raise StorageError("unknown Git repository")
+            retained = connection.execute(
+                """
+                SELECT * FROM checkouts
+                WHERE repository_id = ? AND host_id = ?
+                ORDER BY declared DESC, checkout_id
+                """,
+                (repository_id, host_id),
+            ).fetchall()
+            used_ids: set[str] = set()
+            for observation in normalized:
+                matches = [
+                    row
+                    for row in retained
+                    if row["git_dir"] == observation["git_dir"]
+                    or row["path"] == observation["path"]
+                ]
+                if len(matches) > 1:
+                    raise IdentityConflict(
+                        "discovered Git evidence matches multiple retained checkouts"
+                    )
+                existing = matches[0] if matches else None
+                checkout_id = (
+                    str(uuid.uuid4())
+                    if existing is None
+                    else str(existing["checkout_id"])
+                )
+                if existing is not None:
+                    for field in ("git_common_dir", "git_dir"):
+                        if (
+                            existing[field] is not None
+                            and existing[field] != observation[field]
+                        ):
+                            raise IdentityConflict(
+                                "retained Git checkout evidence changed identity"
+                            )
+                    connection.execute(
+                        """
+                        UPDATE checkouts
+                        SET path = ?, kind = ?, branch = ?, head_oid = ?,
+                            present = 1, git_common_dir = ?, git_dir = ?,
+                            last_observed_at = ?, updated_at = ?
+                        WHERE checkout_id = ?
+                        """,
+                        (
+                            observation["path"],
+                            observation["kind"],
+                            observation["branch"],
+                            observation["head_oid"],
+                            observation["git_common_dir"],
+                            observation["git_dir"],
+                            timestamp,
+                            timestamp,
+                            checkout_id,
+                        ),
+                    )
+                else:
+                    connection.execute(
+                        """
+                        INSERT INTO checkouts(
+                            checkout_id, repository_id, host_id, path, kind,
+                            branch, head_oid, is_default, declared, present,
+                            git_common_dir, git_dir, last_observed_at,
+                            created_at, updated_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, 0, 0, 1, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            checkout_id,
+                            repository_id,
+                            host_id,
+                            observation["path"],
+                            observation["kind"],
+                            observation["branch"],
+                            observation["head_oid"],
+                            observation["git_common_dir"],
+                            observation["git_dir"],
+                            timestamp,
+                            timestamp,
+                            timestamp,
+                        ),
+                    )
+                used_ids.add(checkout_id)
+            for row in retained:
+                if str(row["checkout_id"]) not in used_ids:
+                    connection.execute(
+                        """
+                        UPDATE checkouts
+                        SET present = 0, last_observed_at = ?, updated_at = ?
+                        WHERE checkout_id = ?
+                        """,
+                        (timestamp, timestamp, row["checkout_id"]),
+                    )
+            rows = connection.execute(
+                """
+                SELECT * FROM checkouts
+                WHERE repository_id = ? AND host_id = ?
+                ORDER BY is_default DESC, path, checkout_id
+                """,
+                (repository_id, host_id),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def create_task(
+        self,
+        *,
+        task_id: str,
+        host_id: str,
+        project_id: str,
+        title: str,
+        checkout_id: str | None = None,
+        purpose: str | None = None,
+        preferred_provider: str | None = None,
+        observed_at: int | None = None,
+    ) -> dict[str, Any]:
+        """Create one explicit open task without starting a provider."""
+
+        task_id = _canonical_uuid_id(task_id, TaskId, "task_id")
+        host_id = _canonical_host_id(host_id)
+        project_id = _canonical_uuid_id(project_id, ProjectId, "project_id")
+        if checkout_id is not None:
+            checkout_id = _canonical_uuid_id(checkout_id, CheckoutId, "checkout_id")
+        title = _normalize_curation_text(title, "task title", maximum=256)
+        purpose = _normalize_task_purpose(purpose)
+        if preferred_provider not in {None, "codex", "claude"}:
+            raise StorageError("preferred_provider must be codex or claude")
+        timestamp = now_ms() if observed_at is None else observed_at
+        try:
+            with self.transaction(immediate=True) as connection:
+                connection.execute(
+                    """
+                    INSERT INTO tasks(
+                        task_id, host_id, project_id, checkout_id, title, purpose,
+                        preferred_provider, status, pinned, current_session_key,
+                        created_at, updated_at, closed_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, 'open', 0, NULL, ?, ?, NULL)
+                    """,
+                    (
+                        task_id,
+                        host_id,
+                        project_id,
+                        checkout_id,
+                        title,
+                        purpose,
+                        preferred_provider,
+                        timestamp,
+                        timestamp,
+                    ),
+                )
+                row = connection.execute(
+                    "SELECT * FROM tasks WHERE task_id = ?", (task_id,)
+                ).fetchone()
+        except sqlite3.IntegrityError as error:
+            message = str(error)
+            if "worktree already belongs" in message:
+                raise TaskConflict("worktree_claimed", message) from error
+            raise TaskConflict("task_create_conflict", message) from error
+        result = _row_dict(row)
+        assert result is not None
+        return result
+
+    def get_task(self, task_id: str) -> dict[str, Any] | None:
+        task_id = _canonical_uuid_id(task_id, TaskId, "task_id")
+        return _row_dict(
+            self.connection.execute(
+                "SELECT * FROM tasks WHERE task_id = ?", (task_id,)
+            ).fetchone()
+        )
+
+    def list_tasks(
+        self,
+        *,
+        host_id: str | None = None,
+        project_id: str | None = None,
+        status: str | None = None,
+    ) -> list[dict[str, Any]]:
+        clauses: list[str] = []
+        parameters: list[str] = []
+        if host_id is not None:
+            clauses.append("host_id = ?")
+            parameters.append(_canonical_host_id(host_id))
+        if project_id is not None:
+            clauses.append("project_id = ?")
+            parameters.append(_canonical_uuid_id(project_id, ProjectId, "project_id"))
+        if status is not None:
+            if status not in {"open", "closed"}:
+                raise StorageError("task status must be open or closed")
+            clauses.append("status = ?")
+            parameters.append(status)
+        where = "" if not clauses else "WHERE " + " AND ".join(clauses)
+        rows = self.connection.execute(
+            f"""
+            SELECT * FROM tasks
+            {where}
+            ORDER BY pinned DESC, updated_at DESC, task_id
+            """,
+            parameters,
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def list_task_sessions(self, task_id: str) -> list[dict[str, Any]]:
+        task_id = _canonical_uuid_id(task_id, TaskId, "task_id")
+        return [
+            dict(row)
+            for row in self.connection.execute(
+                """
+                SELECT * FROM sessions WHERE task_id = ?
+                ORDER BY first_observed_at, session_key
+                """,
+                (task_id,),
+            ).fetchall()
+        ]
+
+    def update_task(
+        self,
+        task_id: str,
+        *,
+        title: str | None = None,
+        purpose: str | None = None,
+        pinned: bool | None = None,
+        observed_at: int | None = None,
+    ) -> dict[str, Any]:
+        task_id = _canonical_uuid_id(task_id, TaskId, "task_id")
+        updates: dict[str, Any] = {}
+        if title is not None:
+            updates["title"] = _normalize_curation_text(
+                title, "task title", maximum=256
+            )
+        if purpose is not None:
+            updates["purpose"] = _normalize_task_purpose(purpose)
+        if pinned is not None:
+            if not isinstance(pinned, bool):
+                raise StorageError("task pinned must be boolean")
+            updates["pinned"] = int(pinned)
+        if not updates:
+            raise StorageError("task update requires at least one field")
+        updates["updated_at"] = now_ms() if observed_at is None else observed_at
+        with self.transaction(immediate=True) as connection:
+            if (
+                connection.execute(
+                    "SELECT 1 FROM tasks WHERE task_id = ?", (task_id,)
+                ).fetchone()
+                is None
+            ):
+                raise TaskConflict("task_not_found", f"unknown task: {task_id}")
+            assignments = ", ".join(f"{field} = ?" for field in updates)
+            connection.execute(
+                f"UPDATE tasks SET {assignments} WHERE task_id = ?",
+                (*updates.values(), task_id),
+            )
+            row = connection.execute(
+                "SELECT * FROM tasks WHERE task_id = ?", (task_id,)
+            ).fetchone()
+        result = _row_dict(row)
+        assert result is not None
+        return result
+
+    def route_task(
+        self,
+        task_id: str,
+        *,
+        host_id: str,
+        checkout_id: str,
+        observed_at: int | None = None,
+    ) -> dict[str, Any]:
+        """Assign a checkout before a task has acquired session history."""
+
+        task_id = _canonical_uuid_id(task_id, TaskId, "task_id")
+        host_id = _canonical_host_id(host_id)
+        checkout_id = _canonical_uuid_id(checkout_id, CheckoutId, "checkout_id")
+        timestamp = now_ms() if observed_at is None else observed_at
+        try:
+            with self.transaction(immediate=True) as connection:
+                task = connection.execute(
+                    "SELECT * FROM tasks WHERE task_id = ?", (task_id,)
+                ).fetchone()
+                if task is None or task["host_id"] != host_id:
+                    raise TaskConflict(
+                        "task_not_found", f"unknown local task: {task_id}"
+                    )
+                if task["status"] != "open":
+                    raise TaskConflict("task_closed", "cannot route a closed task")
+                if task["current_session_key"] is not None:
+                    raise TaskConflict(
+                        "task_has_history",
+                        "a task checkout cannot change after its first session",
+                    )
+                connection.execute(
+                    """
+                    UPDATE tasks SET checkout_id = ?, updated_at = ?
+                    WHERE task_id = ?
+                    """,
+                    (checkout_id, timestamp, task_id),
+                )
+                row = connection.execute(
+                    "SELECT * FROM tasks WHERE task_id = ?", (task_id,)
+                ).fetchone()
+        except sqlite3.IntegrityError as error:
+            code = (
+                "worktree_claimed"
+                if "worktree already belongs" in str(error)
+                else "task_context_conflict"
+            )
+            raise TaskConflict(code, str(error)) from error
+        result = _row_dict(row)
+        assert result is not None
+        return result
+
+    def adopt_session(
+        self,
+        *,
+        task_id: str,
+        session_key: str,
+        observed_at: int | None = None,
+    ) -> dict[str, Any]:
+        """Explicitly make an Inbox session the current session of a task."""
+
+        task_id = _canonical_uuid_id(task_id, TaskId, "task_id")
+        session_key = str(_canonical_session_key(session_key))
+        timestamp = now_ms() if observed_at is None else observed_at
+        with self.transaction(immediate=True) as connection:
+            task = connection.execute(
+                "SELECT * FROM tasks WHERE task_id = ?", (task_id,)
+            ).fetchone()
+            session = connection.execute(
+                "SELECT * FROM sessions WHERE session_key = ?", (session_key,)
+            ).fetchone()
+            if task is None:
+                raise TaskConflict("task_not_found", f"unknown task: {task_id}")
+            if session is None:
+                raise TaskConflict(
+                    "session_not_found", f"unknown session: {session_key}"
+                )
+            if task["status"] != "open":
+                raise TaskConflict("task_closed", "cannot adopt into a closed task")
+            if task["current_session_key"] not in {None, session_key}:
+                raise TaskConflict(
+                    "task_has_current_session",
+                    "task already has a different current session",
+                )
+            if session["task_id"] not in {None, task_id}:
+                raise TaskConflict(
+                    "session_already_adopted",
+                    "session already belongs to another task",
+                )
+            if session["host_id"] != task["host_id"]:
+                raise TaskConflict(
+                    "task_host_conflict", "task and session belong to different hosts"
+                )
+            if task["checkout_id"] is None:
+                if session["project_id"] != task["project_id"]:
+                    raise TaskConflict(
+                        "task_project_conflict",
+                        "task and session belong to different projects",
+                    )
+                if session["checkout_id"] is None:
+                    raise TaskConflict(
+                        "session_checkout_missing",
+                        "the selected session has no routable checkout",
+                    )
+                connection.execute(
+                    """
+                    UPDATE tasks SET checkout_id = ?, updated_at = ?
+                    WHERE task_id = ?
+                    """,
+                    (session["checkout_id"], timestamp, task_id),
+                )
+                task = connection.execute(
+                    "SELECT * FROM tasks WHERE task_id = ?", (task_id,)
+                ).fetchone()
+                assert task is not None
+            connection.execute(
+                """
+                UPDATE sessions
+                SET task_id = ?, project_id = ?, checkout_id = ?,
+                    metadata_source = 'task_adoption'
+                WHERE session_key = ?
+                """,
+                (
+                    task_id,
+                    task["project_id"],
+                    task["checkout_id"],
+                    session_key,
+                ),
+            )
+            connection.execute(
+                """
+                UPDATE tasks
+                SET current_session_key = ?, updated_at = ?
+                WHERE task_id = ?
+                """,
+                (session_key, timestamp, task_id),
+            )
+            row = connection.execute(
+                "SELECT * FROM tasks WHERE task_id = ?", (task_id,)
+            ).fetchone()
+        result = _row_dict(row)
+        assert result is not None
+        return result
+
+    def close_task(
+        self,
+        task_id: str,
+        *,
+        host_id: str,
+        summary: str | None = None,
+        next_action: str | None = None,
+        handoff_id: str | None = None,
+        source: str = "user",
+        observed_at: int | None = None,
+    ) -> dict[str, Any]:
+        """Close a task, wrapping its current session without stopping it."""
+
+        task_id = _canonical_uuid_id(task_id, TaskId, "task_id")
+        host_id = _canonical_host_id(host_id)
+        timestamp = now_ms() if observed_at is None else observed_at
+        with self.transaction(immediate=True) as connection:
+            task = connection.execute(
+                "SELECT * FROM tasks WHERE task_id = ?", (task_id,)
+            ).fetchone()
+            if task is None or task["host_id"] != host_id:
+                raise TaskConflict("task_not_found", f"unknown local task: {task_id}")
+            if task["status"] == "closed":
+                return dict(task)
+            current_session_key = task["current_session_key"]
+            if current_session_key is not None:
+                if summary is None or next_action is None:
+                    raise TaskConflict(
+                        "handoff_required",
+                        "closing a started task requires an explicit handoff",
+                    )
+                normalized_summary = normalize_handoff_text(summary, "summary")
+                normalized_next = normalize_handoff_text(next_action, "next_action")
+                parsed_handoff_id = _canonical_uuid_id(
+                    handoff_id or str(uuid.uuid4()), HandoffId, "handoff_id"
+                )
+                handoff = self._append_handoff_row(
+                    connection,
+                    session_key=current_session_key,
+                    summary=normalized_summary,
+                    source=source,
+                    source_host_id=host_id,
+                    next_action=normalized_next,
+                    handoff_id=parsed_handoff_id,
+                    sequence=None,
+                    created_at=timestamp,
+                    content_hash=None,
+                )
+                connection.execute(
+                    "UPDATE sessions SET wrapped_at = ? WHERE session_key = ?",
+                    (handoff["created_at"], current_session_key),
+                )
+            elif any(value is not None for value in (summary, next_action, handoff_id)):
+                raise TaskConflict(
+                    "handoff_without_session",
+                    "a never-started task cannot receive a close handoff",
+                )
+            connection.execute(
+                """
+                UPDATE tasks
+                SET status = 'closed', closed_at = ?, updated_at = ?
+                WHERE task_id = ?
+                """,
+                (timestamp, timestamp, task_id),
+            )
+            row = connection.execute(
+                "SELECT * FROM tasks WHERE task_id = ?", (task_id,)
+            ).fetchone()
+        result = _row_dict(row)
+        assert result is not None
+        return result
+
+    def reopen_task(
+        self,
+        task_id: str,
+        *,
+        host_id: str,
+        observed_at: int | None = None,
+    ) -> dict[str, Any]:
+        task_id = _canonical_uuid_id(task_id, TaskId, "task_id")
+        host_id = _canonical_host_id(host_id)
+        timestamp = now_ms() if observed_at is None else observed_at
+        try:
+            with self.transaction(immediate=True) as connection:
+                task = connection.execute(
+                    "SELECT * FROM tasks WHERE task_id = ?", (task_id,)
+                ).fetchone()
+                if task is None or task["host_id"] != host_id:
+                    raise TaskConflict(
+                        "task_not_found", f"unknown local task: {task_id}"
+                    )
+                if task["status"] == "open":
+                    return dict(task)
+                connection.execute(
+                    """
+                    UPDATE tasks
+                    SET status = 'open', closed_at = NULL, updated_at = ?
+                    WHERE task_id = ?
+                    """,
+                    (timestamp, task_id),
+                )
+                row = connection.execute(
+                    "SELECT * FROM tasks WHERE task_id = ?", (task_id,)
+                ).fetchone()
+        except sqlite3.IntegrityError as error:
+            if "worktree already belongs" in str(error):
+                raise TaskConflict("worktree_claimed", str(error)) from error
+            raise
+        result = _row_dict(row)
+        assert result is not None
+        return result
 
     def reconcile_provider_sessions(
         self,
@@ -1291,44 +2035,72 @@ class Registry:
                     observed_at=timestamp,
                 )
 
-            declared_locations = tuple(
-                ProjectLocation(
-                    location_id=LocationId(row["location_id"]),
-                    project_id=ProjectId(row["project_id"]),
+            declared_checkouts = tuple(
+                Checkout(
+                    checkout_id=CheckoutId(row["checkout_id"]),
+                    repository_id=RepositoryId(row["repository_id"]),
                     host_id=HostId(row["host_id"]),
                     path=Path(row["path"]),
+                    kind=CheckoutKind(row["kind"]),
                 )
                 for row in connection.execute(
                     """
-                    SELECT location.location_id, location.project_id,
-                           location.host_id, location.path
-                    FROM project_locations AS location
-                    JOIN projects AS project
-                      ON project.project_id = location.project_id
-                    WHERE location.host_id = ?
-                      AND location.declared = 1
-                      AND project.declared = 1
-                    ORDER BY location.location_id
+                    SELECT checkout.checkout_id, checkout.repository_id,
+                           checkout.host_id, checkout.path, checkout.kind
+                    FROM checkouts AS checkout
+                    JOIN repositories AS repository
+                      ON repository.repository_id = checkout.repository_id
+                    WHERE checkout.host_id = ?
+                      AND checkout.declared = 1
+                      AND checkout.present = 1
+                      AND repository.declared = 1
+                    ORDER BY checkout.checkout_id
                     """,
                     (host_id,),
                 ).fetchall()
             )
-            assignments: dict[str, ProjectLocation] = {}
+            memberships = tuple(
+                ProjectRepository(
+                    project_id=ProjectId(row["project_id"]),
+                    repository_id=RepositoryId(row["repository_id"]),
+                    is_primary=bool(row["is_primary"]),
+                )
+                for row in connection.execute(
+                    """
+                    SELECT membership.*
+                    FROM project_repositories AS membership
+                    JOIN projects AS project
+                      ON project.project_id = membership.project_id
+                    WHERE project.declared = 1
+                    ORDER BY membership.project_id, membership.repository_id
+                    """
+                ).fetchall()
+            )
+            assignments: dict[str, tuple[Checkout, ProjectId]] = {}
             for session in normalized:
                 session_key = str(session["session_key"])
                 existing = existing_by_key.get(session_key)
                 if existing is not None and (
                     existing["project_id"] is not None
-                    or existing["location_id"] is not None
+                    or existing["checkout_id"] is not None
                 ):
                     continue
-                location = match_project_location(
+                checkout = match_checkout(
                     session["cwd"],
                     HostId(host_id),
-                    declared_locations,
+                    declared_checkouts,
                 )
-                if location is not None:
-                    assignments[session_key] = location
+                if checkout is not None:
+                    matching_projects = {
+                        membership.project_id
+                        for membership in memberships
+                        if membership.repository_id == checkout.repository_id
+                    }
+                    if len(matching_projects) == 1:
+                        assignments[session_key] = (
+                            checkout,
+                            next(iter(matching_projects)),
+                        )
 
             inserted_count = 0
             updated_count = 0
@@ -1341,10 +2113,11 @@ class Registry:
                 )
                 assignment = assignments.get(session_key)
                 if assignment is not None:
+                    checkout, project_id = assignment
                     update.update(
-                        project_id=str(assignment.project_id),
-                        location_id=str(assignment.location_id),
-                        metadata_source="location_match",
+                        project_id=str(project_id),
+                        checkout_id=str(checkout.checkout_id),
+                        metadata_source="checkout_match",
                     )
                 if existing is None:
                     # Initial provider history is resumability evidence, but
@@ -1900,10 +2673,10 @@ class Registry:
                 connection, host_id=host_id, session_key=session_key
             )
             project_id = current["project_id"]
-            location_id = current["location_id"]
-            if not isinstance(project_id, str) or not isinstance(location_id, str):
+            checkout_id = current["checkout_id"]
+            if not isinstance(project_id, str) or not isinstance(checkout_id, str):
                 raise StorageError(
-                    "the current session has no complete project location"
+                    "the current session has no complete project checkout"
                 )
             retained_count = int(
                 connection.execute(
@@ -2213,11 +2986,11 @@ class Registry:
                 )
             if not all(
                 isinstance(session[field], str) and session[field]
-                for field in ("project_id", "location_id", "cwd")
+                for field in ("project_id", "checkout_id", "cwd")
             ):
                 raise ContinuationError(
-                    "continuation_location_missing",
-                    "The source session has no complete local project location.",
+                    "continuation_checkout_missing",
+                    "The source session has no complete local project checkout.",
                 )
         return ContinuationSource(dict(session), dict(handoff), from_session)
 
@@ -2396,17 +3169,26 @@ class Registry:
         self,
         host_id: str,
         *,
+        task_limit: int = DEFAULT_SNAPSHOT_TASK_LIMIT,
         session_limit: int = DEFAULT_SNAPSHOT_SESSION_LIMIT,
         runtime_limit: int = DEFAULT_SNAPSHOT_RUNTIME_LIMIT,
     ) -> HostSnapshotRows:
         """Read host-local snapshot inputs from one coherent DB view.
 
-        Session candidates and append-only runtime observations are bounded at
-        read time. The coherent retained-session count lets snapshot assembly
-        report an explicit truncation without loading the entire registry.
+        Task/session candidates and append-only runtime observations are bounded
+        at read time. Coherent retained counts let snapshot assembly report
+        explicit truncation without loading the entire registry.
         """
 
         host_id = _canonical_host_id(host_id)
+        if (
+            isinstance(task_limit, bool)
+            or not isinstance(task_limit, int)
+            or not 1 <= task_limit <= DEFAULT_SNAPSHOT_TASK_LIMIT
+        ):
+            raise StorageError(
+                f"task_limit must be between 1 and {DEFAULT_SNAPSHOT_TASK_LIMIT}"
+            )
         if (
             isinstance(session_limit, bool)
             or not isinstance(session_limit, int)
@@ -2430,15 +3212,33 @@ class Registry:
             if host_row is None:
                 raise StorageError(f"unknown host: {host_id}")
 
-            locations = tuple(
+            checkouts = tuple(
                 dict(row)
                 for row in connection.execute(
                     """
-                    SELECT * FROM project_locations
+                    SELECT * FROM checkouts
                     WHERE host_id = ?
-                    ORDER BY project_id, location_id
+                    ORDER BY repository_id, checkout_id
                     """,
                     (host_id,),
+                ).fetchall()
+            )
+            retained_task_count = int(
+                connection.execute(
+                    "SELECT COUNT(*) FROM tasks WHERE host_id = ?",
+                    (host_id,),
+                ).fetchone()[0]
+            )
+            tasks = tuple(
+                dict(row)
+                for row in connection.execute(
+                    """
+                    SELECT * FROM tasks
+                    WHERE host_id = ?
+                    ORDER BY status, pinned DESC, updated_at DESC, task_id
+                    LIMIT ?
+                    """,
+                    (host_id, task_limit),
                 ).fetchall()
             )
             retained_session_count = int(
@@ -2451,12 +3251,22 @@ class Registry:
                 dict(row)
                 for row in connection.execute(
                     """
+                    WITH selected_tasks AS (
+                        SELECT current_session_key
+                        FROM tasks
+                        WHERE host_id = ? AND current_session_key IS NOT NULL
+                        ORDER BY status, pinned DESC, updated_at DESC, task_id
+                        LIMIT ?
+                    )
                     SELECT * FROM sessions
                     WHERE host_id = ?
-                    ORDER BY session_key
+                    ORDER BY CASE WHEN session_key IN (
+                                 SELECT current_session_key FROM selected_tasks
+                             ) THEN 0 ELSE 1 END,
+                             session_key
                     LIMIT ?
                     """,
-                    (host_id, session_limit),
+                    (host_id, task_limit, host_id, session_limit),
                 ).fetchall()
             )
             projects = tuple(
@@ -2467,15 +3277,61 @@ class Registry:
                     WHERE (
                         ? = 1 AND declared = 1
                     ) OR project_id IN (
-                            SELECT project_id
-                            FROM project_locations WHERE host_id = ?
-                            UNION
                             SELECT project_id FROM sessions
                             WHERE host_id = ? AND project_id IS NOT NULL
+                            UNION
+                            SELECT project_id FROM tasks
+                            WHERE host_id = ?
                         )
                     ORDER BY project_id
                     """,
                     (int(bool(host_row["is_local"])), host_id, host_id),
+                ).fetchall()
+            )
+            project_repositories = tuple(
+                dict(row)
+                for row in connection.execute(
+                    """
+                    SELECT membership.*
+                    FROM project_repositories AS membership
+                    WHERE membership.project_id IN (
+                        SELECT project_id FROM projects
+                        WHERE ? = 1 AND declared = 1
+                        UNION
+                        SELECT project_id FROM sessions
+                        WHERE host_id = ? AND project_id IS NOT NULL
+                        UNION
+                        SELECT project_id FROM tasks
+                        WHERE host_id = ?
+                    )
+                    ORDER BY membership.project_id, membership.repository_id
+                    """,
+                    (int(bool(host_row["is_local"])), host_id, host_id),
+                ).fetchall()
+            )
+            repositories = tuple(
+                dict(row)
+                for row in connection.execute(
+                    """
+                    SELECT * FROM repositories
+                    WHERE repository_id IN (
+                        SELECT repository_id FROM project_repositories
+                        WHERE project_id IN (
+                            SELECT project_id FROM projects
+                            WHERE ? = 1 AND declared = 1
+                            UNION
+                            SELECT project_id FROM sessions
+                            WHERE host_id = ? AND project_id IS NOT NULL
+                            UNION
+                            SELECT project_id FROM tasks
+                            WHERE host_id = ?
+                        )
+                        UNION
+                        SELECT repository_id FROM checkouts WHERE host_id = ?
+                    )
+                    ORDER BY repository_id
+                    """,
+                    (int(bool(host_row["is_local"])), host_id, host_id, host_id),
                 ).fetchall()
             )
             latest_runtime_rows = connection.execute(
@@ -2498,7 +3354,11 @@ class Registry:
         return HostSnapshotRows(
             host=dict(host_row),
             projects=projects,
-            locations=locations,
+            project_repositories=project_repositories,
+            repositories=repositories,
+            checkouts=checkouts,
+            tasks=tasks,
+            retained_task_count=retained_task_count,
             sessions=sessions,
             retained_session_count=retained_session_count,
             runtimes=runtimes,
@@ -2705,8 +3565,9 @@ class Registry:
         launch_id: str | None = None,
         created_at: int | None = None,
         source_session_key: str | None = None,
+        task_create: Mapping[str, Any] | None = None,
     ) -> ReservationResult:
-        """Reserve a launch under ``BEGIN IMMEDIATE`` with retry idempotency."""
+        """Reserve a launch, optionally creating its task in the same transaction."""
 
         request = dict(request)
         capability_hash = _require_hash(capability_hash, "capability_hash")
@@ -2725,7 +3586,8 @@ class Registry:
         )
         for field, value_type in (
             ("project_id", ProjectId),
-            ("location_id", LocationId),
+            ("task_id", TaskId),
+            ("checkout_id", CheckoutId),
             ("source_handoff_id", HandoffId),
         ):
             value = request.get(field)
@@ -2740,12 +3602,17 @@ class Registry:
                 raise StorageError(
                     "source_session_key is valid only for a new continuation"
                 )
+        if request["action"] == "new" and request.get("task_id") is None:
+            raise TaskConflict(
+                "task_required", "a new provider launch must belong to a task"
+            )
         _reject_controls(request.get("cwd"), "cwd")
         if request["action"] == "manage" and any(
             request.get(field) is not None
             for field in (
                 "project_id",
-                "location_id",
+                "task_id",
+                "checkout_id",
                 "cwd",
                 "source_handoff_id",
                 "target_session_key",
@@ -2755,6 +3622,40 @@ class Registry:
         timestamp = now_ms() if created_at is None else created_at
         if expires_at <= timestamp:
             raise StorageError("launch lease must expire after creation")
+        normalized_task_create: dict[str, Any] | None = None
+        if task_create is not None:
+            if request["action"] != "new":
+                raise TaskConflict(
+                    "task_action_conflict", "only a new launch can create a task"
+                )
+            try:
+                create_task_id = _canonical_uuid_id(
+                    task_create["task_id"], TaskId, "task_id"
+                )
+                create_title = _normalize_curation_text(
+                    task_create["title"], "task title", maximum=256
+                )
+            except KeyError as error:
+                raise StorageError(
+                    f"missing task creation field: {error.args[0]}"
+                ) from error
+            if create_task_id != request.get("task_id"):
+                raise TaskConflict(
+                    "task_context_conflict",
+                    "created task ID does not match the launch request",
+                )
+            preferred_provider = task_create.get("preferred_provider")
+            if preferred_provider not in {None, "codex", "claude"}:
+                raise StorageError("preferred_provider must be codex or claude")
+            normalized_task_create = {
+                "task_id": create_task_id,
+                "host_id": request["host_id"],
+                "project_id": request.get("project_id"),
+                "checkout_id": request.get("checkout_id"),
+                "title": create_title,
+                "purpose": _normalize_task_purpose(task_create.get("purpose")),
+                "preferred_provider": preferred_provider,
+            }
 
         with self.transaction(immediate=True) as connection:
             placeholders = ", ".join("?" for _ in _LEASED_LAUNCH_STATES)
@@ -2774,6 +3675,66 @@ class Registry:
                 """,
                 (request["host_id"], request_id),
             ).fetchone()
+            if normalized_task_create is not None and existing_request is None:
+                if (
+                    connection.execute(
+                        "SELECT 1 FROM tasks WHERE task_id = ?",
+                        (normalized_task_create["task_id"],),
+                    ).fetchone()
+                    is not None
+                ):
+                    raise TaskConflict(
+                        "task_create_conflict",
+                        "the requested task ID already exists without this request",
+                    )
+                try:
+                    connection.execute(
+                        """
+                        INSERT INTO tasks(
+                            task_id, host_id, project_id, checkout_id, title,
+                            purpose, preferred_provider, status, pinned,
+                            current_session_key, created_at, updated_at, closed_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, 'open', 0, NULL, ?, ?, NULL)
+                        """,
+                        (
+                            normalized_task_create["task_id"],
+                            normalized_task_create["host_id"],
+                            normalized_task_create["project_id"],
+                            normalized_task_create["checkout_id"],
+                            normalized_task_create["title"],
+                            normalized_task_create["purpose"],
+                            normalized_task_create["preferred_provider"],
+                            timestamp,
+                            timestamp,
+                        ),
+                    )
+                except sqlite3.IntegrityError as error:
+                    code = (
+                        "worktree_claimed"
+                        if "worktree already belongs" in str(error)
+                        else "task_create_conflict"
+                    )
+                    raise TaskConflict(code, str(error)) from error
+            elif normalized_task_create is not None:
+                existing_task = connection.execute(
+                    "SELECT * FROM tasks WHERE task_id = ?",
+                    (normalized_task_create["task_id"],),
+                ).fetchone()
+                compared_fields = (
+                    "host_id",
+                    "project_id",
+                    "checkout_id",
+                    "title",
+                    "purpose",
+                    "preferred_provider",
+                )
+                if existing_task is None or any(
+                    existing_task[field] != normalized_task_create[field]
+                    for field in compared_fields
+                ):
+                    raise RequestConflict(
+                        "request ID task creation parameters do not match"
+                    )
             if source_session_key is not None:
                 if existing_request is not None:
                     exact_handoff_id = existing_request["source_handoff_id"]
@@ -2837,12 +3798,64 @@ class Registry:
                         "continuation_remote_not_supported",
                         "Imported handoff continuation remains a remote-host feature.",
                     )
-                for field in ("project_id", "location_id", "cwd"):
+                for field in ("project_id", "checkout_id", "cwd"):
                     if source[field] != request.get(field):
                         raise ContinuationError(
                             "continuation_source_changed",
-                            "The source session's project location changed.",
+                            "The source session's project checkout changed.",
                         )
+            if request["action"] == "new" and existing_request is None:
+                task_id = request.get("task_id")
+                if task_id is None:
+                    task = None
+                else:
+                    task = connection.execute(
+                        "SELECT * FROM tasks WHERE task_id = ?", (task_id,)
+                    ).fetchone()
+                if task_id is not None and task is None:
+                    raise TaskConflict("task_not_found", f"unknown task: {task_id}")
+                if task is not None and task["status"] != "open":
+                    raise TaskConflict("task_closed", "cannot launch a closed task")
+                if task is not None and any(
+                    task[field] != request.get(field)
+                    for field in ("host_id", "project_id", "checkout_id")
+                ):
+                    raise TaskConflict(
+                        "task_context_conflict",
+                        "launch context does not match the selected task",
+                    )
+                current_session_key = (
+                    None if task is None else task["current_session_key"]
+                )
+                if (
+                    task is not None
+                    and current_session_key is None
+                    and request.get("source_handoff_id") is not None
+                ):
+                    raise TaskConflict(
+                        "task_continuation_conflict",
+                        "a task without history cannot continue another session",
+                    )
+                if current_session_key is not None:
+                    current = connection.execute(
+                        "SELECT * FROM sessions WHERE session_key = ?",
+                        (current_session_key,),
+                    ).fetchone()
+                    if (
+                        current is None
+                        or current["wrapped_at"] is None
+                        or current["latest_handoff_id"]
+                        != request.get("source_handoff_id")
+                    ):
+                        raise TaskConflict(
+                            "task_current_session_active",
+                            "task continuation requires the current session's exact "
+                            "wrapped handoff",
+                        )
+            elif request.get("task_id") is not None and request["action"] != "new":
+                raise TaskConflict(
+                    "task_action_conflict", "only new launches carry task context"
+                )
             fingerprint = launch_request_fingerprint(request)
             if existing_request is not None:
                 if existing_request["request_fingerprint"] != fingerprint:
@@ -2884,40 +3897,49 @@ class Registry:
             if existing_launch is not None:
                 return ReservationResult("existing", dict(existing_launch))
 
-            connection.execute(
-                """
+            try:
+                connection.execute(
+                    """
                 INSERT INTO launch_intents(
                     launch_id, request_id, request_fingerprint, host_id,
-                    provider, action, project_id, location_id, cwd,
+                    provider, action, project_id, task_id, checkout_id, cwd,
                     source_handoff_id, target_session_key, transport, state,
                     lease_owner, capability_hash, agent_capability_hash,
                     created_at, updated_at, expires_at
                 ) VALUES (
-                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'reserved',
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'reserved',
                     ?, ?, ?, ?, ?, ?
                 )
-                """,
-                (
-                    launch_id,
-                    request_id,
-                    fingerprint,
-                    request["host_id"],
-                    request["provider"],
-                    request["action"],
-                    request.get("project_id"),
-                    request.get("location_id"),
-                    request.get("cwd"),
-                    request.get("source_handoff_id"),
-                    request.get("target_session_key"),
-                    request["transport"],
-                    lease_owner,
-                    capability_hash,
-                    agent_capability_hash,
-                    timestamp,
-                    timestamp,
-                    expires_at,
-                ),
-            )
+                    """,
+                    (
+                        launch_id,
+                        request_id,
+                        fingerprint,
+                        request["host_id"],
+                        request["provider"],
+                        request["action"],
+                        request.get("project_id"),
+                        request.get("task_id"),
+                        request.get("checkout_id"),
+                        request.get("cwd"),
+                        request.get("source_handoff_id"),
+                        request.get("target_session_key"),
+                        request["transport"],
+                        lease_owner,
+                        capability_hash,
+                        agent_capability_hash,
+                        timestamp,
+                        timestamp,
+                        expires_at,
+                    ),
+                )
+            except sqlite3.IntegrityError as error:
+                if "launch_intents.task_id" in str(error):
+                    raise TaskConflict(
+                        "task_launch_pending",
+                        "the task already has a pending launch",
+                    ) from error
+                raise
             row = connection.execute(
                 "SELECT * FROM launch_intents WHERE launch_id = ?", (launch_id,)
             ).fetchone()
@@ -3165,7 +4187,8 @@ class Registry:
             if launch["action"] == "new":
                 observed_session.update(
                     project_id=launch["project_id"],
-                    location_id=launch["location_id"],
+                    task_id=launch["task_id"],
+                    checkout_id=launch["checkout_id"],
                     cwd=launch["cwd"],
                     metadata_source="launch",
                     continued_from_handoff_id=launch["source_handoff_id"],
@@ -3173,6 +4196,15 @@ class Registry:
             elif launch["action"] in {"resume", "attach", "history"}:
                 observed_session["wrapped_at"] = None
             stored_session = self._upsert_session_row(connection, observed_session)
+            if launch["action"] == "new" and launch["task_id"] is not None:
+                connection.execute(
+                    """
+                    UPDATE tasks
+                    SET current_session_key = ?, updated_at = ?
+                    WHERE task_id = ? AND status = 'open'
+                    """,
+                    (stored_session["session_key"], timestamp, launch["task_id"]),
+                )
 
             expected_session_key = launch["target_session_key"]
             mismatch = (
@@ -4019,11 +5051,25 @@ class Registry:
         if launch is not None and launch["action"] == "new":
             initial.update(
                 project_id=launch["project_id"],
-                location_id=launch["location_id"],
+                task_id=launch["task_id"],
+                checkout_id=launch["checkout_id"],
                 metadata_source="launch",
                 continued_from_handoff_id=launch["source_handoff_id"],
             )
         cls._upsert_session_row(connection, initial)
+        if (
+            launch is not None
+            and launch["action"] == "new"
+            and launch["task_id"] is not None
+        ):
+            connection.execute(
+                """
+                UPDATE tasks
+                SET current_session_key = ?, updated_at = ?
+                WHERE task_id = ? AND status = 'open'
+                """,
+                (event.session_key, event.observed_at, launch["task_id"]),
+            )
 
     @classmethod
     def _apply_hook_launch_binding(
@@ -4654,18 +5700,32 @@ class Registry:
             connection.execute(
                 """
                 UPDATE sessions
-                SET project_id = ?, location_id = ?, cwd = ?,
+                SET project_id = ?, task_id = ?, checkout_id = ?, cwd = ?,
                     metadata_source = 'launch', continued_from_handoff_id = ?
                 WHERE session_key = ?
                 """,
                 (
                     launch["project_id"],
-                    launch["location_id"],
+                    launch["task_id"],
+                    launch["checkout_id"],
                     launch["cwd"],
                     launch["source_handoff_id"],
                     session["session_key"],
                 ),
             )
+            if launch["task_id"] is not None:
+                connection.execute(
+                    """
+                    UPDATE tasks
+                    SET current_session_key = ?, updated_at = ?
+                    WHERE task_id = ? AND status = 'open'
+                    """,
+                    (
+                        session["session_key"],
+                        int(values["observed_at"]),
+                        launch["task_id"],
+                    ),
+                )
             refreshed = connection.execute(
                 "SELECT * FROM sessions WHERE session_key = ?",
                 (session["session_key"],),
@@ -5472,6 +6532,7 @@ __all__ = [
     "DEFAULT_LIVENESS_OBSERVATION_LIMIT",
     "DEFAULT_SNAPSHOT_RUNTIME_LIMIT",
     "DEFAULT_SNAPSHOT_SESSION_LIMIT",
+    "DEFAULT_SNAPSHOT_TASK_LIMIT",
     "ContinuationError",
     "ContinuationSource",
     "HookIngestionResult",

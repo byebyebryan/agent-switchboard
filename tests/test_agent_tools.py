@@ -22,11 +22,14 @@ from agent_switchboard.config import (
     TmuxConfig,
 )
 from agent_switchboard.domain import (
+    Checkout,
     HostId,
     Project,
     ProjectId,
-    ProjectLocation,
+    ProjectRepository,
     ProviderId,
+    Repository,
+    RepositoryId,
 )
 from agent_switchboard.local import materialize_configured_projects
 from agent_switchboard.protocol import (
@@ -50,6 +53,7 @@ LAUNCH_ID = "55555555-5555-4555-8555-555555555555"
 REQUEST_ID = "66666666-6666-4666-8666-666666666666"
 SURFACE_ID = "77777777-7777-4777-8777-777777777777"
 HANDOFF_ID = "88888888-8888-4888-8888-888888888888"
+TASK_ID = "99999999-9999-4999-8999-999999999999"
 CAPABILITY = "a" * 43
 LOCATOR = TmuxLocator("/tmp/agent-tools.sock", "as-session", "@1", "%1")
 
@@ -73,9 +77,16 @@ def config(root: Path, *sources: str) -> SwitchboardConfig:
         "Switchboard",
         aliases=("router",),
         default_provider=ProviderId.CODEX,
+    )
+    repository = Repository(
+        RepositoryId(PROJECT_ID),
+        "agent-switchboard",
         context_sources=tuple(sources),
     )
-    location = ProjectLocation(
+    membership = ProjectRepository(
+        ProjectId(PROJECT_ID), repository.repository_id, True
+    )
+    checkout = Checkout(
         LOCATION_ID,
         PROJECT_ID,
         HOST_ID,
@@ -87,7 +98,7 @@ def config(root: Path, *sources: str) -> SwitchboardConfig:
         HostConfig(HostId(HOST_ID), "local"),
         (ProviderConfig(ProviderId.CODEX), ProviderConfig(ProviderId.CLAUDE)),
         (),
-        ProjectCatalog((project,), (location,)),
+        ProjectCatalog((project,), (repository,), (membership,), (checkout,)),
         DefaultsConfig(),
         TmuxConfig(),
         HooksConfig(),
@@ -102,13 +113,22 @@ def bound_agent(
     session_id = SESSION_ID if provider == "codex" else stable_uuid("claude-bound")
     session_key = f"{HOST_ID}:{provider}:{session_id}"
     capability_hash = hashlib.sha256(CAPABILITY.encode("ascii")).hexdigest()
+    registry.create_task(
+        task_id=TASK_ID,
+        host_id=HOST_ID,
+        project_id=PROJECT_ID,
+        checkout_id=LOCATION_ID,
+        title="Agent tools test",
+        observed_at=9,
+    )
     launch = registry.reserve_launch(
         {
             "host_id": HOST_ID,
             "provider": provider,
             "action": "new",
             "project_id": PROJECT_ID,
-            "location_id": LOCATION_ID,
+            "task_id": TASK_ID,
+            "checkout_id": LOCATION_ID,
             "cwd": str(root),
             "source_handoff_id": None,
             "target_session_key": None,
@@ -307,7 +327,7 @@ def test_adopted_launch_free_surface_cannot_authorize_agent_tools(
             "provider": "codex",
             "provider_session_id": SESSION_ID,
             "project_id": PROJECT_ID,
-            "location_id": LOCATION_ID,
+            "checkout_id": LOCATION_ID,
             "name": "Adopted provider title",
             "cwd": str(tmp_path),
             "first_observed_at": 10,
@@ -366,34 +386,36 @@ def test_agent_mutations_are_current_only_and_durably_attributed(
     )
 
     assert service.current().session["sessionKey"] == SESSION_KEY
-    named = service.set_name("Agent-picked name")
-    assert named.session["name"] == "Agent-picked name"
-    stored = registry.get_session(SESSION_KEY)
-    assert stored is not None
-    assert stored["name_source"] == "curated"
-    assert stored["name_actor"] == "agent"
-    assert stored["last_observed_at"] == 13
+    updated = service.update_task(
+        {"title": "Agent-picked title", "purpose": "Finish the task contract"}
+    )
+    assert updated["task"]["title"] == "Agent-picked title"
+    stored_task = registry.get_task(TASK_ID)
+    assert stored_task is not None
+    assert stored_task["purpose"] == "Finish the task contract"
 
     handed = service.append_handoff(
         summary="Summarize the current slice.",
         next_action="Review the agent boundary.",
         handoff_id=HANDOFF_ID,
-        wrap=False,
+        close=False,
     )
-    assert handed.handoffs[0]["source"] == "agent"
+    assert handed["task"]["taskId"] == TASK_ID
+    assert registry.list_handoffs(SESSION_KEY)[0]["source"] == "agent"
     replay = service.append_handoff(
         summary="Summarize the current slice.",
         next_action="Review the agent boundary.",
         handoff_id=HANDOFF_ID,
-        wrap=False,
+        close=False,
     )
-    assert len(replay.handoffs) == 1
+    assert replay["task"]["taskId"] == TASK_ID
+    assert len(registry.list_handoffs(SESSION_KEY)) == 1
     with pytest.raises(IdentityConflict):
         service.append_handoff(
             summary="Conflicting content.",
             next_action="Must fail.",
             handoff_id=HANDOFF_ID,
-            wrap=False,
+            close=False,
         )
 
     wrapped_id = stable_uuid("wrapped")
@@ -401,20 +423,12 @@ def test_agent_mutations_are_current_only_and_durably_attributed(
         summary="The slice is ready for review.",
         next_action="Run the installed acceptance loop.",
         handoff_id=wrapped_id,
-        wrap=True,
+        close=True,
     )
-    assert wrapped.session["wrappedAt"] == wrapped.handoffs[0]["createdAt"]
-    assert wrapped.handoffs[0]["handoffId"] == wrapped_id
-
-    service.set_name(None)
-    cleared = registry.get_session(SESSION_KEY)
-    assert cleared is not None
-    assert cleared["name"] == "Provider title"
-    assert cleared["name_source"] == "provider"
-    assert cleared["name_actor"] is None
-    registry.set_session_name(SESSION_KEY, host_id=HOST_ID, name="Human name")
-    human = registry.get_session(SESSION_KEY)
-    assert human is not None and human["name_actor"] == "user"
+    assert wrapped["task"]["status"] == "closed"
+    assert registry.list_handoffs(SESSION_KEY)[0]["handoff_id"] == wrapped_id
+    stored = registry.get_session(SESSION_KEY)
+    assert stored is not None and stored["wrapped_at"] is not None
 
 
 def test_context_is_bounded_same_project_and_reports_unsafe_sources(
@@ -442,7 +456,7 @@ def test_context_is_bounded_same_project_and_reports_unsafe_sources(
             "provider": "codex",
             "provider_session_id": stable_uuid("recent-session"),
             "project_id": PROJECT_ID,
-            "location_id": LOCATION_ID,
+            "checkout_id": LOCATION_ID,
             "purpose": "Independent nearby work",
             "cwd": str(tmp_path),
             "first_observed_at": 20,
@@ -585,7 +599,7 @@ def test_context_enforces_file_and_session_truncation_bounds(
                 "provider": "codex",
                 "provider_session_id": session_id,
                 "project_id": PROJECT_ID,
-                "location_id": LOCATION_ID,
+                "checkout_id": LOCATION_ID,
                 "cwd": str(tmp_path),
                 "first_observed_at": 100 + index,
                 "last_observed_at": 100 + index,
@@ -646,7 +660,7 @@ def test_project_reads_and_search_stay_in_authorized_project(
             "provider": "claude",
             "provider_session_id": nearby_id,
             "project_id": PROJECT_ID,
-            "location_id": LOCATION_ID,
+            "checkout_id": LOCATION_ID,
             "name": "Alignment session",
             "purpose": "Finish the 4C alignment loop",
             "cwd": str(tmp_path),
@@ -702,8 +716,8 @@ def test_project_reads_and_search_stay_in_authorized_project(
     ]
     detail = service.session_detail(nearby_key)
     assert detail.handoffs[0]["handoffId"] == nearby_handoff
-    handoff = service.handoff(nearby_handoff)
-    assert handoff.handoff["sessionKey"] == nearby_key
+    with pytest.raises(AgentToolError, match="current task"):
+        service.handoff(nearby_handoff)
     search = service.search("alignment")
     assert {item["kind"] for item in search.results} == {"session", "handoff"}
     assert all(item["sessionKey"] != other_key for item in search.results)

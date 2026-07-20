@@ -48,33 +48,27 @@ TOOLS: Final = (
         _schema(),
     ),
     (
-        "project_list_sessions",
-        "List bounded retained sessions in the current project.",
+        "project_list_tasks",
+        "List bounded tasks in the current project.",
         _schema(),
     ),
     (
-        "session_get",
-        "Read one retained session in the current project.",
-        _schema(
-            {"sessionKey": _STRING, "handoffLimit": _HANDOFF_LIMIT},
-            required=("sessionKey",),
-        ),
+        "task_get",
+        "Read the current task and its session history.",
+        _schema(),
     ),
     (
-        "session_get_handoff",
+        "task_get_handoff",
         "Read one exact handoff in the current project.",
         _schema({"handoffId": _STRING}, required=("handoffId",)),
     ),
     (
-        "session_list_handoffs",
-        "Read the newest bounded handoffs for one current-project session.",
-        _schema(
-            {"sessionKey": _STRING, "limit": _HANDOFF_LIMIT},
-            required=("sessionKey",),
-        ),
+        "task_list_handoffs",
+        "Read bounded handoffs across the current task history.",
+        _schema({"limit": _HANDOFF_LIMIT}),
     ),
     (
-        "session_search",
+        "task_search",
         "Search curated Switchboard metadata and handoffs in the current project.",
         _schema({"query": _STRING, "limit": _LIMIT}, required=("query",)),
     ),
@@ -84,12 +78,18 @@ TOOLS: Final = (
         _schema({"query": _STRING, "limit": _LIMIT}, required=("query",)),
     ),
     (
-        "session_set_name",
-        "Set or clear the authorized current session name.",
-        _schema({"name": {"type": ["string", "null"]}}, required=("name",)),
+        "task_update",
+        "Update only the current task title, purpose, or pin.",
+        _schema(
+            {
+                "title": _STRING,
+                "purpose": {"type": ["string", "null"]},
+                "pinned": {"type": "boolean"},
+            }
+        ),
     ),
     (
-        "session_set_handoff",
+        "task_set_handoff",
         "Append an agent-attributed handoff to the authorized current session.",
         _schema(
             {"summary": _STRING, "nextAction": _STRING, "handoffId": _STRING},
@@ -97,8 +97,8 @@ TOOLS: Final = (
         ),
     ),
     (
-        "session_wrap",
-        "Append a handoff and wrap the authorized current session.",
+        "task_close",
+        "Append a handoff, wrap the current session, and close its task.",
         _schema(
             {"summary": _STRING, "nextAction": _STRING, "handoffId": _STRING},
             required=("summary", "nextAction"),
@@ -115,9 +115,9 @@ def _tool_records() -> list[dict[str, object]]:
             "inputSchema": schema,
             "annotations": {
                 "readOnlyHint": name
-                not in {"session_set_name", "session_set_handoff", "session_wrap"},
+                not in {"task_update", "task_set_handoff", "task_close"},
                 "destructiveHint": False,
-                "idempotentHint": name == "session_set_name",
+                "idempotentHint": name == "task_update",
                 "openWorldHint": name == "memory_search",
             },
         }
@@ -174,46 +174,49 @@ def _limit(
 def _call(
     service: AgentToolService, name: str, raw_params: object
 ) -> dict[str, object]:
-    if name in {"project_get_current", "project_get_context", "project_list_sessions"}:
+    if name in {"project_get_current", "project_get_context", "project_list_tasks"}:
         arguments = _arguments(raw_params, set(), set())
         assert not arguments
-        envelope = {
-            "project_get_current": service.current,
-            "project_get_context": service.context,
-            "project_list_sessions": service.list_sessions,
-        }[name]()
-    elif name == "session_get":
-        arguments = _arguments(
-            raw_params, {"sessionKey", "handoffLimit"}, {"sessionKey"}
-        )
-        envelope = service.session_detail(
-            str(_text(arguments, "sessionKey")),
-            handoff_limit=_limit(arguments, "handoffLimit", 20, 100),
-        )
-    elif name == "session_list_handoffs":
-        arguments = _arguments(raw_params, {"sessionKey", "limit"}, {"sessionKey"})
-        envelope = service.session_detail(
-            str(_text(arguments, "sessionKey")),
-            handoff_limit=_limit(arguments, "limit", 20, 100),
-        )
-    elif name == "session_get_handoff":
+        if name == "project_get_current":
+            envelope = service.current()
+        elif name == "project_get_context":
+            envelope = service.context()
+        else:
+            envelope = service.list_tasks()
+    elif name == "task_get":
+        arguments = _arguments(raw_params, set(), set())
+        assert not arguments
+        envelope = service.task()
+    elif name == "task_list_handoffs":
+        arguments = _arguments(raw_params, {"limit"}, set())
+        envelope = service.list_task_handoffs(limit=_limit(arguments, "limit", 20, 100))
+    elif name == "task_get_handoff":
         arguments = _arguments(raw_params, {"handoffId"}, {"handoffId"})
         envelope = service.handoff(str(_text(arguments, "handoffId")))
-    elif name in {"session_search", "memory_search"}:
+    elif name in {"task_search", "memory_search"}:
         arguments = _arguments(raw_params, {"query", "limit"}, {"query"})
         operation: Callable[..., object] = (
-            service.search if name == "session_search" else service.memory_search
+            service.search if name == "task_search" else service.memory_search
         )
         envelope = operation(
             str(_text(arguments, "query")), limit=_limit(arguments, "limit", 20, 20)
         )
-    elif name == "session_set_name":
-        arguments = _arguments(raw_params, {"name"}, {"name"})
-        value = arguments["name"]
-        if value is not None and not isinstance(value, str):
-            raise McpProtocolError(-32602, "name must be a string or null")
-        envelope = service.set_name(value)
-    elif name in {"session_set_handoff", "session_wrap"}:
+    elif name == "task_update":
+        arguments = _arguments(raw_params, {"title", "purpose", "pinned"}, set())
+        if not arguments:
+            raise McpProtocolError(-32602, "task_update requires one field")
+        if "title" in arguments and not isinstance(arguments["title"], str):
+            raise McpProtocolError(-32602, "title must be a string")
+        if (
+            "purpose" in arguments
+            and arguments["purpose"] is not None
+            and not isinstance(arguments["purpose"], str)
+        ):
+            raise McpProtocolError(-32602, "purpose must be a string or null")
+        if "pinned" in arguments and not isinstance(arguments["pinned"], bool):
+            raise McpProtocolError(-32602, "pinned must be boolean")
+        envelope = service.update_task(arguments)
+    elif name in {"task_set_handoff", "task_close"}:
         arguments = _arguments(
             raw_params,
             {"summary", "nextAction", "handoffId"},
@@ -223,12 +226,22 @@ def _call(
             summary=str(_text(arguments, "summary")),
             next_action=str(_text(arguments, "nextAction")),
             handoff_id=_text(arguments, "handoffId", optional=True),
-            wrap=name == "session_wrap",
+            close=name == "task_close",
         )
     else:
         raise McpProtocolError(-32602, "unknown tool")
-    structured = envelope.to_dict()  # type: ignore[attr-defined]
-    text = envelope.to_json()  # type: ignore[attr-defined]
+    if isinstance(envelope, Mapping):
+        structured = dict(envelope)
+        text = json.dumps(
+            structured,
+            ensure_ascii=False,
+            allow_nan=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+    else:
+        structured = envelope.to_dict()  # type: ignore[attr-defined]
+        text = envelope.to_json()  # type: ignore[attr-defined]
     return {
         "content": [{"type": "text", "text": text}],
         "structuredContent": structured,
@@ -321,7 +334,7 @@ def run_mcp_server(
                             "capabilities": {"tools": {"listChanged": False}},
                             "serverInfo": {
                                 "name": "agent-switchboard",
-                                "version": "0.1",
+                                "version": "0.2.0",
                             },
                         },
                     ),

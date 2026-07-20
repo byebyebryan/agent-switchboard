@@ -29,6 +29,7 @@ REQUEST_ID = "66666666-6666-4666-8666-666666666666"
 PROJECT_ID = "77777777-7777-4777-8777-777777777777"
 LOCATION_ID = "88888888-8888-4888-8888-888888888888"
 HANDOFF_ID = "99999999-9999-4999-8999-999999999999"
+TASK_ID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
 
 
 def digest(value: str) -> str:
@@ -620,7 +621,7 @@ def prepare_resume_launch(registry: Registry) -> None:
             "provider": "codex",
             "action": "resume",
             "project_id": None,
-            "location_id": None,
+            "checkout_id": None,
             "cwd": None,
             "source_handoff_id": None,
             "target_session_key": SESSION_KEY,
@@ -675,9 +676,9 @@ def test_new_hook_binding_retains_exact_continuation_lineage(tmp_path) -> None:
                     "name": "switchboard",
                     "default_provider": "codex",
                     "default_transport": "tmux",
-                    "locations": [
+                    "checkouts": [
                         {
-                            "location_id": LOCATION_ID,
+                            "checkout_id": LOCATION_ID,
                             "path": "/work/switchboard",
                             "is_default": True,
                         }
@@ -693,18 +694,28 @@ def test_new_hook_binding_retains_exact_continuation_lineage(tmp_path) -> None:
                 "provider": "codex",
                 "provider_session_id": SECOND_ID,
                 "project_id": PROJECT_ID,
-                "location_id": LOCATION_ID,
+                "checkout_id": LOCATION_ID,
                 "cwd": "/work/switchboard",
                 "first_observed_at": 20,
                 "last_observed_at": 20,
             }
         )
+        registry.create_task(
+            task_id=TASK_ID,
+            host_id=HOST_ID,
+            project_id=PROJECT_ID,
+            checkout_id=LOCATION_ID,
+            title="Continuation",
+            observed_at=21,
+        )
+        registry.adopt_session(task_id=TASK_ID, session_key=SECOND_KEY, observed_at=22)
         registry.curate_session_handoff(
             SECOND_KEY,
             host_id=HOST_ID,
             handoff_id=HANDOFF_ID,
             summary="The source session is wrapped.",
             next_action="Bind the exact continuation through the hook.",
+            wrap=True,
             observed_at=30,
         )
         registry.reserve_launch(
@@ -713,7 +724,8 @@ def test_new_hook_binding_retains_exact_continuation_lineage(tmp_path) -> None:
                 "provider": "codex",
                 "action": "new",
                 "project_id": PROJECT_ID,
-                "location_id": LOCATION_ID,
+                "task_id": TASK_ID,
+                "checkout_id": LOCATION_ID,
                 "cwd": "/work/switchboard",
                 "source_handoff_id": HANDOFF_ID,
                 "target_session_key": None,

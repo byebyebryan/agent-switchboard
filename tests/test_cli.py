@@ -40,6 +40,7 @@ CURATION_HOST_ID = "11111111-1111-4111-8111-111111111111"
 CURATION_SESSION_ID = "44444444-4444-4444-8444-444444444444"
 CURATION_SESSION_KEY = f"{CURATION_HOST_ID}:codex:{CURATION_SESSION_ID}"
 CURATION_HANDOFF_ID = "55555555-5555-4555-8555-555555555555"
+CURATION_TASK_ID = "66666666-6666-4666-8666-666666666666"
 
 
 @dataclass(frozen=True, slots=True)
@@ -53,7 +54,8 @@ class CliEnvironment:
 
     def write_config(self, value: str) -> None:
         self.config.parent.mkdir(parents=True, exist_ok=True)
-        self.config.write_text(value, encoding="utf-8")
+        prefix = "" if "config_version" in value else "config_version = 2\n"
+        self.config.write_text(f"{prefix}{value}", encoding="utf-8")
 
     def write_plan(self, value: dict[str, Any]) -> None:
         self.plan.write_text(json.dumps(value), encoding="utf-8")
@@ -240,19 +242,21 @@ def test_agent_cli_projects_exact_machine_forms_through_one_service(
             calls.append(("context",))
             return Envelope("context")
 
-        def list_sessions(self) -> Envelope:
-            calls.append(("sessions",))
-            return Envelope("sessions")
+        def list_tasks(self) -> dict[str, str]:
+            calls.append(("tasks",))
+            return {"operation": "tasks"}
 
-        def session_detail(
-            self, session_key: str, *, handoff_limit: int = 20
-        ) -> Envelope:
-            calls.append(("detail", session_key, handoff_limit))
-            return Envelope("detail")
+        def task(self) -> dict[str, str]:
+            calls.append(("task",))
+            return {"operation": "task"}
 
         def handoff(self, handoff_id: str) -> Envelope:
             calls.append(("handoff-read", handoff_id))
             return Envelope("handoff-read")
+
+        def list_task_handoffs(self, *, limit: int) -> dict[str, str]:
+            calls.append(("handoffs", limit))
+            return {"operation": "handoffs"}
 
         def search(self, query: str, *, limit: int) -> Envelope:
             calls.append(("search", query, limit))
@@ -262,9 +266,9 @@ def test_agent_cli_projects_exact_machine_forms_through_one_service(
             calls.append(("memory", query, limit))
             return Envelope("memory")
 
-        def set_name(self, value: str | None) -> Envelope:
-            calls.append(("name", value))
-            return Envelope("name")
+        def update_task(self, values: dict[str, object]) -> dict[str, str]:
+            calls.append(("update", values))
+            return {"operation": "update"}
 
         def append_handoff(
             self,
@@ -272,10 +276,10 @@ def test_agent_cli_projects_exact_machine_forms_through_one_service(
             summary: str,
             next_action: str,
             handoff_id: str | None,
-            wrap: bool,
-        ) -> Envelope:
-            calls.append(("handoff", summary, next_action, handoff_id, wrap))
-            return Envelope("wrap" if wrap else "handoff")
+            close: bool,
+        ) -> dict[str, str]:
+            calls.append(("handoff", summary, next_action, handoff_id, close))
+            return {"operation": "close" if close else "handoff"}
 
     monkeypatch.setattr(cli_module, "AgentToolService", Service)
 
@@ -283,10 +287,10 @@ def test_agent_cli_projects_exact_machine_forms_through_one_service(
     assert json.loads(capsys.readouterr().out) == {"operation": "current"}
     assert main(["agent", "context", "--json"]) == 0
     assert json.loads(capsys.readouterr().out) == {"operation": "context"}
-    assert main(["agent", "sessions", "--json"]) == 0
-    assert json.loads(capsys.readouterr().out) == {"operation": "sessions"}
-    assert main(["agent", "show", CURATION_SESSION_KEY, "--json"]) == 0
-    assert json.loads(capsys.readouterr().out) == {"operation": "detail"}
+    assert main(["agent", "tasks", "--json"]) == 0
+    assert json.loads(capsys.readouterr().out) == {"operation": "tasks"}
+    assert main(["agent", "task", "--json"]) == 0
+    assert json.loads(capsys.readouterr().out) == {"operation": "task"}
     assert main(["agent", "handoff-read", CURATION_HANDOFF_ID, "--json"]) == 0
     assert json.loads(capsys.readouterr().out) == {"operation": "handoff-read"}
     assert (
@@ -294,7 +298,6 @@ def test_agent_cli_projects_exact_machine_forms_through_one_service(
             [
                 "agent",
                 "handoffs",
-                CURATION_SESSION_KEY,
                 "--limit",
                 "7",
                 "--json",
@@ -302,15 +305,26 @@ def test_agent_cli_projects_exact_machine_forms_through_one_service(
         )
         == 0
     )
-    assert json.loads(capsys.readouterr().out) == {"operation": "detail"}
+    assert json.loads(capsys.readouterr().out) == {"operation": "handoffs"}
     assert main(["agent", "search", "alignment", "--limit", "6", "--json"]) == 0
     assert json.loads(capsys.readouterr().out) == {"operation": "search"}
     assert main(["agent", "memory", "history", "--limit", "5", "--json"]) == 0
     assert json.loads(capsys.readouterr().out) == {"operation": "memory"}
-    assert main(["agent", "name", "Agent title", "--json"]) == 0
-    assert json.loads(capsys.readouterr().out) == {"operation": "name"}
-    assert main(["agent", "name", "--clear", "--json"]) == 0
-    assert json.loads(capsys.readouterr().out) == {"operation": "name"}
+    assert (
+        main(
+            [
+                "agent",
+                "update",
+                "--title",
+                "Agent title",
+                "--pin",
+                "on",
+                "--json",
+            ]
+        )
+        == 0
+    )
+    assert json.loads(capsys.readouterr().out) == {"operation": "update"}
 
     payload = {
         "handoffId": CURATION_HANDOFF_ID,
@@ -321,8 +335,8 @@ def test_agent_cli_projects_exact_machine_forms_through_one_service(
     assert main(["agent", "handoff", "--json-stdin", "--json"]) == 0
     assert json.loads(capsys.readouterr().out) == {"operation": "handoff"}
     monkeypatch.setattr("sys.stdin", io.BytesIO(json.dumps(payload).encode()))
-    assert main(["agent", "wrap", "--json-stdin", "--json"]) == 0
-    assert json.loads(capsys.readouterr().out) == {"operation": "wrap"}
+    assert main(["agent", "close", "--json-stdin", "--json"]) == 0
+    assert json.loads(capsys.readouterr().out) == {"operation": "close"}
 
     assert calls == [
         ("authorize",),
@@ -330,21 +344,19 @@ def test_agent_cli_projects_exact_machine_forms_through_one_service(
         ("authorize",),
         ("context",),
         ("authorize",),
-        ("sessions",),
+        ("tasks",),
         ("authorize",),
-        ("detail", CURATION_SESSION_KEY, 20),
+        ("task",),
         ("authorize",),
         ("handoff-read", CURATION_HANDOFF_ID),
         ("authorize",),
-        ("detail", CURATION_SESSION_KEY, 7),
+        ("handoffs", 7),
         ("authorize",),
         ("search", "alignment", 6),
         ("authorize",),
         ("memory", "history", 5),
         ("authorize",),
-        ("name", "Agent title"),
-        ("authorize",),
-        ("name", None),
+        ("update", {"title": "Agent title", "pinned": True}),
         ("authorize",),
         (
             "handoff",
@@ -583,7 +595,7 @@ def test_prepare_open_emits_one_presentation_envelope_and_context_flags(
     assert observed[0].can_launch_terminal
 
 
-def test_prepare_new_emits_one_presentation_envelope_and_context_flags(
+def test_prepare_task_create_emits_one_presentation_envelope_and_context_flags(
     capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     request_id = "44444444-4444-4444-8444-444444444444"
@@ -592,8 +604,8 @@ def test_prepare_new_emits_one_presentation_envelope_and_context_flags(
         PresentationPlanKind.BLOCKED,
         HostId("11111111-1111-4111-8111-111111111111"),
         error=ErrorRecord(
-            "project_location_missing",
-            "No local location.",
+            "project_checkout_missing",
+            "No local checkout.",
             ErrorScope.PROJECT,
             False,
             1,
@@ -606,15 +618,19 @@ def test_prepare_new_emits_one_presentation_envelope_and_context_flags(
         observed.append(arguments)
         return PresentationPlanEnvelope(plan).to_json()
 
-    monkeypatch.setattr(cli_module, "_prepare_new", prepare)
+    monkeypatch.setattr(cli_module, "_prepare_task", prepare)
 
     assert (
         main(
             [
-                "prepare-new",
+                "prepare-task",
+                CURATION_TASK_ID,
+                "--create",
                 "--project",
                 PROJECT_ID,
-                "--location",
+                "--title",
+                "Implement the task contract",
+                "--checkout",
                 LOCATION_ID,
                 "--provider",
                 "claude",
@@ -632,19 +648,20 @@ def test_prepare_new_emits_one_presentation_envelope_and_context_flags(
     parsed = PresentationPlanEnvelope.from_json(captured.out).plan
     assert parsed.kind is PresentationPlanKind.BLOCKED
     assert observed[0].project == PROJECT_ID
-    assert observed[0].location == LOCATION_ID
+    assert observed[0].checkout == LOCATION_ID
     assert observed[0].provider == "claude"
     assert observed[0].request_id == request_id
     assert observed[0].can_focus_desktop
     assert observed[0].can_launch_terminal
-    assert observed[0].source_ref is None
+    assert observed[0].task_id == CURATION_TASK_ID
+    assert observed[0].create
+    assert observed[0].title == "Implement the task contract"
 
 
-def test_prepare_new_accepts_a_continuation_without_a_project_flag(
+def test_prepare_task_accepts_an_existing_task_without_project_flags(
     capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     observed: list[argparse.Namespace] = []
-    source_ref = "55555555-5555-4555-8555-555555555555"
     request_id = "66666666-6666-4666-8666-666666666666"
     plan = PresentationPlan(
         PresentationPlanKind.BLOCKED,
@@ -663,13 +680,12 @@ def test_prepare_new_accepts_a_continuation_without_a_project_flag(
         observed.append(arguments)
         return PresentationPlanEnvelope(plan).to_json()
 
-    monkeypatch.setattr(cli_module, "_prepare_new", prepare)
+    monkeypatch.setattr(cli_module, "_prepare_task", prepare)
     assert (
         main(
             [
-                "prepare-new",
-                "--from",
-                source_ref,
+                "prepare-task",
+                CURATION_TASK_ID,
                 "--request-id",
                 request_id,
                 "--can-launch-terminal",
@@ -679,8 +695,9 @@ def test_prepare_new_accepts_a_continuation_without_a_project_flag(
         == 0
     )
     PresentationPlanEnvelope.from_json(capsys.readouterr().out)
+    assert observed[0].task_id == CURATION_TASK_ID
     assert observed[0].project is None
-    assert observed[0].source_ref == source_ref
+    assert not observed[0].create
 
 
 def test_surface_action_commands_are_quiet_and_fail_safely(
@@ -1209,7 +1226,10 @@ def test_list_refresh_uses_the_snapshot_envelope_and_refreshes_codex(
         "generatedAt",
         "host",
         "projects",
-        "locations",
+        "projectRepositories",
+        "repositories",
+        "checkouts",
+        "tasks",
         "sessions",
         "runtimes",
         "surfaces",
@@ -1251,6 +1271,7 @@ def test_refresh_materializes_configured_projects(
     cli_environment.write_plan(complete_plan(thread(7, cwd=str(session_cwd))))
     cli_environment.write_config(
         f'''
+config_version = 2
 [host]
 display_name = "starship"
 
@@ -1258,10 +1279,15 @@ display_name = "starship"
 name = "Switchboard"
 aliases = ["sessions", " router "]
 default_provider = "codex"
+
+[[projects."{PROJECT_ID}".repositories]]
+repository_id = "{PROJECT_ID}"
+name = "agent-switchboard"
+is_primary = true
 context_sources = ["AGENTS.md"]
 
-[[projects."{PROJECT_ID}".locations]]
-location_id = "{LOCATION_ID}"
+[[projects."{PROJECT_ID}".repositories.checkouts]]
+checkout_id = "{LOCATION_ID}"
 path = "{checkout}"
 display_name = "main checkout"
 is_default = true
@@ -1276,12 +1302,12 @@ is_default = true
     assert snapshot["host"]["displayName"] == "starship"
     assert snapshot["projects"][0]["projectId"] == PROJECT_ID
     assert snapshot["projects"][0]["aliases"] == ["router", "sessions"]
-    assert snapshot["projects"][0]["contextSources"] == ["AGENTS.md"]
-    assert snapshot["locations"][0]["locationId"] == LOCATION_ID
-    assert snapshot["locations"][0]["path"] == str(checkout.resolve())
+    assert snapshot["repositories"][0]["contextSources"] == ["AGENTS.md"]
+    assert snapshot["checkouts"][0]["checkoutId"] == LOCATION_ID
+    assert snapshot["checkouts"][0]["path"] == str(checkout.resolve())
     assert snapshot["sessions"][0]["projectId"] == PROJECT_ID
-    assert snapshot["sessions"][0]["locationId"] == LOCATION_ID
-    assert snapshot["sessions"][0]["metadataSource"] == "location_match"
+    assert snapshot["sessions"][0]["checkoutId"] == LOCATION_ID
+    assert snapshot["sessions"][0]["metadataSource"] == "checkout_match"
 
 
 @pytest.mark.parametrize(
@@ -1340,12 +1366,17 @@ def test_protocol_failure_has_no_partial_json(
     checkout.mkdir()
     cli_environment.write_config(
         f'''
+config_version = 2
 [providers.codex]
 enabled = false
 [projects."{PROJECT_ID}"]
 name = "Switchboard"
-[[projects."{PROJECT_ID}".locations]]
-location_id = "{LOCATION_ID}"
+[[projects."{PROJECT_ID}".repositories]]
+repository_id = "{PROJECT_ID}"
+name = "agent-switchboard"
+is_primary = true
+[[projects."{PROJECT_ID}".repositories.checkouts]]
+checkout_id = "{LOCATION_ID}"
 path = "{checkout}"
 '''
     )

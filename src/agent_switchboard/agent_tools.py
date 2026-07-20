@@ -21,11 +21,12 @@ from .curation import (
     resolve_current_session_binding,
 )
 from .domain import (
+    Checkout,
     HostId,
     LaunchId,
     Project,
-    ProjectLocation,
     ProviderId,
+    Repository,
     SessionKey,
     SurfaceId,
     ValidationError,
@@ -231,7 +232,7 @@ def _configured_files(
                     issues,
                     code="context_source_escape",
                     path=configured,
-                    message="The configured context source escapes its location.",
+                    message="The configured context source escapes its checkout.",
                 )
                 continue
             if resolved.is_dir():
@@ -326,7 +327,7 @@ def _configured_files(
                         issues,
                         code="context_source_escape",
                         path=relative_name,
-                        message="A context file escapes its location.",
+                        message="A context file escapes its checkout.",
                     )
                     continue
                 if not resolved_file.is_file():
@@ -362,10 +363,10 @@ def _read_context_sources(
         resolved_root = root.resolve(strict=True)
     except OSError as error:
         raise AgentToolError(
-            "the configured project location is unavailable"
+            "the configured project checkout is unavailable"
         ) from error
     if not resolved_root.is_dir():
-        raise AgentToolError("the configured project location is unavailable")
+        raise AgentToolError("the configured project checkout is unavailable")
     files, truncated = _configured_files(resolved_root, context_sources, issues)
     sources: list[dict[str, object]] = []
     remaining = MAX_AGENT_CONTEXT_TOTAL_BYTES
@@ -417,24 +418,46 @@ def _read_context_sources(
 
 def _configured_scope(
     config: SwitchboardConfig, current_session: Mapping[str, object]
-) -> tuple[Project, ProjectLocation]:
+) -> tuple[Project, Repository, Checkout]:
     project_id = current_session.get("project_id")
-    location_id = current_session.get("location_id")
+    checkout_id = current_session.get("checkout_id")
     project = next(
         (item for item in config.projects if str(item.project_id) == project_id), None
     )
-    location = next(
-        (item for item in config.locations if str(item.location_id) == location_id),
+    checkout = next(
+        (item for item in config.checkouts if str(item.checkout_id) == checkout_id),
         None,
+    )
+    repository = (
+        None
+        if checkout is None
+        else next(
+            (
+                item
+                for item in config.repositories
+                if item.repository_id == checkout.repository_id
+            ),
+            None,
+        )
+    )
+    membership_matches = (
+        project is not None
+        and repository is not None
+        and any(
+            item.project_id == project.project_id
+            and item.repository_id == repository.repository_id
+            for item in config.project_repositories
+        )
     )
     if (
         project is None
-        or location is None
-        or location.project_id != project.project_id
-        or str(location.host_id) != current_session.get("host_id")
+        or repository is None
+        or checkout is None
+        or not membership_matches
+        or str(checkout.host_id) != current_session.get("host_id")
     ):
-        raise AgentToolError("the current project location is not configured")
-    return project, location
+        raise AgentToolError("the current project checkout is not configured")
+    return project, repository, checkout
 
 
 def _handoff_record(row: Mapping[str, object]) -> dict[str, object]:
@@ -465,10 +488,10 @@ def build_agent_context(
         host_id=str(authorized.host_id),
         session_limit=MAX_AGENT_CONTEXT_SESSIONS,
     )
-    project, location = _configured_scope(config, rows.current_session)
+    project, repository, checkout = _configured_scope(config, rows.current_session)
     source_read = _read_context_sources(
-        root=location.path,
-        context_sources=project.context_sources,
+        root=checkout.path,
+        context_sources=repository.context_sources,
     )
     handoffs = {str(row["session_key"]): row for row in rows.latest_handoffs}
     sessions: list[dict[str, object]] = []
@@ -499,8 +522,8 @@ def build_agent_context(
     timestamp = time.time_ns() // 1_000_000 if generated_at is None else generated_at
     return AgentContextEnvelope.from_dict(
         {
-            "schemaVersion": 1,
-            "protocolVersion": 1,
+            "schemaVersion": 2,
+            "protocolVersion": 2,
             "generatedAt": timestamp,
             "caller": {
                 "hostId": str(authorized.host_id),
@@ -512,9 +535,10 @@ def build_agent_context(
             "project": {
                 "projectId": str(project.project_id),
                 "name": project.name,
-                "locationId": str(location.location_id),
-                "path": str(location.path),
-                "contextSources": list(project.context_sources),
+                "checkoutId": str(checkout.checkout_id),
+                "path": str(checkout.path),
+                "repositoryId": str(repository.repository_id),
+                "contextSources": list(repository.context_sources),
             },
             "stableSources": list(source_read.sources),
             "stableSourcesTruncated": source_read.truncated,
@@ -535,13 +559,16 @@ def _caller_record(authorized: AuthorizedAgent) -> dict[str, object]:
     }
 
 
-def _project_record(project: Project, location: ProjectLocation) -> dict[str, object]:
+def _project_record(
+    project: Project, repository: Repository, checkout: Checkout
+) -> dict[str, object]:
     return {
         "projectId": str(project.project_id),
         "name": project.name,
-        "locationId": str(location.location_id),
-        "path": str(location.path),
-        "contextSources": list(project.context_sources),
+        "repositoryId": str(repository.repository_id),
+        "checkoutId": str(checkout.checkout_id),
+        "path": str(checkout.path),
+        "contextSources": list(repository.context_sources),
     }
 
 
@@ -565,6 +592,29 @@ def _agent_session_record(row: Mapping[str, object]) -> dict[str, object]:
     ):
         if row[field] is not None:
             record[target] = row[field]
+    return record
+
+
+def _agent_task_record(row: Mapping[str, object]) -> dict[str, object]:
+    record: dict[str, object] = {
+        "taskId": row["task_id"],
+        "hostId": row["host_id"],
+        "projectId": row["project_id"],
+        "title": row["title"],
+        "status": row["status"],
+        "pinned": bool(row["pinned"]),
+        "createdAt": row["created_at"],
+        "updatedAt": row["updated_at"],
+    }
+    for source, target in (
+        ("checkout_id", "checkoutId"),
+        ("purpose", "purpose"),
+        ("preferred_provider", "preferredProvider"),
+        ("current_session_key", "currentSessionKey"),
+        ("closed_at", "closedAt"),
+    ):
+        if row.get(source) is not None:
+            record[target] = row[source]
     return record
 
 
@@ -620,6 +670,81 @@ class AgentToolService:
             session_key=self.authorized.session_key,
         )
 
+    def _current_task(self) -> dict[str, object]:
+        session = self.registry.get_session(str(self.authorized.session_key))
+        task_id = None if session is None else session.get("task_id")
+        if not isinstance(task_id, str):
+            raise AgentToolError("task_not_assigned")
+        task = self.registry.get_task(task_id)
+        if (
+            task is None
+            or task["host_id"] != str(self.authorized.host_id)
+            or task["current_session_key"] != str(self.authorized.session_key)
+        ):
+            raise AgentToolError("task_not_assigned")
+        return task
+
+    def _task_payload(self, task: Mapping[str, object]) -> dict[str, object]:
+        sessions = self.registry.list_task_sessions(str(task["task_id"]))
+        return {
+            "schemaVersion": 2,
+            "protocolVersion": 2,
+            "generatedAt": time.time_ns() // 1_000_000,
+            "caller": _caller_record(self.authorized),
+            "task": _agent_task_record(task),
+            "sessions": [_agent_session_record(session) for session in sessions],
+        }
+
+    def task(self) -> dict[str, object]:
+        return self._task_payload(self._current_task())
+
+    def list_tasks(self) -> dict[str, object]:
+        session = self.registry.get_session(str(self.authorized.session_key))
+        project_id = None if session is None else session.get("project_id")
+        if not isinstance(project_id, str):
+            raise AgentToolError("the current session has no project")
+        tasks = self.registry.list_tasks(
+            host_id=str(self.authorized.host_id), project_id=project_id
+        )
+        return {
+            "schemaVersion": 2,
+            "protocolVersion": 2,
+            "generatedAt": time.time_ns() // 1_000_000,
+            "caller": _caller_record(self.authorized),
+            "projectId": project_id,
+            "tasks": [_agent_task_record(task) for task in tasks[:50]],
+            "tasksTruncated": len(tasks) > 50,
+        }
+
+    def list_task_handoffs(self, *, limit: int = 20) -> dict[str, object]:
+        if (
+            isinstance(limit, bool)
+            or not isinstance(limit, int)
+            or not 1 <= limit <= 100
+        ):
+            raise AgentToolError("limit must be between 1 and 100")
+        task = self._current_task()
+        handoffs: list[dict[str, object]] = []
+        for session in reversed(self.registry.list_task_sessions(str(task["task_id"]))):
+            remaining = limit - len(handoffs)
+            if remaining <= 0:
+                break
+            handoffs.extend(
+                _handoff_record(row)
+                for row in self.registry.list_handoffs(
+                    str(session["session_key"]), limit=remaining
+                )
+            )
+        return {
+            "schemaVersion": 2,
+            "protocolVersion": 2,
+            "generatedAt": time.time_ns() // 1_000_000,
+            "caller": _caller_record(self.authorized),
+            "taskId": task["task_id"],
+            "handoffs": handoffs,
+            "handoffsTruncated": len(handoffs) == limit,
+        }
+
     def context(self) -> AgentContextEnvelope:
         return build_agent_context(
             self.registry,
@@ -633,14 +758,16 @@ class AgentToolService:
             host_id=str(self.authorized.host_id),
             session_limit=DEFAULT_AGENT_PROJECT_SESSION_LIMIT,
         )
-        project, location = _configured_scope(self.config, rows.current_session)
+        project, repository, checkout = _configured_scope(
+            self.config, rows.current_session
+        )
         return AgentSessionListEnvelope.from_dict(
             {
-                "schemaVersion": 1,
-                "protocolVersion": 1,
+                "schemaVersion": 2,
+                "protocolVersion": 2,
                 "generatedAt": time.time_ns() // 1_000_000,
                 "caller": _caller_record(self.authorized),
-                "project": _project_record(project, location),
+                "project": _project_record(project, repository, checkout),
                 "sessions": [_agent_session_record(row) for row in rows.sessions],
                 "sessionsTruncated": rows.retained_session_count > len(rows.sessions),
             }
@@ -658,16 +785,20 @@ class AgentToolService:
         return detail_envelope(rows)
 
     def handoff(self, handoff_id: str) -> AgentHandoffEnvelope:
+        task = self._current_task()
         caller, handoff = self.registry.read_project_handoff(
             str(self.authorized.session_key),
             handoff_id,
             host_id=str(self.authorized.host_id),
         )
-        project, _ = _configured_scope(self.config, caller)
+        handoff_session = self.registry.get_session(str(handoff["session_key"]))
+        if handoff_session is None or handoff_session.get("task_id") != task["task_id"]:
+            raise AgentToolError("handoff does not belong to the current task")
+        project, _, _ = _configured_scope(self.config, caller)
         return AgentHandoffEnvelope.from_dict(
             {
-                "schemaVersion": 1,
-                "protocolVersion": 1,
+                "schemaVersion": 2,
+                "protocolVersion": 2,
                 "generatedAt": time.time_ns() // 1_000_000,
                 "caller": _caller_record(self.authorized),
                 "projectId": str(project.project_id),
@@ -683,7 +814,7 @@ class AgentToolService:
             host_id=str(self.authorized.host_id),
             limit=bounded_limit,
         )
-        project, _ = _configured_scope(self.config, rows.current_session)
+        project, _, _ = _configured_scope(self.config, rows.current_session)
         results: list[dict[str, object]] = []
         for row in rows.results:
             record = {
@@ -708,8 +839,8 @@ class AgentToolService:
             results.append(record)
         return AgentSearchEnvelope.from_dict(
             {
-                "schemaVersion": 1,
-                "protocolVersion": 1,
+                "schemaVersion": 2,
+                "protocolVersion": 2,
                 "generatedAt": time.time_ns() // 1_000_000,
                 "caller": _caller_record(self.authorized),
                 "projectId": str(project.project_id),
@@ -727,7 +858,7 @@ class AgentToolService:
             host_id=str(self.authorized.host_id),
             session_limit=1,
         )
-        project, _ = _configured_scope(self.config, rows.current_session)
+        project, _, _ = _configured_scope(self.config, rows.current_session)
         result = search_memory(
             self.config.memory,
             query=normalized_query,
@@ -737,8 +868,8 @@ class AgentToolService:
         )
         return AgentMemoryEnvelope.from_dict(
             {
-                "schemaVersion": 1,
-                "protocolVersion": 1,
+                "schemaVersion": 2,
+                "protocolVersion": 2,
                 "generatedAt": time.time_ns() // 1_000_000,
                 "caller": _caller_record(self.authorized),
                 "projectId": str(project.project_id),
@@ -760,28 +891,52 @@ class AgentToolService:
         )
         return self.current()
 
+    def update_task(self, values: Mapping[str, object]) -> dict[str, object]:
+        task = self._current_task()
+        unknown = set(values) - {"title", "purpose", "pinned"}
+        if unknown or not values:
+            raise AgentToolError("task update fields are invalid")
+        updates: dict[str, object] = {}
+        if "title" in values:
+            updates["title"] = values["title"]
+        if "purpose" in values:
+            updates["purpose"] = "" if values["purpose"] is None else values["purpose"]
+        if "pinned" in values:
+            updates["pinned"] = values["pinned"]
+        updated = self.registry.update_task(str(task["task_id"]), **updates)
+        return self._task_payload(updated)
+
     def append_handoff(
         self,
         *,
         summary: str,
         next_action: str,
         handoff_id: str | None,
-        wrap: bool,
-    ) -> SessionDetailEnvelope:
-        self.registry.curate_session_handoff(
-            str(self.authorized.session_key),
-            host_id=str(self.authorized.host_id),
-            summary=summary,
-            next_action=next_action,
-            handoff_id=handoff_id,
-            wrap=wrap,
-            source="agent",
-        )
-        rows = self.registry.read_session_detail(
-            str(self.authorized.session_key),
-            host_id=str(self.authorized.host_id),
-        )
-        return detail_envelope(rows)
+        close: bool,
+    ) -> dict[str, object]:
+        task = self._current_task()
+        if close:
+            updated = self.registry.close_task(
+                str(task["task_id"]),
+                host_id=str(self.authorized.host_id),
+                summary=summary,
+                next_action=next_action,
+                handoff_id=handoff_id,
+                source="agent",
+            )
+        else:
+            self.registry.curate_session_handoff(
+                str(self.authorized.session_key),
+                host_id=str(self.authorized.host_id),
+                summary=summary,
+                next_action=next_action,
+                handoff_id=handoff_id,
+                wrap=False,
+                source="agent",
+            )
+            updated = self.registry.get_task(str(task["task_id"]))
+            assert updated is not None
+        return self._task_payload(updated)
 
 
 __all__ = [

@@ -26,6 +26,7 @@ LAUNCH_ID = "66666666-6666-4666-8666-666666666666"
 SURFACE_ID = "77777777-7777-4777-8777-777777777777"
 LOCATOR = TmuxLocator("/tmp/switchboard-test.sock", "swb-test", "@4", "%7")
 BIRTH_ID = hashlib.sha256(b"process-birth").hexdigest()
+TASK_ID = "88888888-8888-4888-8888-888888888888"
 
 
 class FakeTmux:
@@ -70,9 +71,9 @@ def managed_registry(tmp_path: Path) -> Registry:
                 "name": "project",
                 "default_provider": "claude",
                 "default_transport": "tmux",
-                "locations": [
+                "checkouts": [
                     {
-                        "location_id": LOCATION_ID,
+                        "checkout_id": LOCATION_ID,
                         "path": str(tmp_path),
                         "is_default": True,
                     }
@@ -81,13 +82,22 @@ def managed_registry(tmp_path: Path) -> Registry:
         ],
         observed_at=20,
     )
+    registry.create_task(
+        task_id=TASK_ID,
+        host_id=HOST_ID,
+        project_id=PROJECT_ID,
+        checkout_id=LOCATION_ID,
+        title="Managed Claude",
+        observed_at=21,
+    )
     registry.reserve_launch(
         {
             "host_id": HOST_ID,
             "provider": "claude",
             "action": "new",
             "project_id": PROJECT_ID,
-            "location_id": LOCATION_ID,
+            "task_id": TASK_ID,
+            "checkout_id": LOCATION_ID,
             "cwd": str(tmp_path),
             "source_handoff_id": None,
             "target_session_key": None,

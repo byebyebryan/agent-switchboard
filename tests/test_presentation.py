@@ -9,12 +9,12 @@ from uuid import NAMESPACE_URL, uuid5
 import pytest
 
 from agent_switchboard.domain import (
+    Checkout,
+    CheckoutId,
     HostId,
-    LocationId,
     PresentationContext,
     Project,
     ProjectId,
-    ProjectLocation,
     ProviderId,
 )
 from agent_switchboard.presentation import (
@@ -45,6 +45,7 @@ SECOND_SESSION_KEY = f"{HOST_ID}:codex:{SECOND_SESSION_ID}"
 REQUEST_ID = "44444444-4444-4444-8444-444444444444"
 PROJECT_ID = "55555555-5555-4555-8555-555555555555"
 LOCATION_ID = "66666666-6666-4666-8666-666666666666"
+TASK_ID = "67666666-6666-4666-8666-666666666666"
 NEW_SESSION_ID = "77777777-7777-4777-8777-777777777777"
 NEW_SESSION_KEY = f"{HOST_ID}:codex:{NEW_SESSION_ID}"
 NEW_CLAUDE_SESSION_KEY = f"{HOST_ID}:claude:{NEW_SESSION_ID}"
@@ -212,10 +213,10 @@ def add_project(
     path: Path,
     *,
     project_id: str = PROJECT_ID,
-    locations: tuple[tuple[str, Path, bool], ...] | None = None,
+    checkouts: tuple[tuple[str, Path, bool], ...] | None = None,
     default_provider: str | None = "codex",
-) -> tuple[Project, tuple[ProjectLocation, ...]]:
-    configured_locations = locations or ((LOCATION_ID, path, True),)
+) -> tuple[Project, tuple[Checkout, ...]]:
+    configured_checkouts = checkouts or ((LOCATION_ID, path, True),)
     registry.materialize_projects(
         HOST_ID,
         [
@@ -226,14 +227,14 @@ def add_project(
                 "default_provider": default_provider,
                 "default_transport": "tmux",
                 "context_sources": (),
-                "locations": [
+                "checkouts": [
                     {
-                        "location_id": location_id,
-                        "path": str(location_path),
-                        "display_name": location_path.name,
+                        "checkout_id": checkout_id,
+                        "path": str(checkout_path),
+                        "display_name": checkout_path.name,
                         "is_default": is_default,
                     }
-                    for location_id, location_path, is_default in configured_locations
+                    for checkout_id, checkout_path, is_default in configured_checkouts
                 ],
             }
         ],
@@ -246,18 +247,18 @@ def add_project(
             ProviderId(default_provider) if default_provider is not None else None
         ),
     )
-    domain_locations = tuple(
-        ProjectLocation(
-            LocationId(location_id),
+    domain_checkouts = tuple(
+        Checkout(
+            CheckoutId(checkout_id),
             project.project_id,
             HostId(HOST_ID),
-            location_path,
-            display_name=location_path.name,
+            checkout_path,
+            display_name=checkout_path.name,
             is_default=is_default,
         )
-        for location_id, location_path, is_default in configured_locations
+        for checkout_id, checkout_path, is_default in configured_checkouts
     )
-    return project, domain_locations
+    return project, domain_checkouts
 
 
 def new_coordinator(
@@ -266,15 +267,34 @@ def new_coordinator(
     path: Path,
     *,
     projects: tuple[Project, ...] | None = None,
-    locations: tuple[ProjectLocation, ...] | None = None,
+    checkouts: tuple[Checkout, ...] | None = None,
     clock: int = 100,
     codex_executable: str | None = "/opt/codex",
     claude_executable: str | None = "/opt/claude",
 ) -> LaunchCoordinator:
-    if projects is None or locations is None:
-        project, configured_locations = add_project(registry, path)
+    if projects is None or checkouts is None:
+        project, configured_checkouts = add_project(registry, path)
         projects = (project,)
-        locations = configured_locations
+        checkouts = configured_checkouts
+    if registry.get_task(TASK_ID) is None:
+        defaults = tuple(checkout for checkout in checkouts if checkout.is_default)
+        task_checkout = (
+            defaults[0]
+            if len(defaults) == 1
+            else checkouts[0]
+            if len(checkouts) == 1
+            else None
+        )
+        registry.create_task(
+            task_id=TASK_ID,
+            host_id=HOST_ID,
+            project_id=PROJECT_ID,
+            checkout_id=(
+                None if task_checkout is None else str(task_checkout.checkout_id)
+            ),
+            title="Presentation test task",
+            observed_at=3,
+        )
     return LaunchCoordinator(
         registry,
         host_id=HostId(HOST_ID),
@@ -283,7 +303,7 @@ def new_coordinator(
         codex_executable=codex_executable,
         claude_executable=claude_executable,
         projects=projects,
-        locations=locations,
+        checkouts=checkouts,
         launch_timeout_seconds=2,
         clock=lambda: clock,
         sleeper=lambda _seconds: None,
@@ -310,7 +330,8 @@ def test_new_project_launch_is_unbound_waiting_and_idempotent(
 
     plan = launch.prepare_new(
         PROJECT_ID,
-        location_id=None,
+        task_id=TASK_ID,
+        checkout_id=None,
         provider=None,
         request_id=REQUEST_ID,
         context=ATTACH_CONTEXT,
@@ -323,7 +344,7 @@ def test_new_project_launch_is_unbound_waiting_and_idempotent(
     stored = launches[0]
     assert stored["action"] == "new"
     assert stored["project_id"] == PROJECT_ID
-    assert stored["location_id"] == LOCATION_ID
+    assert stored["checkout_id"] == LOCATION_ID
     assert stored["cwd"] == str(project_path)
     assert stored["target_session_key"] is None
     assert stored["state"] == "waiting_for_client"
@@ -357,7 +378,8 @@ def test_new_project_launch_is_unbound_waiting_and_idempotent(
 
     retry = launch.prepare_new(
         PROJECT_ID,
-        location_id=LOCATION_ID,
+        task_id=TASK_ID,
+        checkout_id=LOCATION_ID,
         provider="codex",
         request_id=REQUEST_ID,
         context=DMS_CONTEXT,
@@ -371,23 +393,33 @@ def test_new_continuation_resolves_exact_handoff_and_retains_lineage(
 ) -> None:
     project_path = tmp_path / "project"
     project_path.mkdir()
-    project, locations = add_project(registry, project_path)
+    project, checkouts = add_project(registry, project_path)
     add_session(registry, project_path)
     registry.upsert_session(
         {
             "session_key": SESSION_KEY,
             "project_id": PROJECT_ID,
-            "location_id": LOCATION_ID,
+            "checkout_id": LOCATION_ID,
             "cwd": str(project_path),
             "last_observed_at": 2,
         }
     )
+    registry.create_task(
+        task_id=TASK_ID,
+        host_id=HOST_ID,
+        project_id=PROJECT_ID,
+        checkout_id=LOCATION_ID,
+        title="Continuation task",
+        observed_at=2,
+    )
+    registry.adopt_session(task_id=TASK_ID, session_key=SESSION_KEY, observed_at=2)
     handoff = registry.curate_session_handoff(
         SESSION_KEY,
         host_id=HOST_ID,
         handoff_id=stable_uuid("continuation-handoff"),
         summary="The curation core is complete.",
         next_action="Continue in a new exact session.",
+        wrap=True,
         observed_at=3,
     )
     assert handoff.handoff is not None
@@ -397,13 +429,14 @@ def test_new_continuation_resolves_exact_handoff_and_retains_lineage(
         tmux,
         project_path,
         projects=(project,),
-        locations=locations,
+        checkouts=checkouts,
         clock=100,
     )
 
     plan = launch.prepare_new(
         None,
-        location_id=None,
+        task_id=TASK_ID,
+        checkout_id=None,
         provider=None,
         source_ref=SESSION_KEY,
         request_id=REQUEST_ID,
@@ -414,7 +447,7 @@ def test_new_continuation_resolves_exact_handoff_and_retains_lineage(
     stored = registry.list_launches()[0]
     assert stored["source_handoff_id"] == handoff.handoff["handoff_id"]
     assert stored["project_id"] == PROJECT_ID
-    assert stored["location_id"] == LOCATION_ID
+    assert stored["checkout_id"] == LOCATION_ID
     assert stored["provider"] == "codex"
 
     tmux.attached = True
@@ -441,33 +474,43 @@ def test_new_continuation_resolves_exact_handoff_and_retains_lineage(
     assert bound.session["continued_from_handoff_id"] == handoff.handoff["handoff_id"]
 
 
-def test_new_continuation_blocks_without_handoff_or_matching_location(
+def test_new_continuation_blocks_without_handoff_or_matching_checkout(
     registry: Registry, tmp_path: Path
 ) -> None:
     project_path = tmp_path / "project"
     project_path.mkdir()
-    project, locations = add_project(registry, project_path)
+    project, checkouts = add_project(registry, project_path)
     add_session(registry, project_path)
     registry.upsert_session(
         {
             "session_key": SESSION_KEY,
             "project_id": PROJECT_ID,
-            "location_id": LOCATION_ID,
+            "checkout_id": LOCATION_ID,
             "cwd": str(project_path),
             "last_observed_at": 2,
         }
     )
+    registry.create_task(
+        task_id=TASK_ID,
+        host_id=HOST_ID,
+        project_id=PROJECT_ID,
+        checkout_id=LOCATION_ID,
+        title="Continuation task",
+        observed_at=2,
+    )
+    registry.adopt_session(task_id=TASK_ID, session_key=SESSION_KEY, observed_at=2)
     launch = new_coordinator(
         registry,
         FakeTmux(),
         project_path,
         projects=(project,),
-        locations=locations,
+        checkouts=checkouts,
     )
 
     missing = launch.prepare_new(
         None,
-        location_id=None,
+        task_id=TASK_ID,
+        checkout_id=None,
         provider=None,
         source_ref=SESSION_KEY,
         request_id=REQUEST_ID,
@@ -482,13 +525,15 @@ def test_new_continuation_blocks_without_handoff_or_matching_location(
         SESSION_KEY,
         host_id=HOST_ID,
         summary="Ready.",
-        next_action="Reject a location override.",
+        next_action="Reject a checkout override.",
+        wrap=True,
         observed_at=3,
     )
     assert handoff.handoff is not None
     conflict = launch.prepare_new(
         PROJECT_ID,
-        location_id=stable_uuid("other-location"),
+        task_id=TASK_ID,
+        checkout_id=stable_uuid("other-checkout"),
         provider=None,
         source_ref=SESSION_KEY,
         request_id=stable_uuid("continuation-conflict"),
@@ -496,22 +541,22 @@ def test_new_continuation_blocks_without_handoff_or_matching_location(
     )
     assert conflict.kind is PresentationPlanKind.BLOCKED
     assert conflict.error is not None
-    assert conflict.error.code == "continuation_location_conflict"
+    assert conflict.error.code == "continuation_checkout_conflict"
     assert registry.list_launches() == []
 
 
-def test_new_project_resolution_blocks_missing_provider_and_ambiguous_location(
+def test_new_project_resolution_blocks_missing_provider_and_ambiguous_checkout(
     registry: Registry, tmp_path: Path
 ) -> None:
     first = tmp_path / "first"
     second = tmp_path / "second"
     first.mkdir()
     second.mkdir()
-    second_location_id = stable_uuid("second-location")
-    project, locations = add_project(
+    second_checkout_id = stable_uuid("second-checkout")
+    project, checkouts = add_project(
         registry,
         first,
-        locations=((LOCATION_ID, first, False), (second_location_id, second, False)),
+        checkouts=((LOCATION_ID, first, False), (second_checkout_id, second, False)),
         default_provider=None,
     )
     launch = new_coordinator(
@@ -519,22 +564,24 @@ def test_new_project_resolution_blocks_missing_provider_and_ambiguous_location(
         FakeTmux(),
         first,
         projects=(project,),
-        locations=locations,
+        checkouts=checkouts,
     )
 
     ambiguous = launch.prepare_new(
         PROJECT_ID,
-        location_id=None,
+        task_id=TASK_ID,
+        checkout_id=None,
         provider="codex",
         request_id=REQUEST_ID,
         context=ATTACH_CONTEXT,
     )
     assert ambiguous.error is not None
-    assert ambiguous.error.code == "project_location_ambiguous"
+    assert ambiguous.error.code == "project_checkout_ambiguous"
 
     missing_provider = launch.prepare_new(
         PROJECT_ID,
-        location_id=LOCATION_ID,
+        task_id=TASK_ID,
+        checkout_id=LOCATION_ID,
         provider=None,
         request_id=stable_uuid("missing-provider"),
         context=ATTACH_CONTEXT,
@@ -549,9 +596,9 @@ def test_new_project_resolution_blocks_unknown_foreign_and_unavailable(
 ) -> None:
     project_path = tmp_path / "project"
     project_path.mkdir()
-    project, locations = add_project(registry, project_path)
-    foreign_location = ProjectLocation(
-        LocationId(stable_uuid("foreign-location")),
+    project, checkouts = add_project(registry, project_path)
+    foreign_checkout = Checkout(
+        CheckoutId(stable_uuid("foreign-checkout")),
         ProjectId(stable_uuid("foreign-project")),
         HostId(HOST_ID),
         project_path,
@@ -561,12 +608,13 @@ def test_new_project_resolution_blocks_unknown_foreign_and_unavailable(
         FakeTmux(),
         project_path,
         projects=(project,),
-        locations=(*locations, foreign_location),
+        checkouts=(*checkouts, foreign_checkout),
     )
 
     unknown = launch.prepare_new(
         stable_uuid("unknown-project"),
-        location_id=None,
+        task_id=TASK_ID,
+        checkout_id=None,
         provider=None,
         request_id=stable_uuid("unknown-project-request"),
         context=ATTACH_CONTEXT,
@@ -574,24 +622,26 @@ def test_new_project_resolution_blocks_unknown_foreign_and_unavailable(
     assert unknown.error is not None and unknown.error.code == "project_not_found"
     foreign = launch.prepare_new(
         PROJECT_ID,
-        location_id=str(foreign_location.location_id),
+        task_id=TASK_ID,
+        checkout_id=str(foreign_checkout.checkout_id),
         provider=None,
-        request_id=stable_uuid("foreign-location-request"),
+        request_id=stable_uuid("foreign-checkout-request"),
         context=ATTACH_CONTEXT,
     )
-    assert foreign.error is not None and foreign.error.code == "location_not_found"
+    assert foreign.error is not None and foreign.error.code == "checkout_not_found"
 
     missing_path = tmp_path / "missing"
-    missing_project, missing_locations = add_project(registry, missing_path)
+    missing_project, missing_checkouts = add_project(registry, missing_path)
     unavailable = new_coordinator(
         registry,
         FakeTmux(),
         missing_path,
         projects=(missing_project,),
-        locations=missing_locations,
+        checkouts=missing_checkouts,
     ).prepare_new(
         PROJECT_ID,
-        location_id=None,
+        task_id=TASK_ID,
+        checkout_id=None,
         provider=None,
         request_id=stable_uuid("unavailable-request"),
         context=ATTACH_CONTEXT,
@@ -607,20 +657,21 @@ def test_new_claude_project_launch_forces_disabled_agent_view_and_starts_exact_c
 ) -> None:
     project_path = tmp_path / "project"
     project_path.mkdir()
-    project, locations = add_project(registry, project_path)
+    project, checkouts = add_project(registry, project_path)
     tmux = FakeTmux()
     launch = new_coordinator(
         registry,
         tmux,
         project_path,
         projects=(project,),
-        locations=locations,
+        checkouts=checkouts,
         clock=time.time_ns() // 1_000_000,
     )
 
     plan = launch.prepare_new(
         PROJECT_ID,
-        location_id=None,
+        task_id=TASK_ID,
+        checkout_id=None,
         provider="claude",
         request_id=REQUEST_ID,
         context=ATTACH_CONTEXT,
@@ -670,7 +721,7 @@ def test_claude_history_launch_uses_native_picker_and_binds_selected_session(
 ) -> None:
     project_path = tmp_path / "project"
     project_path.mkdir()
-    project, locations = add_project(
+    project, checkouts = add_project(
         registry,
         project_path,
         default_provider="claude",
@@ -681,12 +732,12 @@ def test_claude_history_launch_uses_native_picker_and_binds_selected_session(
         tmux,
         project_path,
         projects=(project,),
-        locations=locations,
+        checkouts=checkouts,
     )
 
     plan = launch.prepare_history(
         PROJECT_ID,
-        location_id=LOCATION_ID,
+        checkout_id=LOCATION_ID,
         request_id=REQUEST_ID,
         context=ATTACH_CONTEXT,
     )
@@ -740,7 +791,7 @@ def test_claude_history_blocked_plan_keeps_provider_attribution(
 ) -> None:
     project_path = tmp_path / "project"
     project_path.mkdir()
-    project, locations = add_project(
+    project, checkouts = add_project(
         registry,
         project_path,
         default_provider="claude",
@@ -750,12 +801,12 @@ def test_claude_history_blocked_plan_keeps_provider_attribution(
         FakeTmux(),
         project_path,
         projects=(project,),
-        locations=locations,
+        checkouts=checkouts,
     )
 
     blocked = launch.prepare_history(
         PROJECT_ID,
-        location_id=LOCATION_ID,
+        checkout_id=LOCATION_ID,
         request_id=REQUEST_ID,
         context=PresentationContext(False, None, False, False),
     )
@@ -771,7 +822,7 @@ def test_disabled_claude_blocks_new_without_mutating_launch_state(
 ) -> None:
     project_path = tmp_path / "project"
     project_path.mkdir()
-    project, locations = add_project(
+    project, checkouts = add_project(
         registry,
         project_path,
         default_provider="claude",
@@ -781,13 +832,14 @@ def test_disabled_claude_blocks_new_without_mutating_launch_state(
         FakeTmux(),
         project_path,
         projects=(project,),
-        locations=locations,
+        checkouts=checkouts,
         claude_executable=None,
     )
 
     blocked = launch.prepare_new(
         PROJECT_ID,
-        location_id=None,
+        task_id=TASK_ID,
+        checkout_id=None,
         provider=None,
         request_id=REQUEST_ID,
         context=ATTACH_CONTEXT,
@@ -814,7 +866,8 @@ def test_disabled_codex_blocks_new_without_mutating_launch_state(
 
     blocked = launch.prepare_new(
         PROJECT_ID,
-        location_id=None,
+        task_id=TASK_ID,
+        checkout_id=None,
         provider=None,
         request_id=REQUEST_ID,
         context=ATTACH_CONTEXT,
@@ -826,18 +879,18 @@ def test_disabled_codex_blocks_new_without_mutating_launch_state(
     assert registry.list_launches() == []
 
 
-def test_new_request_id_conflicts_when_the_configured_location_changes(
+def test_new_request_id_conflicts_when_the_configured_checkout_changes(
     registry: Registry, tmp_path: Path
 ) -> None:
     first = tmp_path / "first"
     second = tmp_path / "second"
     first.mkdir()
     second.mkdir()
-    second_location_id = stable_uuid("conflict-location")
-    project, locations = add_project(
+    second_checkout_id = stable_uuid("conflict-checkout")
+    project, checkouts = add_project(
         registry,
         first,
-        locations=((LOCATION_ID, first, True), (second_location_id, second, False)),
+        checkouts=((LOCATION_ID, first, True), (second_checkout_id, second, False)),
     )
     tmux = FakeTmux()
     launch = new_coordinator(
@@ -845,12 +898,13 @@ def test_new_request_id_conflicts_when_the_configured_location_changes(
         tmux,
         first,
         projects=(project,),
-        locations=locations,
+        checkouts=checkouts,
         clock=time.time_ns() // 1_000_000,
     )
     launch.prepare_new(
         PROJECT_ID,
-        location_id=LOCATION_ID,
+        task_id=TASK_ID,
+        checkout_id=LOCATION_ID,
         provider=None,
         request_id=REQUEST_ID,
         context=ATTACH_CONTEXT,
@@ -858,14 +912,16 @@ def test_new_request_id_conflicts_when_the_configured_location_changes(
 
     conflict = launch.prepare_new(
         PROJECT_ID,
-        location_id=second_location_id,
+        task_id=TASK_ID,
+        checkout_id=second_checkout_id,
         provider=None,
         request_id=REQUEST_ID,
         context=ATTACH_CONTEXT,
     )
 
     assert conflict.kind is PresentationPlanKind.BLOCKED
-    assert conflict.error is not None and conflict.error.code == "request_conflict"
+    assert conflict.error is not None
+    assert conflict.error.code == "request_conflict"
     assert len(registry.list_launches()) == 1
     assert len(tmux.create_calls) == 1
 
@@ -879,7 +935,8 @@ def test_new_bootstrap_starts_exact_codex_after_attachment(
     launch = new_coordinator(registry, tmux, project_path)
     launch.prepare_new(
         PROJECT_ID,
-        location_id=None,
+        task_id=TASK_ID,
+        checkout_id=None,
         provider=None,
         request_id=REQUEST_ID,
         context=ATTACH_CONTEXT,
@@ -901,7 +958,7 @@ def test_new_bootstrap_starts_exact_codex_after_attachment(
     assert started["expires_at"] == 300_100
 
 
-def test_new_bootstrap_rejects_disappeared_location(
+def test_new_bootstrap_rejects_disappeared_checkout(
     registry: Registry, tmp_path: Path
 ) -> None:
     project_path = tmp_path / "project"
@@ -910,7 +967,8 @@ def test_new_bootstrap_rejects_disappeared_location(
     launch = new_coordinator(registry, tmux, project_path)
     launch.prepare_new(
         PROJECT_ID,
-        location_id=None,
+        task_id=TASK_ID,
+        checkout_id=None,
         provider=None,
         request_id=REQUEST_ID,
         context=ATTACH_CONTEXT,
@@ -925,7 +983,7 @@ def test_new_bootstrap_rejects_disappeared_location(
     assert failed["failure_code"] == "launch_target_changed"
 
 
-def test_new_bootstrap_rejects_a_reconfigured_location(
+def test_new_bootstrap_rejects_a_reconfigured_checkout(
     registry: Registry, tmp_path: Path
 ) -> None:
     original = tmp_path / "original"
@@ -936,7 +994,8 @@ def test_new_bootstrap_rejects_a_reconfigured_location(
     launch = new_coordinator(registry, tmux, original)
     launch.prepare_new(
         PROJECT_ID,
-        location_id=None,
+        task_id=TASK_ID,
+        checkout_id=None,
         provider=None,
         request_id=REQUEST_ID,
         context=ATTACH_CONTEXT,
@@ -944,8 +1003,8 @@ def test_new_bootstrap_rejects_a_reconfigured_location(
     launch_id = str(registry.list_launches()[0]["launch_id"])
     tmux.attached = True
     project = launch.projects[PROJECT_ID]
-    changed_location = ProjectLocation(
-        LocationId(LOCATION_ID),
+    changed_checkout = Checkout(
+        CheckoutId(LOCATION_ID),
         project.project_id,
         HostId(HOST_ID),
         changed,
@@ -957,7 +1016,7 @@ def test_new_bootstrap_rejects_a_reconfigured_location(
         tmux,
         changed,
         projects=(project,),
-        locations=(changed_location,),
+        checkouts=(changed_checkout,),
     )
 
     assert reconfigured.bootstrap(launch_id) == 1
@@ -975,7 +1034,8 @@ def test_bound_new_session_promotes_tmux_metadata_and_reopens(
     launch = new_coordinator(registry, tmux, project_path)
     launch.prepare_new(
         PROJECT_ID,
-        location_id=None,
+        task_id=TASK_ID,
+        checkout_id=None,
         provider=None,
         request_id=REQUEST_ID,
         context=ATTACH_CONTEXT,
@@ -1020,7 +1080,7 @@ def test_bound_new_claude_session_promotes_tmux_metadata_and_reopens(
 ) -> None:
     project_path = tmp_path / "project"
     project_path.mkdir()
-    project, locations = add_project(
+    project, checkouts = add_project(
         registry,
         project_path,
         default_provider="claude",
@@ -1031,11 +1091,12 @@ def test_bound_new_claude_session_promotes_tmux_metadata_and_reopens(
         tmux,
         project_path,
         projects=(project,),
-        locations=locations,
+        checkouts=checkouts,
     )
     launch.prepare_new(
         PROJECT_ID,
-        location_id=None,
+        task_id=TASK_ID,
+        checkout_id=None,
         provider=None,
         request_id=REQUEST_ID,
         context=ATTACH_CONTEXT,
