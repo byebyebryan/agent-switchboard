@@ -38,6 +38,14 @@ class HandoffInput:
     handoff_id: str | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class CurrentSessionBinding:
+    session_key: SessionKey
+    surface_id: SurfaceId
+    launch_id: str | None
+    provider: ProviderId
+
+
 def _handoff_record(row: Mapping[str, object]) -> dict[str, object]:
     return {
         "handoffId": row["handoff_id"],
@@ -92,13 +100,13 @@ def read_session_detail(
     return detail_envelope(rows, generated_at=generated_at)
 
 
-def resolve_current_session_key(
+def resolve_current_session_binding(
     registry: Registry,
     *,
     host_id: HostId | str,
     environment: Mapping[str, str] | None = None,
     tmux: TmuxController | None = None,
-) -> SessionKey:
+) -> CurrentSessionBinding:
     """Resolve only a confirmed session bound to the inherited exact tmux pane."""
 
     host = host_id if isinstance(host_id, HostId) else HostId(host_id)
@@ -150,7 +158,24 @@ def resolve_current_session_key(
         or session["surface_id"] != str(surface_id)
     ):
         raise CurationError("the current pane binding changed or is untrusted")
-    return key
+    return CurrentSessionBinding(key, surface_id, metadata.launch_id, provider)
+
+
+def resolve_current_session_key(
+    registry: Registry,
+    *,
+    host_id: HostId | str,
+    environment: Mapping[str, str] | None = None,
+    tmux: TmuxController | None = None,
+) -> SessionKey:
+    """Resolve the session key from the exact confirmed current binding."""
+
+    return resolve_current_session_binding(
+        registry,
+        host_id=host_id,
+        environment=environment,
+        tmux=tmux,
+    ).session_key
 
 
 def read_handoff_input(stream: BinaryIO) -> HandoffInput:
@@ -212,10 +237,12 @@ def format_session_detail(detail: SessionDetailEnvelope) -> str:
 
 __all__ = [
     "CurationError",
+    "CurrentSessionBinding",
     "HandoffInput",
     "detail_envelope",
     "format_session_detail",
     "read_handoff_input",
     "read_session_detail",
+    "resolve_current_session_binding",
     "resolve_current_session_key",
 ]

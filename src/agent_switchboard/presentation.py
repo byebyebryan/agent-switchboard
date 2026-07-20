@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
+import secrets
 import sqlite3
 import time
 import uuid
@@ -63,6 +65,9 @@ Sleeper = Callable[[float], None]
 ExecProvider = Callable[[str, Sequence[str]], Never]
 ReconcileRuntime = Callable[[], object]
 CwdReader = Callable[[], Path]
+AgentCapabilityFactory = Callable[[], str]
+
+_AGENT_CAPABILITY_RE = re.compile(r"[A-Za-z0-9_-]{43,128}")
 
 
 class PresentationError(RuntimeError):
@@ -142,6 +147,9 @@ class LaunchCoordinator:
         clock: Clock = _now_ms,
         sleeper: Sleeper = time.sleep,
         cwd_reader: CwdReader = Path.cwd,
+        agent_capability_factory: AgentCapabilityFactory = (
+            lambda: secrets.token_urlsafe(32)
+        ),
     ) -> None:
         self.registry = registry
         self.host_id = host_id if isinstance(host_id, HostId) else HostId(host_id)
@@ -156,6 +164,7 @@ class LaunchCoordinator:
         self.clock = clock
         self.sleeper = sleeper
         self.cwd_reader = cwd_reader
+        self.agent_capability_factory = agent_capability_factory
         if not Path(self.swbctl_executable).is_absolute():
             raise PresentationError("swbctl executable must be an absolute path")
         for provider_name, executable in (
@@ -168,6 +177,22 @@ class LaunchCoordinator:
             raise PresentationError("tmux naming prefix is invalid")
         if not 1 <= self.launch_timeout_seconds <= 300:
             raise PresentationError("launch timeout must be between 1 and 300 seconds")
+
+    def _issue_agent_capability(
+        self, provider: ProviderId, action: str
+    ) -> tuple[str | None, str | None]:
+        if provider not in {ProviderId.CODEX, ProviderId.CLAUDE} or action not in {
+            "new",
+            "resume",
+        }:
+            return None, None
+        capability = self.agent_capability_factory()
+        if (
+            not isinstance(capability, str)
+            or _AGENT_CAPABILITY_RE.fullmatch(capability) is None
+        ):
+            raise PresentationError("agent capability generation failed")
+        return capability, hashlib.sha256(capability.encode("ascii")).hexdigest()
 
     def prepare_new(
         self,
@@ -734,6 +759,9 @@ class LaunchCoordinator:
         now: int,
     ) -> PresentationPlan:
         provider = session_key.provider
+        agent_capability, agent_capability_hash = self._issue_agent_capability(
+            provider, "resume"
+        )
         launch_id = str(uuid.uuid4())
         lease_owner = self._lease_owner(launch_id)
         request = {
@@ -759,6 +787,7 @@ class LaunchCoordinator:
                     else PREPARE_CLAUDE_CAPABILITY_HASH
                 ),
                 expires_at=now + self.launch_timeout_seconds * 1_000,
+                agent_capability_hash=agent_capability_hash,
                 created_at=now,
             )
         except RequestConflict:
@@ -778,6 +807,8 @@ class LaunchCoordinator:
             "AGENT_SWITCHBOARD_LAUNCH_ID": launch_id,
             "AGENT_SWITCHBOARD_SURFACE_ID": surface_id,
         }
+        if agent_capability is not None:
+            environment["AGENT_SWITCHBOARD_CAPABILITY"] = agent_capability
         if provider is ProviderId.CLAUDE:
             environment["CLAUDE_CODE_DISABLE_AGENT_VIEW"] = "1"
         observed: TmuxSurfaceObservation | None = None
@@ -869,6 +900,9 @@ class LaunchCoordinator:
     ) -> PresentationPlan:
         if action not in {"new", "history"}:
             raise PresentationError("unbound launch action is unsupported")
+        agent_capability, agent_capability_hash = self._issue_agent_capability(
+            provider, action
+        )
         launch_id = str(uuid.uuid4())
         lease_owner = self._lease_owner(launch_id)
         request = {
@@ -890,6 +924,7 @@ class LaunchCoordinator:
                 lease_owner=lease_owner,
                 capability_hash=capability_hash,
                 expires_at=now + self.launch_timeout_seconds * 1_000,
+                agent_capability_hash=agent_capability_hash,
                 created_at=now,
                 source_session_key=source_session_key,
             )
@@ -917,6 +952,8 @@ class LaunchCoordinator:
             "AGENT_SWITCHBOARD_LAUNCH_ID": launch_id,
             "AGENT_SWITCHBOARD_SURFACE_ID": surface_id,
         }
+        if agent_capability is not None:
+            environment["AGENT_SWITCHBOARD_CAPABILITY"] = agent_capability
         if provider is ProviderId.CLAUDE:
             environment["CLAUDE_CODE_DISABLE_AGENT_VIEW"] = "1"
         observed: TmuxSurfaceObservation | None = None

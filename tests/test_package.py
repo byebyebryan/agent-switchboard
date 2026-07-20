@@ -42,6 +42,7 @@ def test_static_pep_621_metadata_and_stdlib_runtime() -> None:
         "docs/phase-3c-plan.md",
         "docs/phase-4a-plan.md",
         "docs/phase-4b-plan.md",
+        "docs/phase-4c-plan.md",
     ]
     assert metadata["tool"]["pytest"]["ini_options"]["pythonpath"] == ["src"]
 
@@ -73,6 +74,7 @@ def test_ci_smokes_wheel_and_source_distribution_installations() -> None:
     assert "/tmp/switchboard-sdist-smoke" in workflow
     for module in (
         "agent_switchboard.cli",
+        "agent_switchboard.agent_tools",
         "agent_switchboard.curation",
         "agent_switchboard.doctor",
         "agent_switchboard.executable",
@@ -81,6 +83,8 @@ def test_ci_smokes_wheel_and_source_distribution_installations() -> None:
         "agent_switchboard.local",
         "agent_switchboard.local_events",
         "agent_switchboard.live",
+        "agent_switchboard.mcp_server",
+        "agent_switchboard.memory",
         "agent_switchboard.paths",
         "agent_switchboard.providers.codex",
         "agent_switchboard.providers.claude",
@@ -98,6 +102,12 @@ def test_ci_smokes_wheel_and_source_distribution_installations() -> None:
     assert 'show --help | grep -F -- "--handoff-limit"' in workflow
     assert 'current --help | grep -F -- "--handoff-limit"' in workflow
     assert 'session --help | grep -F "usage: swbctl session"' in workflow
+    assert 'agent --help | grep -F "usage: swbctl agent"' in workflow
+    assert 'agent context --help | grep -F -- "--json"' in workflow
+    assert 'agent sessions --help | grep -F -- "--json"' in workflow
+    assert 'agent search --help | grep -F -- "--limit LIMIT"' in workflow
+    assert 'agent memory --help | grep -F -- "--limit LIMIT"' in workflow
+    assert 'agent-mcp --help | grep -F "usage: swbctl agent-mcp"' in workflow
     assert 'prepare-new --help | grep -F -- "--from SOURCE_REF"' in workflow
     assert 'hooks install --help | grep -F -- "--dry-run"' in workflow
     assert 'hooks uninstall --help | grep -F -- "--dry-run"' in workflow
@@ -115,11 +125,13 @@ def test_ci_smokes_wheel_and_source_distribution_installations() -> None:
     assert '"docs/phase-3c-plan.md"' in verifier
     assert '"docs/phase-4a-plan.md"' in verifier
     assert '"docs/phase-4b-plan.md"' in verifier
+    assert '"docs/phase-4c-plan.md"' in verifier
     assert '"agent_switchboard/migrations/v0003_name_provenance_runtime_index.py"' in (
         verifier
     )
     assert '"agent_switchboard/migrations/v0004_runtime_truth_ordering.py"' in verifier
     assert '"agent_switchboard/migrations/v0005_history_launch.py"' in verifier
+    assert '"agent_switchboard/migrations/v0006_agent_tools.py"' in verifier
 
 
 def test_cli_help_and_version(capsys: pytest.CaptureFixture[str]) -> None:

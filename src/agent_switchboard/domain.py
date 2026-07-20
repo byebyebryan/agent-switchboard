@@ -908,6 +908,7 @@ class LaunchIntent:
     capability_hash: str
     created_at: datetime
     expires_at: datetime
+    agent_capability_hash: str | None = None
     failure_code: str | None = None
 
     def __post_init__(self) -> None:
@@ -1042,6 +1043,13 @@ class LaunchIntent:
             self.capability_hash
         ):
             raise ValidationError("capability_hash must be a lowercase SHA-256 digest")
+        if self.agent_capability_hash is not None and (
+            not isinstance(self.agent_capability_hash, str)
+            or not _SHA256_RE.fullmatch(self.agent_capability_hash)
+        ):
+            raise ValidationError(
+                "agent_capability_hash must be a lowercase SHA-256 digest"
+            )
         created_at = _aware(self.created_at, "created_at")
         expires_at = _aware(self.expires_at, "expires_at")
         assert created_at is not None and expires_at is not None

@@ -56,6 +56,12 @@ Codex and Claude sessions:
   revalidated launch-owned process group and tmux surface
 - versioned focus, switch, attach, and blocked presentation plans consumed by
   the separate DMS integration
+- random per-launch Codex and Claude agent capabilities stored only as digests, with
+  exact current-pane/launch/surface/session authorization
+- bounded configured-file and same-project context, project-scoped retained
+  reads/search, and current-session-only name, handoff, and wrap commands
+- a thin dependency-free stdio MCP projection of the same authorized service,
+  plus an explicit, disabled-by-default bounded memory MCP adapter
 - unit, migration, concurrency, provider, protocol, and packaging tests
 
 Phase 3B implementation and live acceptance are complete in the core and
@@ -81,8 +87,13 @@ contracts, plain terminal, dedicated tmux manager, popup, and complete action
 matrix is recorded in
 [`docs/phase-4a-plan.md`](docs/phase-4a-plan.md). Phase 4B installed isolated
 acceptance is also complete; its implemented boundary and evidence are recorded in
-[`docs/phase-4b-plan.md`](docs/phase-4b-plan.md). Agent-authorized tools and
-memory are next in Phase 4C, while remote SSH transport remains Phase 5. See
+[`docs/phase-4b-plan.md`](docs/phase-4b-plan.md). Phase 4C completes exact
+session-scoped authorization for managed Codex and Claude launches, bounded
+current-project context and retained-state search, current-session curation, a
+thin stdio MCP transport, and an optional external memory MCP adapter. Its
+contract and isolated installed evidence are recorded in
+[`docs/phase-4c-plan.md`](docs/phase-4c-plan.md). Remote SSH transport remains
+Phase 5. See
 [the design](docs/design.md), the
 [Phase 1 validation record](docs/phase-1-validation.md), and the
 [Phase 2 validation record](docs/phase-2-validation.md), the
@@ -108,6 +119,19 @@ swbctl session purpose <session-key> <purpose> --json
 swbctl session pin <session-key> [--off] --json
 swbctl session handoff <session-key> --json-stdin --json
 swbctl session wrap <session-key> --json-stdin --json
+swbctl agent current --json
+swbctl agent context --json
+swbctl agent sessions --json
+swbctl agent show <session-key> --json
+swbctl agent handoff-read <handoff-id> --json
+swbctl agent handoffs <session-key> [--limit 20] --json
+swbctl agent search <query> [--limit 20] --json
+swbctl agent memory <query> [--limit 20] --json
+swbctl agent name <name> --json
+swbctl agent name --clear --json
+swbctl agent handoff --json-stdin --json
+swbctl agent wrap --json-stdin --json
+swbctl agent-mcp
 swbctl tui
 swbctl hooks install --provider codex --dry-run
 swbctl hooks uninstall --provider codex --dry-run
@@ -220,6 +244,37 @@ assign immutable sequence and hash state atomically, and support an optional
 client-generated UUID for safe retry. `current` and mutation `--current`
 resolve only an exact confirmed session surface inherited from the caller's
 tmux pane; plain terminals, manager panes, and stale bindings fail closed.
+
+The `agent` command family is issued only to managed Codex or Claude `new` and
+exact `resume` surfaces. Every invocation requires the exact
+inherited tmux pane, bound launch/surface/session identities, and a random
+per-launch capability whose raw value exists only in that surface environment;
+SQLite retains only its SHA-256 digest. The caller cannot provide a session or
+project identity for authorization. Reads and search are then restricted to
+the caller's configured local project; search covers only curated names,
+purposes, and explicit handoffs. `context` additionally reads only explicitly
+configured project-relative text sources. Mutations always target the caller.
+Agent commands never reconcile providers, read transcripts, call a model, or
+enter the DMS path.
+
+`swbctl agent-mcp` exposes those exact operations as newline-delimited stdio
+JSON-RPC after MCP initialization. It has no separate storage or authorization
+logic and emits protocol frames only on stdout. Memory search remains disabled
+unless `[memory]` names one absolute stdio MCP command and tool:
+
+```toml
+[memory]
+enabled = true
+command = ["/absolute/path/to/memory-mcp-server"]
+tool = "search"
+timeout_seconds = 5
+```
+
+Each memory query starts one bounded MCP exchange, passes only query, result
+limit, and project name, strips all `AGENT_SWITCHBOARD_*` variables from the
+child, accepts text content only, and returns an unavailable envelope on
+absence, timeout, or protocol/tool failure. Switchboard never reads the
+adapter's private databases or provider transcripts.
 
 `swbctl tui` exposes those operations through the optional Textual frontend.
 It loads handoff bodies only for the selected session, keeps the last-good list

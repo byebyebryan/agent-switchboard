@@ -214,6 +214,201 @@ def test_tui_command_has_an_actionable_missing_extra_error(
     assert "Traceback" not in captured.err
 
 
+def test_agent_cli_projects_exact_machine_forms_through_one_service(
+    cli_environment: CliEnvironment,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[object, ...]] = []
+
+    class Envelope:
+        def __init__(self, value: str) -> None:
+            self.value = value
+
+        def to_json(self) -> str:
+            return json.dumps({"operation": self.value}, separators=(",", ":"))
+
+    class Service:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            calls.append(("authorize",))
+
+        def current(self) -> Envelope:
+            calls.append(("current",))
+            return Envelope("current")
+
+        def context(self) -> Envelope:
+            calls.append(("context",))
+            return Envelope("context")
+
+        def list_sessions(self) -> Envelope:
+            calls.append(("sessions",))
+            return Envelope("sessions")
+
+        def session_detail(
+            self, session_key: str, *, handoff_limit: int = 20
+        ) -> Envelope:
+            calls.append(("detail", session_key, handoff_limit))
+            return Envelope("detail")
+
+        def handoff(self, handoff_id: str) -> Envelope:
+            calls.append(("handoff-read", handoff_id))
+            return Envelope("handoff-read")
+
+        def search(self, query: str, *, limit: int) -> Envelope:
+            calls.append(("search", query, limit))
+            return Envelope("search")
+
+        def memory_search(self, query: str, *, limit: int) -> Envelope:
+            calls.append(("memory", query, limit))
+            return Envelope("memory")
+
+        def set_name(self, value: str | None) -> Envelope:
+            calls.append(("name", value))
+            return Envelope("name")
+
+        def append_handoff(
+            self,
+            *,
+            summary: str,
+            next_action: str,
+            handoff_id: str | None,
+            wrap: bool,
+        ) -> Envelope:
+            calls.append(("handoff", summary, next_action, handoff_id, wrap))
+            return Envelope("wrap" if wrap else "handoff")
+
+    monkeypatch.setattr(cli_module, "AgentToolService", Service)
+
+    assert main(["agent", "current", "--json"]) == 0
+    assert json.loads(capsys.readouterr().out) == {"operation": "current"}
+    assert main(["agent", "context", "--json"]) == 0
+    assert json.loads(capsys.readouterr().out) == {"operation": "context"}
+    assert main(["agent", "sessions", "--json"]) == 0
+    assert json.loads(capsys.readouterr().out) == {"operation": "sessions"}
+    assert main(["agent", "show", CURATION_SESSION_KEY, "--json"]) == 0
+    assert json.loads(capsys.readouterr().out) == {"operation": "detail"}
+    assert main(["agent", "handoff-read", CURATION_HANDOFF_ID, "--json"]) == 0
+    assert json.loads(capsys.readouterr().out) == {"operation": "handoff-read"}
+    assert (
+        main(
+            [
+                "agent",
+                "handoffs",
+                CURATION_SESSION_KEY,
+                "--limit",
+                "7",
+                "--json",
+            ]
+        )
+        == 0
+    )
+    assert json.loads(capsys.readouterr().out) == {"operation": "detail"}
+    assert main(["agent", "search", "alignment", "--limit", "6", "--json"]) == 0
+    assert json.loads(capsys.readouterr().out) == {"operation": "search"}
+    assert main(["agent", "memory", "history", "--limit", "5", "--json"]) == 0
+    assert json.loads(capsys.readouterr().out) == {"operation": "memory"}
+    assert main(["agent", "name", "Agent title", "--json"]) == 0
+    assert json.loads(capsys.readouterr().out) == {"operation": "name"}
+    assert main(["agent", "name", "--clear", "--json"]) == 0
+    assert json.loads(capsys.readouterr().out) == {"operation": "name"}
+
+    payload = {
+        "handoffId": CURATION_HANDOFF_ID,
+        "summary": "Agent summary.",
+        "nextAction": "Agent next action.",
+    }
+    monkeypatch.setattr("sys.stdin", io.BytesIO(json.dumps(payload).encode()))
+    assert main(["agent", "handoff", "--json-stdin", "--json"]) == 0
+    assert json.loads(capsys.readouterr().out) == {"operation": "handoff"}
+    monkeypatch.setattr("sys.stdin", io.BytesIO(json.dumps(payload).encode()))
+    assert main(["agent", "wrap", "--json-stdin", "--json"]) == 0
+    assert json.loads(capsys.readouterr().out) == {"operation": "wrap"}
+
+    assert calls == [
+        ("authorize",),
+        ("current",),
+        ("authorize",),
+        ("context",),
+        ("authorize",),
+        ("sessions",),
+        ("authorize",),
+        ("detail", CURATION_SESSION_KEY, 20),
+        ("authorize",),
+        ("handoff-read", CURATION_HANDOFF_ID),
+        ("authorize",),
+        ("detail", CURATION_SESSION_KEY, 7),
+        ("authorize",),
+        ("search", "alignment", 6),
+        ("authorize",),
+        ("memory", "history", 5),
+        ("authorize",),
+        ("name", "Agent title"),
+        ("authorize",),
+        ("name", None),
+        ("authorize",),
+        (
+            "handoff",
+            "Agent summary.",
+            "Agent next action.",
+            CURATION_HANDOFF_ID,
+            False,
+        ),
+        ("authorize",),
+        (
+            "handoff",
+            "Agent summary.",
+            "Agent next action.",
+            CURATION_HANDOFF_ID,
+            True,
+        ),
+    ]
+
+
+def test_agent_cli_authorization_failure_has_no_output_or_capability(
+    cli_environment: CliEnvironment,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    capability = "private-capability-that-must-not-appear"
+
+    class RejectedService:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            raise cli_module.AgentToolError("agent authorization failed")
+
+    monkeypatch.setattr(cli_module, "AgentToolService", RejectedService)
+    monkeypatch.setenv("AGENT_SWITCHBOARD_CAPABILITY", capability)
+
+    assert main(["agent", "current", "--json"]) == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == "swbctl: agent authorization failed\n"
+    assert capability not in captured.err
+
+
+def test_agent_mcp_cli_uses_the_same_authorized_service(
+    cli_environment: CliEnvironment,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    authorized = object()
+    calls: list[object] = []
+
+    def service(*_args: object, **_kwargs: object) -> object:
+        calls.append("authorize")
+        return authorized
+
+    def serve(value: object, input_stream: object, output_stream: object) -> int:
+        assert value is authorized
+        assert input_stream is not None and output_stream is not None
+        calls.append("serve")
+        return 0
+
+    monkeypatch.setattr(cli_module, "AgentToolService", service)
+    monkeypatch.setattr(cli_module, "run_mcp_server", serve)
+
+    assert main(["agent-mcp"]) == 0
+    assert calls == ["authorize", "serve"]
+
+
 def seed_curation_registry(environment: CliEnvironment) -> None:
     with Registry(environment.database) as registry:
         registry.upsert_host(CURATION_HOST_ID, "local", is_local=True, observed_at=1)

@@ -11,6 +11,7 @@ import time
 from collections.abc import Sequence
 
 from . import __version__
+from .agent_tools import AgentToolError, AgentToolService
 from .config import SwitchboardConfig, load_config
 from .curation import (
     CurationError,
@@ -27,6 +28,7 @@ from .hooks import HookInputError
 from .live import reconcile_live
 from .local import build_local_snapshot_json, materialize_configured_projects
 from .local_events import ingest_local_event
+from .mcp_server import run_mcp_server
 from .migrations import MigrationError
 from .paths import database_path, load_or_create_host_id
 from .presentation import (
@@ -176,6 +178,60 @@ def build_parser() -> argparse.ArgumentParser:
         handoff.add_argument("--current", action="store_true")
         handoff.add_argument("--json-stdin", action="store_true", required=True)
         handoff.add_argument("--json", action="store_true")
+
+    agent = commands.add_parser(
+        "agent",
+        help="use session-scoped context and curation tools",
+    )
+    agent_actions = agent.add_subparsers(dest="agent_action", required=True)
+    for action, help_text in (
+        ("current", "show the exactly authorized current session"),
+        ("context", "read bounded context for the current project"),
+        ("sessions", "list bounded sessions in the current project"),
+    ):
+        agent_read = agent_actions.add_parser(action, help=help_text)
+        agent_read.add_argument("--json", action="store_true", required=True)
+    agent_show = agent_actions.add_parser(
+        "show", help="read one session in the current project"
+    )
+    agent_show.add_argument("session_key")
+    agent_show.add_argument("--json", action="store_true", required=True)
+    agent_handoff_read = agent_actions.add_parser(
+        "handoff-read", help="read one exact handoff in the current project"
+    )
+    agent_handoff_read.add_argument("handoff_id")
+    agent_handoff_read.add_argument("--json", action="store_true", required=True)
+    agent_handoffs = agent_actions.add_parser(
+        "handoffs", help="read newest handoffs for a current-project session"
+    )
+    agent_handoffs.add_argument("session_key")
+    agent_handoffs.add_argument("--limit", type=int, default=DEFAULT_HANDOFF_LIMIT)
+    agent_handoffs.add_argument("--json", action="store_true", required=True)
+    for action, help_text in (
+        ("search", "search curated current-project state"),
+        ("memory", "search the optional configured memory adapter"),
+    ):
+        agent_search = agent_actions.add_parser(action, help=help_text)
+        agent_search.add_argument("query")
+        agent_search.add_argument("--limit", type=int, default=20)
+        agent_search.add_argument("--json", action="store_true", required=True)
+    agent_name = agent_actions.add_parser(
+        "name", help="set or clear the authorized current session name"
+    )
+    agent_name.add_argument("value", nargs="?")
+    agent_name.add_argument("--clear", action="store_true")
+    agent_name.add_argument("--json", action="store_true", required=True)
+    for action, help_text in (
+        ("handoff", "append an agent-attributed current-session handoff"),
+        ("wrap", "append an agent-attributed handoff and wrap the session"),
+    ):
+        agent_handoff = agent_actions.add_parser(action, help=help_text)
+        agent_handoff.add_argument("--json-stdin", action="store_true", required=True)
+        agent_handoff.add_argument("--json", action="store_true", required=True)
+
+    commands.add_parser(
+        "agent-mcp", help="serve session-authorized agent tools over stdio MCP"
+    )
 
     prepare_open = commands.add_parser(
         "prepare-open",
@@ -515,6 +571,63 @@ def _curation_command(arguments: argparse.Namespace) -> str:
         return _render_detail(arguments, detail)
 
 
+def _agent_command(arguments: argparse.Namespace) -> str:
+    host_id = load_or_create_host_id()
+    config = load_config(host_id=host_id)
+    with Registry(database_path()) as registry:
+        service = AgentToolService(
+            registry,
+            host_id=host_id,
+            config=config,
+        )
+        if arguments.agent_action == "current":
+            return service.current().to_json()
+        if arguments.agent_action == "context":
+            return service.context().to_json()
+        if arguments.agent_action == "sessions":
+            return service.list_sessions().to_json()
+        if arguments.agent_action == "show":
+            return service.session_detail(arguments.session_key).to_json()
+        if arguments.agent_action == "handoff-read":
+            return service.handoff(arguments.handoff_id).to_json()
+        if arguments.agent_action == "handoffs":
+            return service.session_detail(
+                arguments.session_key, handoff_limit=arguments.limit
+            ).to_json()
+        if arguments.agent_action == "search":
+            return service.search(arguments.query, limit=arguments.limit).to_json()
+        if arguments.agent_action == "memory":
+            return service.memory_search(
+                arguments.query, limit=arguments.limit
+            ).to_json()
+        if arguments.agent_action == "name":
+            if arguments.clear == (arguments.value is not None):
+                raise AgentToolError("choose exactly one name value or --clear")
+            return service.set_name(
+                None if arguments.clear else arguments.value
+            ).to_json()
+        stream = getattr(sys.stdin, "buffer", sys.stdin)
+        handoff = read_handoff_input(stream)
+        return service.append_handoff(
+            summary=handoff.summary,
+            next_action=handoff.next_action,
+            handoff_id=handoff.handoff_id,
+            wrap=arguments.agent_action == "wrap",
+        ).to_json()
+
+
+def _agent_mcp_command() -> int:
+    host_id = load_or_create_host_id()
+    config = load_config(host_id=host_id)
+    with Registry(database_path()) as registry:
+        service = AgentToolService(registry, host_id=host_id, config=config)
+        return run_mcp_server(
+            service,
+            getattr(sys.stdin, "buffer", sys.stdin),
+            getattr(sys.stdout, "buffer", sys.stdout),
+        )
+
+
 def _surface_action(arguments: argparse.Namespace) -> int:
     host_id = load_or_create_host_id()
     tmux = TmuxController()
@@ -622,6 +735,40 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(f"swbctl: {_safe_error_message(error)}", file=sys.stderr)
             return 1
         return 0
+
+    if arguments.command == "agent":
+        try:
+            sys.stdout.write(f"{_agent_command(arguments)}\n")
+        except (
+            AgentToolError,
+            CurationError,
+            ValidationError,
+            StorageError,
+            TmuxError,
+            MigrationError,
+            sqlite3.Error,
+            OSError,
+            ValueError,
+        ) as error:
+            print(f"swbctl: {_safe_error_message(error)}", file=sys.stderr)
+            return 1
+        return 0
+
+    if arguments.command == "agent-mcp":
+        try:
+            return _agent_mcp_command()
+        except (
+            AgentToolError,
+            ValidationError,
+            StorageError,
+            TmuxError,
+            MigrationError,
+            sqlite3.Error,
+            OSError,
+            ValueError,
+        ) as error:
+            print(f"swbctl: {_safe_error_message(error)}", file=sys.stderr)
+            return 1
 
     if arguments.command == "tui":
         return _run_tui_command()

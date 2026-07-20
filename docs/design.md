@@ -1298,21 +1298,23 @@ sessions can have independent purposes and next actions. Context responses
 preserve source, host, observation time, and staleness so an agent can decide
 what is relevant.
 
-The same core operations are exposed to agents through a small MCP server,
-provider plugin, or equivalent structured CLI. The initial read-mostly tool
-surface is:
+The structured `swbctl agent` JSON commands are the canonical executable
+contract. The implemented dependency-free stdio MCP server calls the same
+transport-neutral service and owns no authorization, database, tmux, or
+provider logic. The read-mostly tool surface is:
 
 ```text
 project_get_current()
-project_list_sessions(project_id, filters?)
-project_get_context(project_id, query?)
-session_get_handoff(session_key)
+project_list_sessions()
+project_get_context()
+session_get(session_key)
+session_get_handoff(handoff_id)
 session_list_handoffs(session_key)
-session_search(project_id, query)
-memory_search(project_id, query)
-session_set_name(current_session, name)
-session_set_handoff(current_session, summary, next_action)
-session_wrap(current_session, summary, next_action)
+session_search(query)
+memory_search(query)
+session_set_name(name)
+session_set_handoff(summary, next_action)
+session_wrap(summary, next_action)
 ```
 
 Mutating agent tools are restricted to the calling session's curation fields.
@@ -1333,6 +1335,16 @@ capability and the surface's current confirmed binding. This is a same-user
 guardrail and attribution mechanism, not a defense against the local account
 owner. Human `swbctl ... --current` commands may instead resolve through the
 current tmux pane metadata.
+
+Phase 4C implements the vertical slice for managed Codex and Claude `new` and
+exact `resume` launches: current context, bounded same-project reads/search,
+current-session curation, and a thin stdio MCP projection. It stores only the
+capability digest and never accepts a caller-supplied identity for
+authorization. Optional memory is an explicit disabled-by-default stdio MCP
+adapter; it receives no Switchboard capability or registry path, and core
+routing remains available on every adapter failure. The exact bounds and
+acceptance evidence are recorded in
+[`docs/phase-4c-plan.md`](phase-4c-plan.md).
 
 An optional provider skill can guide the current agent to prepare a concise
 handoff and invoke `session_wrap`. Switchboard stores the supplied result; it
@@ -1916,8 +1928,10 @@ passes equivalent live tests.
 Phase 4 starts with the narrower terminal-native Phase 4A vertical slice in
 [`docs/phase-4a-plan.md`](phase-4a-plan.md). The local-human curation, immutable
 handoff, wrapping, pinning, and exact continuation increment is specified in
-[`docs/phase-4b-plan.md`](phase-4b-plan.md). Capability-authorized agent tools
-and memory remain Phase 4C; remote transport remains Phase 5.
+[`docs/phase-4b-plan.md`](phase-4b-plan.md). Capability-authorized tools for
+managed Codex and Claude, bounded read/search, the stdio MCP transport, and the
+optional external-memory MCP adapter are recorded in
+[`docs/phase-4c-plan.md`](phase-4c-plan.md). Remote transport remains Phase 5.
 
 ### Phase 5: Remote hosts
 
@@ -2128,6 +2142,24 @@ not reuse observation upserts for human edits or pull agent authorization into
 the human command surface. The audited boundary and implementation sequence are
 recorded in [`docs/phase-4b-plan.md`](phase-4b-plan.md).
 
+### Agent tool transport
+
+The structured `swbctl agent` JSON surface is canonical. Phase 4C proves
+authorization and behavior directly through those commands, and the
+implemented stdio MCP server is a thin adapter over the same tested core. A
+future provider-specific instruction skill is optional usability material,
+not another transport or authorization layer.
+
+### Project context sources
+
+Phase 4C reads only explicitly configured project-relative UTF-8 text files
+or directories under the caller's exact configured location, plus bounded
+same-project host-local session metadata and latest explicit handoffs. File,
+byte, directory-traversal, session, handoff, and issue counts are fixed and
+parser-enforced. It does not guess files or include Git diffs, provider
+transcripts or remote caches. Curated retained-state search and the optional
+memory adapter have separate fixed candidate, result, byte, and timeout bounds.
+
 ## Remaining Non-blocking Decisions
 
 These choices do not block Phase 1 or the read-only portion of Phase 2. Each
@@ -2138,18 +2170,6 @@ must be resolved before implementation reaches the phase that owns it.
 Keep the implemented provider-native history picker unless Claude publishes a
 structured listing API. A one-time importer based on private files is out of
 scope by default.
-
-### Agent tool transport
-
-Choose between a stdio MCP server, provider-specific plugins, and a structured
-CLI wrapper. All transports must enforce current-session-only mutations and
-share the same tested core operations.
-
-### Project context sources
-
-Define how configured files, Git observations, session handoffs, and optional
-memory results are bounded, timestamped, and exposed without automatically
-loading an entire project history into every new session.
 
 ### Release channel and hook installation
 

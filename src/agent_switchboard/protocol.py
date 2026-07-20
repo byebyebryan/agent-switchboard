@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import unicodedata
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
+from pathlib import PurePosixPath
 from typing import Any, Self
 from uuid import UUID
 
@@ -45,6 +47,15 @@ MAX_JSON_ARRAY_ITEMS = 100_000
 MAX_JSON_OBJECT_KEYS = 256
 MAX_SNAPSHOT_RECORDS = 100_000
 MAX_SESSION_DETAIL_HANDOFFS = 100
+MAX_AGENT_CONTEXT_FILES = 32
+MAX_AGENT_CONTEXT_FILE_BYTES = 64 * 1024
+MAX_AGENT_CONTEXT_TOTAL_BYTES = 256 * 1024
+MAX_AGENT_CONTEXT_SESSIONS = 20
+MAX_AGENT_CONTEXT_ISSUES = 32
+MAX_AGENT_PROJECT_SESSIONS = 50
+MAX_AGENT_SEARCH_RESULTS = 20
+MAX_AGENT_SEARCH_QUERY = 256
+MAX_AGENT_MEMORY_TEXT_BYTES = 64 * 1024
 
 _SENSITIVE_KEY_PARTS = (
     "accesskey",
@@ -201,6 +212,19 @@ def _string(
     return value
 
 
+def _multiline_string(value: object, path: str, *, maximum: int) -> str:
+    if not isinstance(value, str) or len(value) > maximum:
+        raise ProtocolError(f"{path} must be a bounded string")
+    if len(value.encode("utf-8")) > maximum:
+        raise ProtocolError(f"{path} exceeds its UTF-8 byte limit")
+    if any(
+        unicodedata.category(character) == "Cc" and character not in "\n\t"
+        for character in value
+    ):
+        raise ProtocolError(f"{path} contains terminal control characters")
+    return value
+
+
 def _integer(value: object, path: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value < 0:
         raise ProtocolError(f"{path} must be a non-negative integer")
@@ -258,6 +282,9 @@ def _reject_sensitive_key(value: str, path: str) -> None:
     normalized = _normalized_key(value)
     if not normalized or len(value) > 256:
         raise ProtocolError(f"{path} contains an invalid object key")
+    if normalized in {"results", "resultstruncated"}:
+        # AgentSearchEnvelope validates these curated, bounded records explicitly.
+        return
     if normalized in _SENSITIVE_KEYS or any(
         part in normalized for part in _SENSITIVE_KEY_PARTS
     ):
@@ -1617,6 +1644,687 @@ class SessionDetailEnvelope:
                 "session": self.session,
                 "handoffs": list(self.handoffs),
                 "handoffsTruncated": self.handoffs_truncated,
+            }
+        )
+
+    def to_dict(self) -> dict[str, JsonValue]:
+        normalized = type(self).from_dict(self._raw_dict())
+        return normalized._raw_dict()
+
+    def to_json(self) -> str:
+        return _dump(self.to_dict(), allow_explicit_multiline=True)
+
+
+def _agent_caller(value: object, path: str) -> dict[str, JsonValue]:
+    table = _object(value, path)
+    key = _session_key(_required(table, "sessionKey", path), f"{path}.sessionKey")
+    host_id = _uuid(_required(table, "hostId", path), f"{path}.hostId", HostId)
+    provider = _provider(_required(table, "provider", path), f"{path}.provider")
+    if provider not in {ProviderId.CODEX, ProviderId.CLAUDE}:
+        raise ProtocolError(f"{path}.provider is unsupported")
+    if key.host_id != host_id or key.provider is not provider:
+        raise ProtocolError(f"{path} identity fields disagree")
+    return {
+        "hostId": str(host_id),
+        "provider": provider,
+        "sessionKey": str(key),
+        "surfaceId": _uuid_text(
+            _required(table, "surfaceId", path), f"{path}.surfaceId", SurfaceId
+        ),
+        "launchId": _uuid_text(
+            _required(table, "launchId", path), f"{path}.launchId", LaunchId
+        ),
+    }
+
+
+def _agent_project(value: object, path: str) -> dict[str, JsonValue]:
+    table = _object(value, path)
+    project_path = _string(_required(table, "path", path), f"{path}.path", maximum=4096)
+    assert project_path is not None
+    if not PurePosixPath(project_path).is_absolute():
+        raise ProtocolError(f"{path}.path must be absolute")
+    sources = _string_array(
+        _required(table, "contextSources", path),
+        f"{path}.contextSources",
+        maximum_items=MAX_AGENT_CONTEXT_FILES,
+        maximum_string=1024,
+    )
+    canonical_sources: list[str] = []
+    for index, source in enumerate(sources):
+        parsed = PurePosixPath(source)
+        if (
+            parsed.is_absolute()
+            or ".." in parsed.parts
+            or source in {"", "."}
+            or source != parsed.as_posix()
+        ):
+            raise ProtocolError(
+                f"{path}.contextSources[{index}] must be a canonical "
+                "project-relative path"
+            )
+        if source in canonical_sources:
+            raise ProtocolError(f"{path}.contextSources contains duplicate paths")
+        canonical_sources.append(source)
+    return {
+        "projectId": _uuid_text(
+            _required(table, "projectId", path), f"{path}.projectId", ProjectId
+        ),
+        "name": _string(_required(table, "name", path), f"{path}.name", maximum=256),
+        "locationId": _uuid_text(
+            _required(table, "locationId", path), f"{path}.locationId", LocationId
+        ),
+        "path": project_path,
+        "contextSources": canonical_sources,
+    }
+
+
+def _agent_source(value: object, path: str) -> dict[str, JsonValue]:
+    table = _object(value, path)
+    source_path = _string(_required(table, "path", path), f"{path}.path", maximum=1024)
+    assert source_path is not None
+    parsed = PurePosixPath(source_path)
+    if parsed.is_absolute() or ".." in parsed.parts or source_path in {"", "."}:
+        raise ProtocolError(f"{path}.path must be project-relative")
+    text = _multiline_string(
+        _required(table, "text", path),
+        f"{path}.text",
+        maximum=MAX_AGENT_CONTEXT_FILE_BYTES,
+    )
+    source_id = _string(
+        _required(table, "sourceId", path),
+        f"{path}.sourceId",
+        maximum=1152,
+    )
+    if source_id != f"file:{parsed.as_posix()}":
+        raise ProtocolError(f"{path}.sourceId disagrees with path")
+    content_hash = _hash(_required(table, "contentHash", path), f"{path}.contentHash")
+    if content_hash != hashlib.sha256(text.encode("utf-8")).hexdigest():
+        raise ProtocolError(f"{path}.contentHash does not match text")
+    return {
+        "sourceId": source_id,
+        "path": parsed.as_posix(),
+        "observedAt": _integer(
+            _required(table, "observedAt", path), f"{path}.observedAt"
+        ),
+        "text": text,
+        "contentHash": content_hash,
+        "truncated": _boolean(_required(table, "truncated", path), f"{path}.truncated"),
+        "stale": _boolean(_required(table, "stale", path), f"{path}.stale"),
+    }
+
+
+def _agent_session(
+    value: object,
+    path: str,
+    *,
+    expected_host_id: HostId,
+    expected_project_id: ProjectId,
+) -> dict[str, JsonValue]:
+    table = _object(value, path)
+    key = _session_key(_required(table, "sessionKey", path), f"{path}.sessionKey")
+    if key.host_id != expected_host_id:
+        raise ProtocolError(f"{path} belongs to another host")
+    provider = _provider(_required(table, "provider", path), f"{path}.provider")
+    if provider is not key.provider:
+        raise ProtocolError(f"{path}.provider disagrees with sessionKey")
+    project_id = _uuid(
+        _required(table, "projectId", path), f"{path}.projectId", ProjectId
+    )
+    if project_id != expected_project_id:
+        raise ProtocolError(f"{path} belongs to another project")
+    result: dict[str, JsonValue] = {
+        "sessionKey": str(key),
+        "projectId": str(project_id),
+        "provider": provider,
+        "runtimePresence": _enum(
+            _required(table, "runtimePresence", path),
+            f"{path}.runtimePresence",
+            RuntimePresence,
+        ),
+        "activity": _enum(
+            _required(table, "activity", path), f"{path}.activity", Activity
+        ),
+        "attachment": _enum(
+            _required(table, "attachment", path),
+            f"{path}.attachment",
+            Attachment,
+        ),
+        "lastObservedAt": _integer(
+            _required(table, "lastObservedAt", path), f"{path}.lastObservedAt"
+        ),
+        "pinned": _boolean(_required(table, "pinned", path), f"{path}.pinned"),
+        "stale": _boolean(_required(table, "stale", path), f"{path}.stale"),
+    }
+    _optional_string(result, table, "name", path, maximum=512)
+    _optional_string(result, table, "purpose", path, maximum=4096)
+    _optional_integer(result, table, "wrappedAt", path)
+    if "nameActor" in table:
+        actor = _string(table["nameActor"], f"{path}.nameActor", maximum=16)
+        if actor not in {"user", "agent"}:
+            raise ProtocolError(f"{path}.nameActor is unsupported")
+        result["nameActor"] = actor
+    if "latestHandoff" in table:
+        result["latestHandoff"] = _handoff_record(
+            table["latestHandoff"],
+            f"{path}.latestHandoff",
+            expected_session_key=key,
+        )
+    return result
+
+
+def _agent_issue(value: object, path: str) -> dict[str, JsonValue]:
+    table = _object(value, path)
+    return {
+        "code": _string(_required(table, "code", path), f"{path}.code", maximum=128),
+        "path": _string(_required(table, "path", path), f"{path}.path", maximum=1024),
+        "message": _string(
+            _required(table, "message", path), f"{path}.message", maximum=1024
+        ),
+    }
+
+
+@dataclass(frozen=True, slots=True)
+class AgentContextEnvelope:
+    """Bounded project context for one authorized managed agent session."""
+
+    generated_at: int
+    caller: dict[str, JsonValue]
+    project: dict[str, JsonValue]
+    stable_sources: tuple[dict[str, JsonValue], ...] = ()
+    stable_sources_truncated: bool = False
+    sessions: tuple[dict[str, JsonValue], ...] = ()
+    sessions_truncated: bool = False
+    issues: tuple[dict[str, JsonValue], ...] = ()
+
+    @classmethod
+    def from_dict(cls, value: object) -> Self:
+        table = _object(value, "envelope")
+        _versions(table, allow_explicit_multiline=True)
+        caller = _agent_caller(
+            _required(table, "caller", "envelope"), "envelope.caller"
+        )
+        project = _agent_project(
+            _required(table, "project", "envelope"), "envelope.project"
+        )
+        host_id = HostId(str(caller["hostId"]))
+        project_id = ProjectId(str(project["projectId"]))
+        caller_key = SessionKey.parse(str(caller["sessionKey"]))
+
+        raw_sources = _array(
+            _required(table, "stableSources", "envelope"),
+            "envelope.stableSources",
+        )
+        if len(raw_sources) > MAX_AGENT_CONTEXT_FILES:
+            raise ProtocolError("envelope.stableSources contains too many records")
+        stable_sources = tuple(
+            _agent_source(item, f"envelope.stableSources[{index}]")
+            for index, item in enumerate(raw_sources)
+        )
+        source_ids = [str(item["sourceId"]) for item in stable_sources]
+        source_paths = [str(item["path"]) for item in stable_sources]
+        if len(source_ids) != len(set(source_ids)) or len(source_paths) != len(
+            set(source_paths)
+        ):
+            raise ProtocolError("envelope.stableSources contains duplicate identity")
+        configured_sources = [str(item) for item in project["contextSources"]]
+        for source_path in source_paths:
+            if not any(
+                source_path == configured or source_path.startswith(f"{configured}/")
+                for configured in configured_sources
+            ):
+                raise ProtocolError(
+                    "envelope.stableSources contains an undeclared source"
+                )
+        if sum(len(str(item["text"]).encode("utf-8")) for item in stable_sources) > (
+            MAX_AGENT_CONTEXT_TOTAL_BYTES
+        ):
+            raise ProtocolError("envelope.stableSources exceeds its total byte limit")
+
+        raw_sessions = _array(
+            _required(table, "sessions", "envelope"), "envelope.sessions"
+        )
+        if len(raw_sessions) > MAX_AGENT_CONTEXT_SESSIONS:
+            raise ProtocolError("envelope.sessions contains too many records")
+        sessions = tuple(
+            _agent_session(
+                item,
+                f"envelope.sessions[{index}]",
+                expected_host_id=host_id,
+                expected_project_id=project_id,
+            )
+            for index, item in enumerate(raw_sessions)
+        )
+        session_keys = [str(item["sessionKey"]) for item in sessions]
+        if len(session_keys) != len(set(session_keys)):
+            raise ProtocolError("envelope.sessions contains duplicate session keys")
+        if not session_keys or session_keys[0] != str(caller_key):
+            raise ProtocolError(
+                "envelope.sessions must put the authorized caller first"
+            )
+
+        raw_issues = _array(_required(table, "issues", "envelope"), "envelope.issues")
+        if len(raw_issues) > MAX_AGENT_CONTEXT_ISSUES:
+            raise ProtocolError("envelope.issues contains too many records")
+        issues = tuple(
+            _agent_issue(item, f"envelope.issues[{index}]")
+            for index, item in enumerate(raw_issues)
+        )
+        return cls(
+            generated_at=_integer(
+                _required(table, "generatedAt", "envelope"),
+                "envelope.generatedAt",
+            ),
+            caller=caller,
+            project=project,
+            stable_sources=stable_sources,
+            stable_sources_truncated=_boolean(
+                _required(table, "stableSourcesTruncated", "envelope"),
+                "envelope.stableSourcesTruncated",
+            ),
+            sessions=sessions,
+            sessions_truncated=_boolean(
+                _required(table, "sessionsTruncated", "envelope"),
+                "envelope.sessionsTruncated",
+            ),
+            issues=issues,
+        )
+
+    @classmethod
+    def from_json(cls, raw: str | bytes | bytearray) -> Self:
+        return cls.from_dict(_decode(raw))
+
+    def _raw_dict(self) -> dict[str, JsonValue]:
+        return _envelope(
+            {
+                "generatedAt": self.generated_at,
+                "caller": self.caller,
+                "project": self.project,
+                "stableSources": list(self.stable_sources),
+                "stableSourcesTruncated": self.stable_sources_truncated,
+                "sessions": list(self.sessions),
+                "sessionsTruncated": self.sessions_truncated,
+                "issues": list(self.issues),
+            }
+        )
+
+    def to_dict(self) -> dict[str, JsonValue]:
+        normalized = type(self).from_dict(self._raw_dict())
+        return normalized._raw_dict()
+
+    def to_json(self) -> str:
+        return _dump(self.to_dict(), allow_explicit_multiline=True)
+
+
+@dataclass(frozen=True, slots=True)
+class AgentSessionListEnvelope:
+    """Bounded retained sessions for one authorized local project."""
+
+    generated_at: int
+    caller: dict[str, JsonValue]
+    project: dict[str, JsonValue]
+    sessions: tuple[dict[str, JsonValue], ...] = ()
+    sessions_truncated: bool = False
+
+    @classmethod
+    def from_dict(cls, value: object) -> Self:
+        table = _object(value, "envelope")
+        _versions(table, allow_explicit_multiline=True)
+        caller = _agent_caller(
+            _required(table, "caller", "envelope"), "envelope.caller"
+        )
+        project = _agent_project(
+            _required(table, "project", "envelope"), "envelope.project"
+        )
+        raw_sessions = _array(
+            _required(table, "sessions", "envelope"), "envelope.sessions"
+        )
+        if len(raw_sessions) > MAX_AGENT_PROJECT_SESSIONS:
+            raise ProtocolError("envelope.sessions contains too many records")
+        sessions = tuple(
+            _agent_session(
+                item,
+                f"envelope.sessions[{index}]",
+                expected_host_id=HostId(str(caller["hostId"])),
+                expected_project_id=ProjectId(str(project["projectId"])),
+            )
+            for index, item in enumerate(raw_sessions)
+        )
+        keys = [str(item["sessionKey"]) for item in sessions]
+        if len(keys) != len(set(keys)):
+            raise ProtocolError("envelope.sessions contains duplicate session keys")
+        if not keys or keys[0] != str(caller["sessionKey"]):
+            raise ProtocolError(
+                "envelope.sessions must put the authorized caller first"
+            )
+        return cls(
+            generated_at=_integer(
+                _required(table, "generatedAt", "envelope"), "envelope.generatedAt"
+            ),
+            caller=caller,
+            project=project,
+            sessions=sessions,
+            sessions_truncated=_boolean(
+                _required(table, "sessionsTruncated", "envelope"),
+                "envelope.sessionsTruncated",
+            ),
+        )
+
+    @classmethod
+    def from_json(cls, raw: str | bytes | bytearray) -> Self:
+        return cls.from_dict(_decode(raw))
+
+    def _raw_dict(self) -> dict[str, JsonValue]:
+        return _envelope(
+            {
+                "generatedAt": self.generated_at,
+                "caller": self.caller,
+                "project": self.project,
+                "sessions": list(self.sessions),
+                "sessionsTruncated": self.sessions_truncated,
+            }
+        )
+
+    def to_dict(self) -> dict[str, JsonValue]:
+        normalized = type(self).from_dict(self._raw_dict())
+        return normalized._raw_dict()
+
+    def to_json(self) -> str:
+        return _dump(self.to_dict(), allow_explicit_multiline=True)
+
+
+@dataclass(frozen=True, slots=True)
+class AgentHandoffEnvelope:
+    """One exact immutable handoff authorized through a caller project."""
+
+    generated_at: int
+    caller: dict[str, JsonValue]
+    project_id: str
+    handoff: dict[str, JsonValue]
+
+    @classmethod
+    def from_dict(cls, value: object) -> Self:
+        table = _object(value, "envelope")
+        _versions(table, allow_explicit_multiline=True)
+        caller = _agent_caller(
+            _required(table, "caller", "envelope"), "envelope.caller"
+        )
+        project_id = _uuid_text(
+            _required(table, "projectId", "envelope"),
+            "envelope.projectId",
+            ProjectId,
+        )
+        handoff_table = _object(
+            _required(table, "handoff", "envelope"), "envelope.handoff"
+        )
+        handoff_key = _session_key(
+            _required(handoff_table, "sessionKey", "envelope.handoff"),
+            "envelope.handoff.sessionKey",
+        )
+        if handoff_key.host_id != HostId(str(caller["hostId"])):
+            raise ProtocolError("envelope.handoff belongs to another host")
+        handoff = _handoff_record(
+            handoff_table,
+            "envelope.handoff",
+            expected_session_key=handoff_key,
+        )
+        return cls(
+            generated_at=_integer(
+                _required(table, "generatedAt", "envelope"), "envelope.generatedAt"
+            ),
+            caller=caller,
+            project_id=project_id,
+            handoff=handoff,
+        )
+
+    @classmethod
+    def from_json(cls, raw: str | bytes | bytearray) -> Self:
+        return cls.from_dict(_decode(raw))
+
+    def _raw_dict(self) -> dict[str, JsonValue]:
+        return _envelope(
+            {
+                "generatedAt": self.generated_at,
+                "caller": self.caller,
+                "projectId": self.project_id,
+                "handoff": self.handoff,
+            }
+        )
+
+    def to_dict(self) -> dict[str, JsonValue]:
+        normalized = type(self).from_dict(self._raw_dict())
+        return normalized._raw_dict()
+
+    def to_json(self) -> str:
+        return _dump(self.to_dict(), allow_explicit_multiline=True)
+
+
+def _agent_search_result(
+    value: object,
+    path: str,
+    *,
+    expected_host_id: HostId,
+) -> dict[str, JsonValue]:
+    table = _object(value, path)
+    kind = _string(_required(table, "kind", path), f"{path}.kind", maximum=16)
+    key = _session_key(_required(table, "sessionKey", path), f"{path}.sessionKey")
+    if key.host_id != expected_host_id:
+        raise ProtocolError(f"{path} belongs to another host")
+    result: dict[str, JsonValue] = {
+        "kind": kind,
+        "sessionKey": str(key),
+        "observedAt": _integer(
+            _required(table, "observedAt", path), f"{path}.observedAt"
+        ),
+    }
+    if kind == "session":
+        provider = _provider(_required(table, "provider", path), f"{path}.provider")
+        if provider is not key.provider:
+            raise ProtocolError(f"{path}.provider disagrees with sessionKey")
+        result["provider"] = provider
+        _optional_string(result, table, "name", path, maximum=512)
+        _optional_string(result, table, "purpose", path, maximum=4096)
+        return result
+    if kind != "handoff":
+        raise ProtocolError(f"{path}.kind is unsupported")
+    sequence = _integer(_required(table, "sequence", path), f"{path}.sequence")
+    if sequence < 1:
+        raise ProtocolError(f"{path}.sequence must be positive")
+    raw_summary = _required(table, "summary", path)
+    raw_next_action = _required(table, "nextAction", path)
+    try:
+        summary = normalize_handoff_text(raw_summary, "summary")
+        next_action = normalize_handoff_text(raw_next_action, "nextAction")
+    except ValidationError as exc:
+        raise ProtocolError(f"{path}: {exc}") from exc
+    if summary != raw_summary or next_action != raw_next_action:
+        raise ProtocolError(f"{path} handoff text is not canonically normalized")
+    try:
+        source = HandoffSource(
+            _string(_required(table, "source", path), f"{path}.source", maximum=32)
+        )
+    except ValueError as exc:
+        raise ProtocolError(f"{path}.source is not supported") from exc
+    result.update(
+        {
+            "handoffId": _uuid_text(
+                _required(table, "handoffId", path), f"{path}.handoffId", HandoffId
+            ),
+            "sequence": sequence,
+            "summary": summary,
+            "nextAction": next_action,
+            "source": source,
+        }
+    )
+    return result
+
+
+@dataclass(frozen=True, slots=True)
+class AgentSearchEnvelope:
+    """Bounded search results from Switchboard's curated retained state."""
+
+    generated_at: int
+    caller: dict[str, JsonValue]
+    project_id: str
+    query: str
+    results: tuple[dict[str, JsonValue], ...] = ()
+    results_truncated: bool = False
+
+    @classmethod
+    def from_dict(cls, value: object) -> Self:
+        table = _object(value, "envelope")
+        _versions(table, allow_explicit_multiline=True)
+        caller = _agent_caller(
+            _required(table, "caller", "envelope"), "envelope.caller"
+        )
+        raw_results = _array(
+            _required(table, "results", "envelope"), "envelope.results"
+        )
+        if len(raw_results) > MAX_AGENT_SEARCH_RESULTS:
+            raise ProtocolError("envelope.results contains too many records")
+        results = tuple(
+            _agent_search_result(
+                item,
+                f"envelope.results[{index}]",
+                expected_host_id=HostId(str(caller["hostId"])),
+            )
+            for index, item in enumerate(raw_results)
+        )
+        identities = [
+            (str(item["kind"]), str(item.get("handoffId", item["sessionKey"])))
+            for item in results
+        ]
+        if len(identities) != len(set(identities)):
+            raise ProtocolError("envelope.results contains duplicate records")
+        return cls(
+            generated_at=_integer(
+                _required(table, "generatedAt", "envelope"), "envelope.generatedAt"
+            ),
+            caller=caller,
+            project_id=_uuid_text(
+                _required(table, "projectId", "envelope"),
+                "envelope.projectId",
+                ProjectId,
+            ),
+            query=_string(
+                _required(table, "query", "envelope"),
+                "envelope.query",
+                maximum=MAX_AGENT_SEARCH_QUERY,
+            ),
+            results=results,
+            results_truncated=_boolean(
+                _required(table, "resultsTruncated", "envelope"),
+                "envelope.resultsTruncated",
+            ),
+        )
+
+    @classmethod
+    def from_json(cls, raw: str | bytes | bytearray) -> Self:
+        return cls.from_dict(_decode(raw))
+
+    def _raw_dict(self) -> dict[str, JsonValue]:
+        return _envelope(
+            {
+                "generatedAt": self.generated_at,
+                "caller": self.caller,
+                "projectId": self.project_id,
+                "query": self.query,
+                "results": list(self.results),
+                "resultsTruncated": self.results_truncated,
+            }
+        )
+
+    def to_dict(self) -> dict[str, JsonValue]:
+        normalized = type(self).from_dict(self._raw_dict())
+        return normalized._raw_dict()
+
+    def to_json(self) -> str:
+        return _dump(self.to_dict(), allow_explicit_multiline=True)
+
+
+@dataclass(frozen=True, slots=True)
+class AgentMemoryEnvelope:
+    """Bounded optional memory-adapter result with explicit availability."""
+
+    generated_at: int
+    caller: dict[str, JsonValue]
+    project_id: str
+    query: str
+    adapter: str
+    available: bool
+    text: str
+    truncated: bool
+    issues: tuple[dict[str, JsonValue], ...] = ()
+
+    @classmethod
+    def from_dict(cls, value: object) -> Self:
+        table = _object(value, "envelope")
+        _versions(table, allow_explicit_multiline=True)
+        caller = _agent_caller(
+            _required(table, "caller", "envelope"), "envelope.caller"
+        )
+        raw_issues = _array(_required(table, "issues", "envelope"), "envelope.issues")
+        if len(raw_issues) > MAX_AGENT_CONTEXT_ISSUES:
+            raise ProtocolError("envelope.issues contains too many records")
+        available = _boolean(
+            _required(table, "available", "envelope"), "envelope.available"
+        )
+        text = _multiline_string(
+            _required(table, "text", "envelope"),
+            "envelope.text",
+            maximum=MAX_AGENT_MEMORY_TEXT_BYTES,
+        )
+        truncated = _boolean(
+            _required(table, "truncated", "envelope"), "envelope.truncated"
+        )
+        if not available and (text or truncated):
+            raise ProtocolError(
+                "envelope unavailable memory must have empty untruncated text"
+            )
+        return cls(
+            generated_at=_integer(
+                _required(table, "generatedAt", "envelope"), "envelope.generatedAt"
+            ),
+            caller=caller,
+            project_id=_uuid_text(
+                _required(table, "projectId", "envelope"),
+                "envelope.projectId",
+                ProjectId,
+            ),
+            query=_string(
+                _required(table, "query", "envelope"),
+                "envelope.query",
+                maximum=MAX_AGENT_SEARCH_QUERY,
+            ),
+            adapter=_string(
+                _required(table, "adapter", "envelope"),
+                "envelope.adapter",
+                maximum=128,
+            ),
+            available=available,
+            text=text,
+            truncated=truncated,
+            issues=tuple(
+                _agent_issue(item, f"envelope.issues[{index}]")
+                for index, item in enumerate(raw_issues)
+            ),
+        )
+
+    @classmethod
+    def from_json(cls, raw: str | bytes | bytearray) -> Self:
+        return cls.from_dict(_decode(raw))
+
+    def _raw_dict(self) -> dict[str, JsonValue]:
+        return _envelope(
+            {
+                "generatedAt": self.generated_at,
+                "caller": self.caller,
+                "projectId": self.project_id,
+                "query": self.query,
+                "adapter": self.adapter,
+                "available": self.available,
+                "text": self.text,
+                "truncated": self.truncated,
+                "issues": list(self.issues),
             }
         )
 

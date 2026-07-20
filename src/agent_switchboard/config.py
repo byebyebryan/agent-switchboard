@@ -26,8 +26,10 @@ from .domain import (
 )
 from .paths import config_path, load_or_create_host_id
 
+_MAX_CONTEXT_SOURCES = 32
 _ALIAS_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
 _TMUX_PREFIX_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,31}$")
+_MEMORY_TOOL_RE = re.compile(r"^[A-Za-z0-9_.-]{1,128}$")
 
 
 class ConfigError(ValidationError):
@@ -82,6 +84,14 @@ class HooksConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class MemoryConfig:
+    enabled: bool = False
+    command: tuple[str, ...] = ()
+    tool: str = "search"
+    timeout_seconds: int = 5
+
+
+@dataclass(frozen=True, slots=True)
 class ProjectCatalog:
     projects: tuple[Project, ...]
     locations: tuple[ProjectLocation, ...]
@@ -96,6 +106,7 @@ class SwitchboardConfig:
     defaults: DefaultsConfig
     tmux: TmuxConfig
     hooks: HooksConfig
+    memory: MemoryConfig = MemoryConfig()
 
     @property
     def projects(self) -> tuple[Project, ...]:
@@ -262,6 +273,8 @@ def _parse_context_sources(raw: object, path: str) -> tuple[str, ...]:
         return ()
     if not isinstance(raw, list):
         _fail(path, "must be an array of project-relative paths")
+    if len(raw) > _MAX_CONTEXT_SOURCES:
+        _fail(path, f"must contain at most {_MAX_CONTEXT_SOURCES} paths")
     sources: list[str] = []
     for index, source in enumerate(raw):
         value = _string(source, f"{path}[{index}]")
@@ -506,6 +519,43 @@ def _parse_hooks(raw: object) -> HooksConfig:
     )
 
 
+def _parse_memory(raw: object) -> MemoryConfig:
+    table = _table(raw, "memory")
+    _known(table, {"enabled", "command", "tool", "timeout_seconds"}, "memory")
+    command_raw = table.get("command", [])
+    if not isinstance(command_raw, list):
+        _fail("memory.command", "must be an array of command arguments")
+    if len(command_raw) > 32:
+        _fail("memory.command", "must contain at most 32 arguments")
+    command: list[str] = []
+    for index, raw_argument in enumerate(command_raw):
+        argument = _string(raw_argument, f"memory.command[{index}]", maximum=4096)
+        assert argument is not None
+        if "\x00" in argument:
+            _fail(f"memory.command[{index}]", "contains NUL")
+        command.append(argument)
+    enabled = _boolean(table.get("enabled", False), "memory.enabled")
+    if enabled and not command:
+        _fail("memory.command", "is required when memory.enabled is true")
+    if command and not Path(command[0]).is_absolute():
+        _fail("memory.command[0]", "must be an absolute executable path")
+    tool = _string(table.get("tool", "search"), "memory.tool", maximum=128)
+    assert tool is not None
+    if _MEMORY_TOOL_RE.fullmatch(tool) is None:
+        _fail("memory.tool", "must be a safe MCP tool name")
+    return MemoryConfig(
+        enabled=enabled,
+        command=tuple(command),
+        tool=tool,
+        timeout_seconds=_integer(
+            table.get("timeout_seconds", 5),
+            "memory.timeout_seconds",
+            minimum=1,
+            maximum=30,
+        ),
+    )
+
+
 def parse_config(data: bytes | str, *, host_id: HostId) -> SwitchboardConfig:
     """Parse and validate a complete host-local TOML document."""
 
@@ -529,6 +579,7 @@ def parse_config(data: bytes | str, *, host_id: HostId) -> SwitchboardConfig:
             "defaults",
             "tmux",
             "hooks",
+            "memory",
         },
         "configuration",
     )
@@ -545,6 +596,7 @@ def parse_config(data: bytes | str, *, host_id: HostId) -> SwitchboardConfig:
         defaults=_parse_defaults(document.get("defaults", {})),
         tmux=_parse_tmux(document.get("tmux", {})),
         hooks=_parse_hooks(document.get("hooks", {})),
+        memory=_parse_memory(document.get("memory", {})),
     )
 
 

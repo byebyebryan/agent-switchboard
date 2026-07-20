@@ -208,6 +208,12 @@ def test_launch_request_normalization_and_retry_semantics(tmp_path: Path) -> Non
 
 
 def test_request_variant_validation(tmp_path: Path) -> None:
+    intent, _ = make_intent(tmp_path)
+    assert replace(intent, agent_capability_hash="b" * 64).agent_capability_hash == (
+        "b" * 64
+    )
+    with pytest.raises(ValidationError, match="agent_capability_hash"):
+        replace(intent, agent_capability_hash="not-a-hash")
     with pytest.raises(ValidationError, match="requires target"):
         LaunchRequest(LaunchRequestKind.OPEN, HOST, ProviderId.CODEX)
     with pytest.raises(ValidationError, match="requires project"):

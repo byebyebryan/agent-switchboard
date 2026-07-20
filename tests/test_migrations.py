@@ -43,13 +43,14 @@ def test_migrations_are_explicit_contiguous_and_idempotent(tmp_path) -> None:
     database = tmp_path / "switchboard.db"
     connection = configured_connection(str(database))
 
-    assert [migration.version for migration in MIGRATIONS] == [1, 2, 3, 4, 5]
+    assert [migration.version for migration in MIGRATIONS] == [1, 2, 3, 4, 5, 6]
     assert [migration.name for migration in MIGRATIONS] == [
         "initial_registry",
         "remote_snapshot_cache",
         "name_provenance_runtime_index",
         "runtime_truth_ordering",
         "history_launch",
+        "agent_tools",
     ]
     assert migrate(connection, now=100) == CURRENT_SCHEMA_VERSION
     assert migrate(connection, now=200) == CURRENT_SCHEMA_VERSION
@@ -63,11 +64,12 @@ def test_migrations_are_explicit_contiguous_and_idempotent(tmp_path) -> None:
         (3, "name_provenance_runtime_index", 100),
         (4, "runtime_truth_ordering", 100),
         (5, "history_launch", 100),
+        (6, "agent_tools", 100),
     ]
-    assert connection.execute("PRAGMA user_version").fetchone()[0] == 5
+    assert connection.execute("PRAGMA user_version").fetchone()[0] == 6
     assert dict(
         connection.execute("SELECT key, value FROM registry_metadata").fetchall()
-    ) == {"protocol_version": "1", "schema_version": "5"}
+    ) == {"protocol_version": "1", "schema_version": "6"}
     assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
     connection.close()
 
@@ -114,7 +116,7 @@ def test_upgrade_from_v1_preserves_registry_rows(tmp_path) -> None:
     connection.close()
 
     upgraded = connect_database(database)
-    assert upgraded.execute("PRAGMA user_version").fetchone()[0] == 5
+    assert upgraded.execute("PRAGMA user_version").fetchone()[0] == 6
     assert (
         upgraded.execute(
             """
@@ -218,6 +220,19 @@ def test_upgrade_from_v4_preserves_launches_and_adds_claude_history(tmp_path) ->
         """,
         history_values,
     )
+    old_launch = connection.execute(
+        "SELECT * FROM launch_intents WHERE launch_id = ?", (old_launch_id,)
+    ).fetchone()
+    assert old_launch["agent_capability_hash"] is None
+    connection.execute(
+        "UPDATE launch_intents SET agent_capability_hash = ? WHERE launch_id = ?",
+        ("e" * 64, old_launch_id),
+    )
+    with pytest.raises(sqlite3.IntegrityError):
+        connection.execute(
+            "UPDATE launch_intents SET agent_capability_hash = ? WHERE launch_id = ?",
+            ("e" * 64, history_values[0]),
+        )
     with pytest.raises(sqlite3.IntegrityError):
         connection.execute(
             "UPDATE launch_intents SET provider = 'codex' WHERE launch_id = ?",

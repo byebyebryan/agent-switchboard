@@ -64,6 +64,11 @@ DEFAULT_SNAPSHOT_RUNTIME_LIMIT: Final = 10_000
 DEFAULT_LIVENESS_OBSERVATION_LIMIT: Final = 16
 DEFAULT_HANDOFF_LIMIT: Final = 20
 MAX_HANDOFF_LIMIT: Final = 100
+DEFAULT_AGENT_CONTEXT_SESSION_LIMIT: Final = 20
+DEFAULT_AGENT_PROJECT_SESSION_LIMIT: Final = 50
+DEFAULT_AGENT_SEARCH_LIMIT: Final = 20
+MAX_AGENT_SEARCH_SESSION_CANDIDATES: Final = 512
+MAX_AGENT_SEARCH_HANDOFF_CANDIDATES: Final = 2_048
 _SQLITE_MAX_INTEGER: Final = 2**63 - 1
 _MAX_EVIDENCE_PRIORITY: Final = 1_000_000
 
@@ -99,6 +104,7 @@ _SESSION_FIELDS: Final = {
     "name",
     "provider_name",
     "name_source",
+    "name_actor",
     "purpose",
     "cwd",
     "created_at",
@@ -386,6 +392,26 @@ class SessionCurationResult:
 
     session: dict[str, Any]
     handoff: dict[str, Any] | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ProjectContextRows:
+    """Coherent current-project metadata and newest explicit handoffs."""
+
+    current_session: dict[str, Any]
+    sessions: tuple[dict[str, Any], ...]
+    latest_handoffs: tuple[dict[str, Any], ...]
+    retained_session_count: int
+
+
+@dataclass(frozen=True, slots=True)
+class ProjectSearchRows:
+    """Bounded same-project retained-state search results."""
+
+    current_session: dict[str, Any]
+    query: str
+    results: tuple[dict[str, Any], ...]
+    results_truncated: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -1493,9 +1519,11 @@ class Registry:
         provider_name = update.pop("name")
         update["provider_name"] = provider_name
         update.pop("name_source", None)
+        update.pop("name_actor", None)
         if existing is None or existing["name_source"] != "curated":
             update["name"] = provider_name
             update["name_source"] = "provider"
+            update["name_actor"] = None
         return update
 
     @classmethod
@@ -1571,10 +1599,18 @@ class Registry:
             "name_source",
             "unknown" if existing is None else existing["name_source"],
         )
+        name_actor = changes.get(
+            "name_actor",
+            None if existing is None else existing["name_actor"],
+        )
         if name_source == "provider" and name != provider_name:
             raise StorageError("provider-owned name and provider_name must agree")
         if name_source == "unknown" and name is not None:
             raise StorageError("unknown name_source requires name to be null")
+        if name_actor not in {None, "user", "agent"}:
+            raise StorageError("name_actor must be user, agent, or null")
+        if name_source != "curated" and name_actor is not None:
+            raise StorageError("only a curated name can retain name_actor")
 
     @staticmethod
     def _upsert_session_row(
@@ -1602,6 +1638,7 @@ class Registry:
                 "name",
                 "provider_name",
                 "name_source",
+                "name_actor",
                 "purpose",
                 "cwd",
                 "provider_runtime_id",
@@ -1617,6 +1654,12 @@ class Registry:
             "curated",
         }:
             raise StorageError("name_source must be unknown, provider, or curated")
+        if "name_actor" in session and session["name_actor"] not in {
+            None,
+            "user",
+            "agent",
+        }:
+            raise StorageError("name_actor must be user, agent, or null")
         if "name" in session:
             session.setdefault("name_source", "curated")
             if session["name_source"] == "provider":
@@ -1833,6 +1876,278 @@ class Registry:
             handoffs_truncated=len(rows) > handoff_limit,
         )
 
+    def read_project_context(
+        self,
+        session_key: str,
+        *,
+        host_id: str,
+        session_limit: int = DEFAULT_AGENT_CONTEXT_SESSION_LIMIT,
+    ) -> ProjectContextRows:
+        """Read bounded same-project local session context coherently."""
+
+        self._validate_local_session_identity(host_id, session_key)
+        if (
+            isinstance(session_limit, bool)
+            or not isinstance(session_limit, int)
+            or not 1 <= session_limit <= DEFAULT_AGENT_PROJECT_SESSION_LIMIT
+        ):
+            raise StorageError(
+                "session_limit must be between 1 and "
+                f"{DEFAULT_AGENT_PROJECT_SESSION_LIMIT}"
+            )
+        with self.transaction() as connection:
+            current = self._local_session_row(
+                connection, host_id=host_id, session_key=session_key
+            )
+            project_id = current["project_id"]
+            location_id = current["location_id"]
+            if not isinstance(project_id, str) or not isinstance(location_id, str):
+                raise StorageError(
+                    "the current session has no complete project location"
+                )
+            retained_count = int(
+                connection.execute(
+                    """
+                    SELECT COUNT(*) FROM sessions
+                    WHERE host_id = ? AND project_id = ?
+                    """,
+                    (host_id, project_id),
+                ).fetchone()[0]
+            )
+            session_rows = connection.execute(
+                """
+                SELECT * FROM sessions
+                WHERE host_id = ? AND project_id = ?
+                ORDER BY
+                    CASE WHEN session_key = ? THEN 0 ELSE 1 END,
+                    pinned DESC,
+                    COALESCE(last_activity_at, last_observed_at) DESC,
+                    session_key
+                LIMIT ?
+                """,
+                (host_id, project_id, session_key, session_limit),
+            ).fetchall()
+            handoff_ids = [
+                str(row["latest_handoff_id"])
+                for row in session_rows
+                if row["latest_handoff_id"] is not None
+            ]
+            handoffs_by_id: dict[str, sqlite3.Row] = {}
+            if handoff_ids:
+                placeholders = ", ".join("?" for _ in handoff_ids)
+                handoffs_by_id = {
+                    str(row["handoff_id"]): row
+                    for row in connection.execute(
+                        f"SELECT * FROM handoffs WHERE handoff_id IN ({placeholders})",
+                        handoff_ids,
+                    ).fetchall()
+                }
+            latest_handoffs: list[dict[str, Any]] = []
+            for row in session_rows:
+                handoff_id = row["latest_handoff_id"]
+                if handoff_id is None:
+                    continue
+                handoff = handoffs_by_id.get(str(handoff_id))
+                if handoff is None or handoff["session_key"] != row["session_key"]:
+                    raise StorageError(
+                        "a projected session has an inconsistent latest handoff"
+                    )
+                latest_handoffs.append(dict(handoff))
+        return ProjectContextRows(
+            current_session=dict(current),
+            sessions=tuple(dict(row) for row in session_rows),
+            latest_handoffs=tuple(latest_handoffs),
+            retained_session_count=retained_count,
+        )
+
+    def read_project_session_detail(
+        self,
+        caller_session_key: str,
+        target_session_key: str,
+        *,
+        host_id: str,
+        handoff_limit: int = DEFAULT_HANDOFF_LIMIT,
+    ) -> SessionDetailRows:
+        """Read a target only when it is in the caller's local project."""
+
+        self._validate_local_session_identity(host_id, caller_session_key)
+        target_key = _canonical_session_key(target_session_key)
+        if target_key.host_id != HostId(host_id):
+            raise StorageError("session is not in the current project")
+        if (
+            isinstance(handoff_limit, bool)
+            or not isinstance(handoff_limit, int)
+            or not 1 <= handoff_limit <= MAX_HANDOFF_LIMIT
+        ):
+            raise StorageError(
+                f"handoff_limit must be between 1 and {MAX_HANDOFF_LIMIT}"
+            )
+        with self.transaction() as connection:
+            caller = self._local_session_row(
+                connection, host_id=host_id, session_key=caller_session_key
+            )
+            target = connection.execute(
+                "SELECT * FROM sessions WHERE session_key = ?", (target_session_key,)
+            ).fetchone()
+            if (
+                target is None
+                or not isinstance(caller["project_id"], str)
+                or target["host_id"] != host_id
+                or caller["project_id"] != target["project_id"]
+            ):
+                raise StorageError("session is not in the current project")
+            rows = connection.execute(
+                """
+                SELECT * FROM handoffs
+                WHERE session_key = ?
+                ORDER BY sequence DESC, handoff_id
+                LIMIT ?
+                """,
+                (target_session_key, handoff_limit + 1),
+            ).fetchall()
+        return SessionDetailRows(
+            session=dict(target),
+            handoffs=tuple(dict(row) for row in rows[:handoff_limit]),
+            handoffs_truncated=len(rows) > handoff_limit,
+        )
+
+    def read_project_handoff(
+        self,
+        caller_session_key: str,
+        handoff_id: str,
+        *,
+        host_id: str,
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        """Read one exact handoff scoped to the caller's local project."""
+
+        self._validate_local_session_identity(host_id, caller_session_key)
+        canonical_handoff = _canonical_uuid_id(handoff_id, HandoffId, "handoff_id")
+        with self.transaction() as connection:
+            caller = self._local_session_row(
+                connection, host_id=host_id, session_key=caller_session_key
+            )
+            row = connection.execute(
+                """
+                SELECT h.*, s.host_id AS session_host_id,
+                       s.project_id AS session_project_id
+                FROM handoffs AS h
+                JOIN sessions AS s ON s.session_key = h.session_key
+                WHERE h.handoff_id = ?
+                """,
+                (canonical_handoff,),
+            ).fetchone()
+            if (
+                row is None
+                or not isinstance(caller["project_id"], str)
+                or row["session_host_id"] != host_id
+                or row["session_project_id"] != caller["project_id"]
+            ):
+                raise StorageError("handoff is not in the current project")
+        handoff = dict(row)
+        handoff.pop("session_host_id", None)
+        handoff.pop("session_project_id", None)
+        return dict(caller), handoff
+
+    def search_project_context(
+        self,
+        caller_session_key: str,
+        query: str,
+        *,
+        host_id: str,
+        limit: int = DEFAULT_AGENT_SEARCH_LIMIT,
+    ) -> ProjectSearchRows:
+        """Search bounded curated metadata without reading provider transcripts."""
+
+        self._validate_local_session_identity(host_id, caller_session_key)
+        normalized_query = _normalize_curation_text(query, "query", maximum=256)
+        if (
+            isinstance(limit, bool)
+            or not isinstance(limit, int)
+            or not 1 <= limit <= DEFAULT_AGENT_SEARCH_LIMIT
+        ):
+            raise StorageError(
+                f"limit must be between 1 and {DEFAULT_AGENT_SEARCH_LIMIT}"
+            )
+        with self.transaction() as connection:
+            caller = self._local_session_row(
+                connection, host_id=host_id, session_key=caller_session_key
+            )
+            project_id = caller["project_id"]
+            if not isinstance(project_id, str):
+                raise StorageError("the current session has no project")
+            session_rows = connection.execute(
+                """
+                SELECT * FROM sessions
+                WHERE host_id = ? AND project_id = ?
+                ORDER BY COALESCE(last_activity_at, last_observed_at) DESC, session_key
+                LIMIT ?
+                """,
+                (host_id, project_id, MAX_AGENT_SEARCH_SESSION_CANDIDATES + 1),
+            ).fetchall()
+            handoff_rows = connection.execute(
+                """
+                SELECT h.* FROM handoffs AS h
+                JOIN sessions AS s ON s.session_key = h.session_key
+                WHERE s.host_id = ? AND s.project_id = ?
+                ORDER BY h.created_at DESC, h.handoff_id
+                LIMIT ?
+                """,
+                (host_id, project_id, MAX_AGENT_SEARCH_HANDOFF_CANDIDATES + 1),
+            ).fetchall()
+        candidates_truncated = (
+            len(session_rows) > MAX_AGENT_SEARCH_SESSION_CANDIDATES
+            or len(handoff_rows) > MAX_AGENT_SEARCH_HANDOFF_CANDIDATES
+        )
+        needle = normalized_query.casefold()
+        matches: list[dict[str, Any]] = []
+        for row in session_rows[:MAX_AGENT_SEARCH_SESSION_CANDIDATES]:
+            if any(
+                needle in str(row[field]).casefold()
+                for field in ("name", "purpose", "provider")
+                if row[field] is not None
+            ):
+                record: dict[str, Any] = {
+                    "kind": "session",
+                    "session_key": row["session_key"],
+                    "provider": row["provider"],
+                    "observed_at": row["last_activity_at"] or row["last_observed_at"],
+                }
+                if row["name"] is not None:
+                    record["name"] = row["name"]
+                if row["purpose"] is not None:
+                    record["purpose"] = row["purpose"]
+                matches.append(record)
+        for row in handoff_rows[:MAX_AGENT_SEARCH_HANDOFF_CANDIDATES]:
+            if any(
+                needle in str(row[field]).casefold()
+                for field in ("summary", "next_action")
+            ):
+                matches.append(
+                    {
+                        "kind": "handoff",
+                        "session_key": row["session_key"],
+                        "handoff_id": row["handoff_id"],
+                        "sequence": row["sequence"],
+                        "summary": row["summary"],
+                        "next_action": row["next_action"],
+                        "source": row["source"],
+                        "observed_at": row["created_at"],
+                    }
+                )
+        matches.sort(
+            key=lambda item: (
+                -int(item["observed_at"]),
+                str(item["kind"]),
+                str(item.get("handoff_id", item["session_key"])),
+            )
+        )
+        return ProjectSearchRows(
+            current_session=dict(caller),
+            query=normalized_query,
+            results=tuple(matches[:limit]),
+            results_truncated=candidates_truncated or len(matches) > limit,
+        )
+
     def get_handoff(self, handoff_id: str) -> dict[str, Any] | None:
         handoff_id = _canonical_uuid_id(handoff_id, HandoffId, "handoff_id")
         return _row_dict(
@@ -1951,6 +2266,7 @@ class Registry:
         *,
         host_id: str,
         name: str | None,
+        actor: str = "user",
     ) -> dict[str, Any]:
         """Set or clear one curated name without advancing observation time."""
 
@@ -1960,6 +2276,8 @@ class Registry:
             if name is None
             else _normalize_curation_text(name, "session name", maximum=512)
         )
+        if actor not in {"user", "agent"}:
+            raise StorageError("name actor must be user or agent")
         with self.transaction(immediate=True) as connection:
             session = self._local_session_row(
                 connection, host_id=host_id, session_key=session_key
@@ -1968,7 +2286,7 @@ class Registry:
                 provider_name = session["provider_name"]
                 connection.execute(
                     """
-                    UPDATE sessions SET name = ?, name_source = ?
+                    UPDATE sessions SET name = ?, name_source = ?, name_actor = NULL
                     WHERE session_key = ?
                     """,
                     (
@@ -1980,10 +2298,11 @@ class Registry:
             else:
                 connection.execute(
                     """
-                    UPDATE sessions SET name = ?, name_source = 'curated'
+                    UPDATE sessions
+                    SET name = ?, name_source = 'curated', name_actor = ?
                     WHERE session_key = ?
                     """,
-                    (normalized, session_key),
+                    (normalized, actor, session_key),
                 )
             updated = connection.execute(
                 "SELECT * FROM sessions WHERE session_key = ?", (session_key,)
@@ -2322,9 +2641,10 @@ class Registry:
         next_action: str,
         handoff_id: str | None = None,
         wrap: bool = False,
+        source: str = "user",
         observed_at: int | None = None,
     ) -> SessionCurationResult:
-        """Append a local user handoff and optionally wrap in one transaction."""
+        """Append a local attributed handoff and optionally wrap atomically."""
 
         self._validate_local_session_identity(host_id, session_key)
         summary = normalize_handoff_text(summary, "summary")
@@ -2334,6 +2654,8 @@ class Registry:
         )
         if not isinstance(wrap, bool):
             raise StorageError("wrap must be boolean")
+        if source not in {"user", "agent"}:
+            raise StorageError("curation handoff source must be user or agent")
         timestamp = (
             now_ms()
             if observed_at is None
@@ -2351,7 +2673,7 @@ class Registry:
                 connection,
                 session_key=session_key,
                 summary=summary,
-                source="user",
+                source=source,
                 source_host_id=host_id,
                 next_action=next_action,
                 handoff_id=handoff_id,
@@ -2379,6 +2701,7 @@ class Registry:
         lease_owner: str,
         capability_hash: str,
         expires_at: int,
+        agent_capability_hash: str | None = None,
         launch_id: str | None = None,
         created_at: int | None = None,
         source_session_key: str | None = None,
@@ -2387,6 +2710,10 @@ class Registry:
 
         request = dict(request)
         capability_hash = _require_hash(capability_hash, "capability_hash")
+        if agent_capability_hash is not None:
+            agent_capability_hash = _require_hash(
+                agent_capability_hash, "agent_capability_hash"
+            )
         if not isinstance(lease_owner, str) or not lease_owner.strip():
             raise StorageError("lease_owner must be a non-empty string")
         _reject_controls(lease_owner, "lease_owner")
@@ -2563,8 +2890,12 @@ class Registry:
                     launch_id, request_id, request_fingerprint, host_id,
                     provider, action, project_id, location_id, cwd,
                     source_handoff_id, target_session_key, transport, state,
-                    lease_owner, capability_hash, created_at, updated_at, expires_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'reserved', ?, ?, ?, ?, ?)
+                    lease_owner, capability_hash, agent_capability_hash,
+                    created_at, updated_at, expires_at
+                ) VALUES (
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'reserved',
+                    ?, ?, ?, ?, ?, ?
+                )
                 """,
                 (
                     launch_id,
@@ -2581,6 +2912,7 @@ class Registry:
                     request["transport"],
                     lease_owner,
                     capability_hash,
+                    agent_capability_hash,
                     timestamp,
                     timestamp,
                     expires_at,
@@ -5131,6 +5463,9 @@ class Registry:
 
 __all__ = [
     "CURRENT_SCHEMA_VERSION",
+    "DEFAULT_AGENT_CONTEXT_SESSION_LIMIT",
+    "DEFAULT_AGENT_PROJECT_SESSION_LIMIT",
+    "DEFAULT_AGENT_SEARCH_LIMIT",
     "DEFAULT_BUSY_TIMEOUT_MS",
     "DEFAULT_EVENT_LIMIT",
     "DEFAULT_HANDOFF_LIMIT",
@@ -5143,6 +5478,8 @@ __all__ = [
     "HostSnapshotRows",
     "IdentityConflict",
     "LaunchBindingResult",
+    "ProjectContextRows",
+    "ProjectSearchRows",
     "ProviderSessionReconciliationResult",
     "Registry",
     "RegistryClosed",

@@ -184,6 +184,36 @@ def test_invalid_configuration_values_are_rejected(document: str, message: str) 
         parse_config(document, host_id=HOST_A)
 
 
+def test_context_source_count_is_bounded() -> None:
+    values = ",".join(f"'docs/{index}.md'" for index in range(33))
+    document = f"[projects.\"{PROJECT}\"]\nname='x'\ncontext_sources=[{values}]"
+    with pytest.raises(ConfigError, match="at most 32"):
+        parse_config(document, host_id=HOST_A)
+
+
+def test_memory_adapter_is_explicit_absolute_and_bounded() -> None:
+    parsed = parse_config(
+        """
+[memory]
+enabled = true
+command = ["/opt/claude-mem/mcp-server", "--stdio"]
+tool = "search"
+timeout_seconds = 7
+""",
+        host_id=HOST_A,
+    )
+    assert parsed.memory.enabled is True
+    assert parsed.memory.command == ("/opt/claude-mem/mcp-server", "--stdio")
+    assert parsed.memory.timeout_seconds == 7
+
+    with pytest.raises(ConfigError, match=r"required when memory\.enabled"):
+        parse_config("[memory]\nenabled=true", host_id=HOST_A)
+    with pytest.raises(ConfigError, match="absolute executable"):
+        parse_config('[memory]\nenabled=true\ncommand=["claude-mem"]', host_id=HOST_A)
+    with pytest.raises(ConfigError, match="between 1 and 30"):
+        parse_config("[memory]\ntimeout_seconds=31", host_id=HOST_A)
+
+
 def host_project_config(
     *,
     host_name: str,

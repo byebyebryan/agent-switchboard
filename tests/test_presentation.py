@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import time
 from collections.abc import Sequence
 from pathlib import Path
@@ -333,10 +334,20 @@ def test_new_project_launch_is_unbound_waiting_and_idempotent(
         "bootstrap",
         stored["launch_id"],
     )
-    assert tmux.create_calls[0]["environment"] == {
-        "AGENT_SWITCHBOARD_LAUNCH_ID": stored["launch_id"],
-        "AGENT_SWITCHBOARD_SURFACE_ID": str(plan.surface_id),
+    environment = tmux.create_calls[0]["environment"]
+    assert set(environment) == {
+        "AGENT_SWITCHBOARD_LAUNCH_ID",
+        "AGENT_SWITCHBOARD_SURFACE_ID",
+        "AGENT_SWITCHBOARD_CAPABILITY",
     }
+    assert environment["AGENT_SWITCHBOARD_LAUNCH_ID"] == stored["launch_id"]
+    assert environment["AGENT_SWITCHBOARD_SURFACE_ID"] == str(plan.surface_id)
+    capability = environment["AGENT_SWITCHBOARD_CAPABILITY"]
+    assert (
+        stored["agent_capability_hash"]
+        == hashlib.sha256(capability.encode("ascii")).hexdigest()
+    )
+    assert capability not in repr(stored)
     assert attach_surface_argv(
         registry,
         host_id=HOST_ID,
@@ -619,11 +630,18 @@ def test_new_claude_project_launch_forces_disabled_agent_view_and_starts_exact_c
     stored = registry.list_launches()[0]
     assert stored["provider"] == "claude"
     assert stored["capability_hash"] == PREPARE_NEW_CLAUDE_CAPABILITY_HASH
+    environment = tmux.create_calls[0]["environment"]
+    capability = environment["AGENT_SWITCHBOARD_CAPABILITY"]
+    assert (
+        stored["agent_capability_hash"]
+        == hashlib.sha256(capability.encode("ascii")).hexdigest()
+    )
     assert tmux.create_calls[0]["provider"] == "claude"
     assert tmux.create_calls[0]["session_key"] is None
-    assert tmux.create_calls[0]["environment"] == {
+    assert environment == {
         "AGENT_SWITCHBOARD_LAUNCH_ID": stored["launch_id"],
         "AGENT_SWITCHBOARD_SURFACE_ID": str(plan.surface_id),
+        "AGENT_SWITCHBOARD_CAPABILITY": capability,
         "CLAUDE_CODE_DISABLE_AGENT_VIEW": "1",
     }
     assert attach_surface_argv(
@@ -679,6 +697,7 @@ def test_claude_history_launch_uses_native_picker_and_binds_selected_session(
     assert stored["provider"] == "claude"
     assert stored["target_session_key"] is None
     assert stored["capability_hash"] == PREPARE_CLAUDE_HISTORY_CAPABILITY_HASH
+    assert stored["agent_capability_hash"] is None
     assert tmux.create_calls[0]["session_key"] is None
     assert tmux.create_calls[0]["environment"] == {
         "AGENT_SWITCHBOARD_LAUNCH_ID": stored["launch_id"],
@@ -1083,10 +1102,19 @@ def test_parked_open_creates_one_waiting_surface_and_is_idempotent(
         "bootstrap",
         launches[0]["launch_id"],
     )
-    assert create["environment"] == {
-        "AGENT_SWITCHBOARD_LAUNCH_ID": launches[0]["launch_id"],
-        "AGENT_SWITCHBOARD_SURFACE_ID": str(plan.surface_id),
+    environment = create["environment"]
+    assert set(environment) == {
+        "AGENT_SWITCHBOARD_LAUNCH_ID",
+        "AGENT_SWITCHBOARD_SURFACE_ID",
+        "AGENT_SWITCHBOARD_CAPABILITY",
     }
+    assert environment["AGENT_SWITCHBOARD_LAUNCH_ID"] == launches[0]["launch_id"]
+    assert environment["AGENT_SWITCHBOARD_SURFACE_ID"] == str(plan.surface_id)
+    capability = environment["AGENT_SWITCHBOARD_CAPABILITY"]
+    assert (
+        launches[0]["agent_capability_hash"]
+        == hashlib.sha256(capability.encode("ascii")).hexdigest()
+    )
 
     retry = launch.prepare_open(
         SESSION_KEY,
@@ -1120,6 +1148,11 @@ def test_parked_claude_open_forces_disabled_agent_view_and_is_idempotent(
     assert len(launches) == 1
     assert launches[0]["provider"] == "claude"
     assert launches[0]["capability_hash"] == PREPARE_CLAUDE_CAPABILITY_HASH
+    capability = tmux.create_calls[0]["environment"]["AGENT_SWITCHBOARD_CAPABILITY"]
+    assert (
+        launches[0]["agent_capability_hash"]
+        == hashlib.sha256(capability.encode("ascii")).hexdigest()
+    )
     surface = registry.get_surface(str(plan.surface_id))
     assert surface is not None and surface["provider"] == "claude"
     create = tmux.create_calls[0]
@@ -1128,6 +1161,7 @@ def test_parked_claude_open_forces_disabled_agent_view_and_is_idempotent(
     assert create["environment"] == {
         "AGENT_SWITCHBOARD_LAUNCH_ID": launches[0]["launch_id"],
         "AGENT_SWITCHBOARD_SURFACE_ID": str(plan.surface_id),
+        "AGENT_SWITCHBOARD_CAPABILITY": capability,
         "CLAUDE_CODE_DISABLE_AGENT_VIEW": "1",
     }
 

@@ -13,6 +13,7 @@ from . import (
     v0003_name_provenance_runtime_index,
     v0004_runtime_truth_ordering,
     v0005_history_launch,
+    v0006_agent_tools,
 )
 
 PROTOCOL_VERSION = 1
@@ -54,6 +55,12 @@ MIGRATIONS = (
         v0005_history_launch.NAME,
         v0005_history_launch.STATEMENTS,
         requires_foreign_keys_off=v0005_history_launch.REQUIRES_FOREIGN_KEYS_OFF,
+    ),
+    Migration(
+        v0006_agent_tools.VERSION,
+        v0006_agent_tools.NAME,
+        v0006_agent_tools.STATEMENTS,
+        requires_foreign_keys_off=v0006_agent_tools.REQUIRES_FOREIGN_KEYS_OFF,
     ),
 )
 CURRENT_SCHEMA_VERSION = MIGRATIONS[-1].version
