@@ -96,7 +96,9 @@ current-project context and retained-state search, current-session curation, a
 thin stdio MCP transport, and an optional external memory MCP adapter. Its
 contract and isolated installed evidence are recorded in
 [`docs/phase-4c-plan.md`](docs/phase-4c-plan.md). Remote SSH transport remains
-Phase 5. Phase 4D is the clean `0.2.0` local-management cutover: Snapshot v2,
+Phase 5; its exact federation/action contract is in
+[`docs/phase-5-plan.md`](docs/phase-5-plan.md). Phase 4D is the clean `0.2.0`
+local-management cutover: Snapshot v2,
 configuration v2, repositories/checkouts, explicit tasks, and the task-first
 TUI are implemented in core. Its accepted contract and acceptance checklist
 and the completed guarded local rollout are recorded in

@@ -2022,6 +2022,12 @@ The implemented contract and migration/rollout gates are in
 
 ### Phase 5: Remote hosts
 
+The exact Fleet v1 envelope, bounded SSH transport, owning-host action gateway,
+cross-host continuation, DMS boundary, delivery commits, and acceptance gates
+are specified in [`docs/phase-5-plan.md`](phase-5-plan.md). Snapshot v2 remains
+a single-host authority envelope; Phase 5 adds a bounded collection of
+individually validated host snapshots rather than weakening that invariant.
+
 - Add SSH snapshot transport around the stable host identity and Snapshot v2
   project/repository/checkout/task protocol.
 - Add host-local snapshot reconciliation modes.
