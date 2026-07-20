@@ -1,6 +1,7 @@
 # Phase 5 Plan: Pull-based SSH Federation and Remote Actions
 
-Status: approved implementation plan; implementation in progress
+Status: implementation complete; deterministic and installed local-Fleet
+acceptance passed; guarded live-SSH acceptance pending a configured test host
 
 Phase 5 extends the completed local Snapshot v2, task, managed-tmux, TUI, and
 DMS contracts across explicitly configured SSH hosts. It keeps every owning
@@ -9,9 +10,9 @@ no-daemon architecture, and does not weaken Snapshot v2's single-host
 invariants.
 
 This is one coordinated core and DMS vertical slice delivered through
-reviewable commits. Read-only federation lands before remote mutations. The
-legacy DMS remote helper remains available until the new path passes isolated
-and live parity acceptance.
+reviewable commits. Read-only federation landed before remote mutations. The
+legacy DMS remote helper remains available until the new path passes live
+remote parity acceptance.
 
 ## Goals
 
@@ -272,6 +273,39 @@ DMS `itemsChanged()` fallback remains.
 No commit leaves an existing local Snapshot/action consumer silently accepting
 an incompatible shape.
 
+## Implementation checkpoint
+
+The seven delivery slices are implemented in reviewable core and DMS commits:
+
+- core emits and retains Fleet v1 through bounded concurrent OpenSSH, exposes
+  offline/stale/never-seen state, and preserves Snapshot v2 single-host
+  ownership;
+- the TUI consumes Fleet v1 with host-qualified task and Inbox identity;
+- every prepare/history/select/attach/stop action routes through a configured,
+  HostId-pinned owner and validates the returned target;
+- continuation exports one exact immutable handoff and atomically stores its
+  content-hashed import with the destination task/reservation; and
+- DMS bridge v3/model v4 merges compatible projects, retains per-host routes,
+  scopes desktop identity by host, and invokes only local `swbctl`.
+
+Core formatting, Ruff, compileall, and all 638 tests pass. The separate DMS
+adapter passes 97 Python tests, 15 JavaScript behavior groups, QML formatting,
+Ruff, and package Pyright. Its private-state Quickshell harness passes retained
+and full Fleet reads, cache round trip, exact query, last-good failures, and
+recovery. The installed plugin reports bridge 3/model 4 with one local host and
+no failure after the current no-cache core build is installed.
+
+The true `SwitchboardModelV4.js` contract bump required one documented
+DMS-only restart to clear Qt's retained JavaScript module state. Exact Codex
+and Claude PID sets remained unchanged. `swbctl doctor` reported only warm hook
+p95 around 130 ms against the 125 ms performance budget; it found no federation
+contract failure.
+
+This host has no configured remote endpoint. Therefore automated two-host
+transport/action/continuation coverage and installed local-Fleet coverage are
+complete, while the live-SSH steps below remain pending. No provider was
+launched, stopped, restarted, or signalled during the installed checkpoint.
+
 ## Automated acceptance
 
 Core tests use temporary XDG roots, private registries, fake snapshots, and a
@@ -284,6 +318,10 @@ and DMS projection/cache/action routing. They never invoke a provider, user SSH
 configuration, default registry/tmux, or live DMS.
 
 ## Guarded installed acceptance
+
+The local core/DMS install, private-state harness, cache, and provider
+non-interruption portions have passed. Steps requiring a remote endpoint are not
+executable on the current one-host configuration and remain open.
 
 After full static/unit/package/isolated gates:
 

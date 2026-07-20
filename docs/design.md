@@ -2,7 +2,7 @@
 
 Status: Implementation baseline
 
-Last updated: 2026-07-16
+Last updated: 2026-07-20
 
 Related research: [Open-source product landscape](product-landscape.md)
 
@@ -11,11 +11,12 @@ Implementation evidence: [Phase 0 validation](phase-0-validation.md)
 ## Summary
 
 Agent Switchboard is a local-first, project-aware session and context
-switchboard for terminal coding agents. It presents Codex and Claude Code
-conversations through one searchable session model, groups ongoing work under
-stable projects, reports whether each session is working, needs input, is ready
-for review, is ready for the next prompt, or is parked, and opens each session
-through the provider's native resume or attach mechanism.
+switchboard for terminal coding agents. It presents local and configured-remote
+Codex and Claude Code conversations through one searchable session model,
+groups ongoing work under stable projects, reports whether each session is
+working, needs input, is ready for review, is ready for the next prompt, or is
+parked, and opens each session through the provider's native resume or attach
+mechanism.
 
 The project has a frontend-neutral core. DankMaterialShell (DMS) is the first
 production consumer and proves the local launch and desktop handoff path. A
@@ -1542,20 +1543,19 @@ asynchronously. A remote failure therefore does not delay local results or make
 known sessions disappear. The UI exposes snapshot age whenever data is stale or
 offline.
 
-`swbctl list` is the frontend-facing merged view. It reads the local registry
-and cached remote snapshots. `swbctl refresh` performs remote pulls and
-updates that cache. A TUI can run refreshes asynchronously while retaining its
-current model; DMS can show cached items and refresh only when its cache is
-stale.
+`swbctl fleet --json` is the frontend-facing retained view. It performs no
+network I/O and returns a current local Snapshot plus cached remote snapshots.
+`swbctl fleet --refresh --json` performs bounded remote pulls and updates that
+cache. A TUI can refresh asynchronously while retaining its current model; DMS
+can show cached items and refresh only when its cache is stale.
 
 ### Refresh policy
 
 Remote SSH traffic exists only while a frontend requests it:
 
 - TUI startup requests an initial refresh.
-- An open TUI polls live snapshots at a configurable bounded interval.
-- Full provider discovery runs on startup, explicit refresh, or a slower
-  interval.
+- TUI startup and explicit refresh can request live snapshots.
+- Full provider discovery runs only as part of an explicit full refresh.
 - DMS refreshes when the picker is opened and cached data is stale.
 - Closed frontends generate no SSH polling traffic.
 
@@ -1580,33 +1580,36 @@ The owning host always revalidates an action against current provider, runtime,
 and surface state. A cached local snapshot is never sufficient authority to
 create or duplicate a runtime.
 
-A desktop frontend first prepares the action noninteractively on the owning
+A desktop frontend asks its local core to prepare the action for the owning
 host:
 
 ```text
-ssh <target> swbctl prepare-open <session-key> \
+swbctl prepare-open <session-key> --host <host-id> \
   --request-id <uuid> --json
 ```
 
-The remote command returns a structured error, an existing surface, or a newly
+Local core resolves the pinned endpoint and owns the bounded SSH command. The
+owning core returns a structured error, an existing surface, or a newly
 prepared waiting surface. Only after success does the frontend focus an
 existing local terminal or launch the configured terminal around:
 
 ```text
-ssh -t <target> swbctl attach-surface <surface-id>
+swbctl attach-surface <surface-id> --host <host-id>
 ```
 
-`attach-surface` revalidates the surface and any pending lease, then replaces
-itself with an exact tmux attach/current-client switch operation. The provider
-bootstrap starts only after a client views the target surface. A failed
-preparation therefore does not flash a disposable Ghostty window, and
-concurrent local/remote frontends share the same launch reservation.
+For a remote owner, local core replaces itself with exact interactive SSH and
+the remote `attach-surface` revalidates the surface and pending lease before an
+exact tmux attach/current-client switch. The provider bootstrap starts only
+after a client views the target surface. A failed preparation therefore does
+not flash a disposable Ghostty window, and concurrent local/remote frontends
+share the same launch reservation.
 
 When preparation returns a `switch` plan for one already attached remote tmux
 client, DMS first runs:
 
 ```text
-ssh <target> swbctl select-surface <surface-id> --client <opaque-client-id>
+swbctl select-surface <surface-id> --host <host-id> \
+  --client <opaque-client-id>
 ```
 
 After the owning host confirms the switch, DMS focuses the existing local
@@ -1618,9 +1621,9 @@ New-session and other future mutating actions follow the same rule: send an
 explicit command to the owning host, validate there, and return structured
 errors. They do not mutate cached remote rows locally.
 
-For cross-host task continuation, the initiating host resolves an exact
-immutable handoff and sends a bounded JSON envelope on SSH standard input to
-the target.
+For cross-host task continuation, the source exports an exact immutable
+handoff and the initiating core sends that canonical bounded JSON envelope on
+SSH standard input to the target.
 The envelope contains the handoff ID, source session/host, project ID, summary,
 next action, timestamp, and content hash. SSH authenticates the caller; the
 target validates size, schema, hash, and that it has a configured checkout for
@@ -1629,8 +1632,10 @@ No target
 host reaches back to the source and no transcript content is transferred.
 
 ```text
-ssh <target> swbctl prepare-task <task-id> --create --request-id <uuid> \
-  --json-stdin --json
+swbctl task export-handoff <task-id> --handoff <handoff-id> --json
+swbctl prepare-task <new-task-id> --host <destination-host-id> --create \
+  --continue-json-stdin --checkout <checkout-id> --provider <provider> \
+  --request-id <uuid> --json
 ```
 
 The request envelope also selects the target's configured checkout. A local
@@ -1989,8 +1994,9 @@ live niri focus and same-window dedup through the existing public presentation
 contract. Exact evidence is recorded in
 [`docs/phase-3c-plan.md`](phase-3c-plan.md).
 
-The existing legacy DMS helper remains only the remote fallback until Phase 5
-passes equivalent live tests.
+The separate DMS adapter now consumes Fleet v1 and host-qualified actions. The
+legacy DMS helper remains only as a temporary remote fallback until a real SSH
+open/create/continuation exercise passes equivalent live tests.
 
 ### Phase 4: Curation, context, and TUI
 
@@ -2024,8 +2030,9 @@ The implemented contract and migration/rollout gates are in
 
 The exact Fleet v1 envelope, bounded SSH transport, owning-host action gateway,
 cross-host continuation, DMS boundary, delivery commits, and acceptance gates
-are specified in [`docs/phase-5-plan.md`](phase-5-plan.md). Snapshot v2 remains
-a single-host authority envelope; Phase 5 adds a bounded collection of
+are specified in [`docs/phase-5-plan.md`](phase-5-plan.md). The implementation
+is complete in core and the separate DMS adapter. Snapshot v2 remains a
+single-host authority envelope; Phase 5 adds a bounded collection of
 individually validated host snapshots rather than weakening that invariant.
 
 - Add SSH snapshot transport around the stable host identity and Snapshot v2
@@ -2036,15 +2043,14 @@ individually validated host snapshots rather than weakening that invariant.
   last-known session state.
 - Add remote `prepare-open`, `prepare-task`, `select-surface`, `attach-surface`,
   and bounded task/handoff envelopes.
-- Move DMS remote rows to the snapshot/presentation protocol only after SSH
-  bounds, stale-cache, Unicode, and error-path parity tests pass; then remove the
-  remaining legacy helper paths.
+- Move DMS remote rows to Fleet/presentation contracts after SSH bounds,
+  stale-cache, Unicode, and error-path parity tests pass.
 - Measure polling with SSH multiplexing before considering `watch --jsonl`.
 
-The pre-release v2 core and DMS adapter use one reviewed coordinated cutover
-with explicit config/registry backup. The existing DMS helper remains available
-for remote fallback until Phase 5 passes equivalent discovery and open-path
-tests.
+Deterministic gates pass in both repositories, and the installed DMS adapter
+passes local Fleet/cache/reload acceptance. The existing DMS helper remains
+available for remote fallback until a configured test host passes live remote
+fetch, open, create, and exact continuation acceptance.
 
 ## Test Strategy
 

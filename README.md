@@ -95,14 +95,19 @@ session-scoped authorization for managed Codex and Claude launches, bounded
 current-project context and retained-state search, current-session curation, a
 thin stdio MCP transport, and an optional external memory MCP adapter. Its
 contract and isolated installed evidence are recorded in
-[`docs/phase-4c-plan.md`](docs/phase-4c-plan.md). Remote SSH transport remains
-Phase 5; its exact federation/action contract is in
-[`docs/phase-5-plan.md`](docs/phase-5-plan.md). Phase 4D is the clean `0.2.0`
+[`docs/phase-4c-plan.md`](docs/phase-4c-plan.md). Phase 4D is the clean `0.2.0`
 local-management cutover: Snapshot v2,
 configuration v2, repositories/checkouts, explicit tasks, and the task-first
 TUI are implemented in core. Its accepted contract and acceptance checklist
 and the completed guarded local rollout are recorded in
-[`docs/phase-4d-plan.md`](docs/phase-4d-plan.md). See
+[`docs/phase-4d-plan.md`](docs/phase-4d-plan.md). Phase 5 now implements bounded
+pull-based SSH federation, Fleet v1, cached offline/stale host state,
+owning-host action routing, federated TUI rows, exact cross-host handoff
+continuation, and the separate DMS model-v4 vertical slice. Deterministic core,
+DMS, and installed local-Fleet acceptance pass; live SSH open/create/
+continuation remains pending an explicitly configured test host. The exact
+contract and evidence boundary are in
+[`docs/phase-5-plan.md`](docs/phase-5-plan.md). See
 [the design](docs/design.md), the
 [Phase 1 validation record](docs/phase-1-validation.md), and the
 [Phase 2 validation record](docs/phase-2-validation.md), the
@@ -119,6 +124,8 @@ The implemented command surface emits one versioned snapshot envelope:
 swbctl snapshot --json
 swbctl snapshot --reconcile live --json
 swbctl snapshot --reconcile full --json
+swbctl fleet --json
+swbctl fleet --refresh --json
 swbctl list --json
 swbctl list --refresh --json
 swbctl show <session-key> --json
@@ -149,6 +156,7 @@ swbctl task show <task-id> --json
 swbctl task title <task-id> <title> --json
 swbctl task purpose <task-id> <purpose> --json
 swbctl task pin <task-id> [--off] --json
+swbctl task export-handoff <task-id> --handoff <handoff-id> --json
 swbctl task close <task-id> --json-stdin --json
 swbctl task reopen <task-id> --json
 swbctl hooks install --provider codex --dry-run
@@ -156,18 +164,23 @@ swbctl hooks uninstall --provider codex --dry-run
 swbctl hooks install --provider claude --dry-run
 swbctl hooks uninstall --provider claude --dry-run
 swbctl doctor
-swbctl prepare-open <session-key> --request-id <uuid> \
+swbctl prepare-open <session-key> [--host <host-id>] --request-id <uuid> \
   --can-focus-desktop --can-launch-terminal --json
-swbctl prepare-task <task-id> --create --project <project-id> --title <title> \
+swbctl prepare-task <task-id> [--host <host-id>] --create \
+  --project <project-id> --title <title> \
   --checkout <checkout-id> --provider codex|claude --request-id <uuid> \
   --can-focus-desktop --can-launch-terminal --json
-swbctl prepare-task <task-id> --request-id <uuid> \
+swbctl prepare-task <task-id> [--host <host-id>] --request-id <uuid> \
   --can-focus-desktop --can-launch-terminal --json
-swbctl prepare-history --project <project-id> --checkout <checkout-id> \
+swbctl prepare-task <new-task-id> --host <destination-host-id> --create \
+  --continue-json-stdin --checkout <checkout-id> --provider codex|claude \
+  --request-id <uuid> --json
+swbctl prepare-history --project <project-id> [--host <host-id>] \
+  --checkout <checkout-id> \
   --request-id <uuid> --can-focus-desktop --can-launch-terminal --json
-swbctl stop-session <claude-session-key> --json
-swbctl select-surface <surface-id> --client <tmux-client-id>
-swbctl attach-surface <surface-id>
+swbctl stop-session <claude-session-key> [--host <host-id>] --json
+swbctl select-surface <surface-id> [--host <host-id>] --client <tmux-client-id>
+swbctl attach-surface <surface-id> [--host <host-id>]
 ```
 
 `snapshot --reconcile none` is the default and is equivalent to the retained
@@ -186,6 +199,15 @@ results, and incomplete pagination return a valid snapshot with structured
 capability degradation; they do not erase retained sessions. Core
 configuration, storage, migration, or protocol failures exit nonzero with no
 partial JSON.
+
+`fleet --json` performs no network I/O. It returns a fresh retained local
+Snapshot v2 plus last-good snapshots and explicit reachability/staleness for
+configured remotes. `fleet --refresh --json` fully reconciles the local host,
+pulls declared remotes concurrently through bounded noninteractive OpenSSH,
+and atomically retains only validated successes. Snapshot v2 remains
+single-host; Fleet v1 is a bounded collection of individually owned snapshots.
+Failed, incompatible, or out-of-order pulls do not replace last-good remote
+state, and no polling daemon remains after the command exits.
 
 Codex invokes `swbctl event --provider codex` from lifecycle hooks. That
 internal fast path accepts one bounded JSON object on stdin, discards prompts,
@@ -229,10 +251,23 @@ surface immediately before `exec`; the first exact lifecycle hook or complete
 live tmux/process correlation assigns the provider UUID and advances the
 task's current session atomically.
 
+Host-qualified prepare, history, select, attach, and safe-stop commands route
+through exactly one configured, HostId-pinned remote. Core constructs the SSH
+argv, revalidates the returned envelope and owning HostId, and never treats a
+cached row as mutation authority. Remote terminal attachment uses an exact
+interactive SSH command whose owner revalidates the surface before tmux attach;
+frontends receive neither SSH targets nor tmux locators.
+
 Continuation never reads a transcript or injects provider prompt text. A task
 may switch providers only after its current session has an explicit handoff and
 is wrapped. Closing a task appends that handoff and wraps the session in the
 same transaction, but deliberately leaves the runtime and tmux surface alone.
+For cross-host continuation, `task export-handoff` emits one bounded,
+content-hashed envelope for an exact immutable handoff. The destination
+validates the source configured host and matching ProjectId, stores the
+imported handoff, and atomically creates its own task and launch reservation.
+Exact retries are idempotent; conflicting content fails closed. The envelope
+contains no transcript, prompt, path, provider argv, or tmux locator.
 
 `prepare-history` follows the same attach-before-start lifecycle but launches
 Claude's native `claude --resume` picker without supplying or discovering a
@@ -297,13 +332,15 @@ child, accepts text content only, and returns an unavailable envelope on
 absence, timeout, or protocol/tool failure. Switchboard never reads the
 adapter's private databases or provider transcripts.
 
-`swbctl tui` is the complete local task-management frontend. Open tasks are the
-default view; `1`, `2`, and `3` switch between Open, Inbox, and Closed. It can
-create and launch a titled task, adopt an Inbox session, edit task title or
+`swbctl tui` is the complete terminal task-management frontend. It consumes
+Fleet v1, retains last-good rows while refreshing, qualifies remote rows by
+host, and exposes host/project filters plus offline/stale state. Open tasks are
+the default view; `1`, `2`, and `3` switch between Open, Inbox, and Closed. It
+can create and launch a titled task, adopt an Inbox session, edit task title or
 purpose, pin, close with an explicit handoff, reopen, continue, inspect task
 session history, open exact Inbox sessions, and request safe Claude stop. It
-uses only fixed installed commands and validated Snapshot v2 data rather than
-importing registry or provider internals.
+uses only fixed installed commands and validated Fleet v1/Snapshot v2 data
+rather than importing registry or provider internals.
 
 ## Requirements and development setup
 
