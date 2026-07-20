@@ -48,10 +48,13 @@ from .presentation import (
     select_surface,
 )
 from .protocol import (
+    FleetEnvelope,
     PresentationPlanEnvelope,
     SessionActionEnvelope,
     SessionDetailEnvelope,
+    SnapshotEnvelope,
 )
+from .remote import RemoteError, build_fleet_envelope, refresh_remote_cache
 from .session_actions import ManagedSessionController
 from .storage import DEFAULT_HANDOFF_LIMIT, MAX_HANDOFF_LIMIT, Registry, StorageError
 from .tmux import TmuxController, TmuxError
@@ -102,6 +105,17 @@ def build_parser() -> argparse.ArgumentParser:
         help="refresh enabled providers before reading",
     )
     list_command.add_argument("--json", action="store_true", required=True)
+
+    fleet = commands.add_parser(
+        "fleet",
+        help="emit local and retained remote host snapshots",
+    )
+    fleet.add_argument(
+        "--refresh",
+        action="store_true",
+        help="fully reconcile local and declared remote hosts before reading",
+    )
+    fleet.add_argument("--json", action="store_true", required=True)
 
     event = commands.add_parser(
         "event",
@@ -370,6 +384,29 @@ def build_parser() -> argparse.ArgumentParser:
     )
     bootstrap.add_argument("launch_id")
     return parser
+
+
+def _fleet_envelope(*, refresh: bool) -> FleetEnvelope:
+    host_id = load_or_create_host_id()
+    config = load_config(host_id=host_id)
+    local_snapshot = SnapshotEnvelope.from_json(
+        build_local_snapshot_json(reconcile="full" if refresh else "none")
+    )
+    generated_at = time.time_ns() // 1_000_000
+    with Registry(database_path()) as registry:
+        if refresh:
+            refresh_remote_cache(
+                registry,
+                config,
+                local_host_id=host_id,
+            )
+            generated_at = time.time_ns() // 1_000_000
+        return build_fleet_envelope(
+            local_snapshot,
+            registry.list_remotes(declared_only=True),
+            generated_at=generated_at,
+            staleness_interval_seconds=config.defaults.staleness_interval_seconds,
+        )
 
 
 def _configured_codex_executable(config: SwitchboardConfig) -> str | None:
@@ -1195,6 +1232,24 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if arguments.command == "tui":
         return _run_tui_command()
+
+    if arguments.command == "fleet":
+        try:
+            sys.stdout.write(
+                f"{_fleet_envelope(refresh=arguments.refresh).to_json()}\n"
+            )
+            return 0
+        except (
+            ValidationError,
+            StorageError,
+            RemoteError,
+            MigrationError,
+            sqlite3.Error,
+            OSError,
+            ValueError,
+        ) as error:
+            print(f"swbctl: {_safe_error_message(error)}", file=sys.stderr)
+            return 1
 
     if arguments.command in {
         "prepare-open",

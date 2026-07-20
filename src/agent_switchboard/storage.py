@@ -6392,6 +6392,11 @@ class Registry:
             ).fetchone()
             if endpoint is None:
                 raise StorageError(f"unknown remote: {remote_name}")
+            pinned_host_id = endpoint["remote_host_id"]
+            if pinned_host_id is not None and pinned_host_id != remote_host_id:
+                raise IdentityConflict(
+                    "remote endpoint changed its pinned host identity"
+                )
             last_attempt_at = endpoint["last_attempt_at"]
             if last_attempt_at is not None and received < int(last_attempt_at):
                 raise StorageError("stale remote snapshot completion")
@@ -6519,6 +6524,19 @@ class Registry:
         if result is not None and result["snapshot_json"] is not None:
             result["snapshot"] = json.loads(result["snapshot_json"])
         return result
+
+    def list_remotes(self, *, declared_only: bool = False) -> list[dict[str, Any]]:
+        where = "WHERE declared = 1" if declared_only else ""
+        rows = self.connection.execute(
+            f"SELECT * FROM remote_snapshots {where} ORDER BY remote_name"
+        ).fetchall()
+        results: list[dict[str, Any]] = []
+        for row in rows:
+            result = dict(row)
+            if result["snapshot_json"] is not None:
+                result["snapshot"] = json.loads(result["snapshot_json"])
+            results.append(result)
+        return results
 
 
 __all__ = [

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import sqlite3
 import stat
 from concurrent.futures import ThreadPoolExecutor
@@ -2806,6 +2807,35 @@ def test_remote_snapshot_rejects_unsafe_or_mismatched_envelopes(
             protocol_version=2,
             observed_at=111,
         )
+
+
+def test_remote_snapshot_pins_first_successful_host_identity(
+    registry: Registry,
+) -> None:
+    registry.upsert_remote("remote", "remote.lan", "remote", observed_at=100)
+    registry.store_remote_snapshot(
+        "remote",
+        remote_snapshot(110),
+        remote_host_id=REMOTE_HOST_ID,
+        schema_version=2,
+        protocol_version=2,
+        observed_at=110,
+        received_at=120,
+    )
+    changed = remote_snapshot(130)
+    changed_host = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+    encoded = json.dumps(changed).replace(REMOTE_HOST_ID, changed_host)
+    with pytest.raises(IdentityConflict, match="pinned host identity"):
+        registry.store_remote_snapshot(
+            "remote",
+            json.loads(encoded),
+            remote_host_id=changed_host,
+            schema_version=2,
+            protocol_version=2,
+            observed_at=130,
+            received_at=140,
+        )
+    assert registry.get_remote("remote")["remote_host_id"] == REMOTE_HOST_ID
 
 
 def test_registry_rejects_nested_transactions_and_use_after_close(tmp_path) -> None:

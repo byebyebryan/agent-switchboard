@@ -22,6 +22,7 @@ from agent_switchboard.domain import HostId, SessionKey
 from agent_switchboard.protocol import (
     ErrorRecord,
     ErrorScope,
+    FleetEnvelope,
     PresentationPlan,
     PresentationPlanEnvelope,
     PresentationPlanKind,
@@ -151,7 +152,12 @@ def run_json(
 def test_parser_requires_json_and_retains_global_version(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    for arguments in (["snapshot"], ["list"], ["prepare-open", "invalid"]):
+    for arguments in (
+        ["snapshot"],
+        ["list"],
+        ["fleet"],
+        ["prepare-open", "invalid"],
+    ):
         with pytest.raises(SystemExit) as exit_info:
             main(arguments)
         assert exit_info.value.code == 2
@@ -161,6 +167,19 @@ def test_parser_requires_json_and_retains_global_version(
         main(["--version"])
     assert exit_info.value.code == 0
     assert capsys.readouterr().out == f"swbctl {__version__}\n"
+
+
+def test_fleet_cli_emits_one_local_host_without_network(
+    cli_environment: CliEnvironment,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    assert main(["fleet", "--json"]) == 0
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    fleet = FleetEnvelope.from_json(captured.out)
+    assert len(fleet.hosts) == 1
+    assert fleet.hosts[0].source.value == "local"
+    assert fleet.hosts[0].snapshot is not None
 
 
 def test_tui_command_is_lazy_and_returns_the_frontend_status(

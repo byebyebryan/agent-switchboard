@@ -39,6 +39,7 @@ only-include = [
   "docs/phase-4b-plan.md",
   "docs/phase-4c-plan.md",
   "docs/phase-4d-plan.md",
+  "docs/phase-5-plan.md",
 ]
 
 [tool.pytest.ini_options]

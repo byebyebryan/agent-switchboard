@@ -34,6 +34,14 @@ def parse_config(data: bytes | str, *, host_id: HostId):
     return _parse_config(prefix + data, host_id=host_id)
 
 
+def test_remote_catalog_is_structurally_bounded() -> None:
+    document = "\n".join(
+        f'[remotes.r{index}]\nssh_target = "r{index}.lan"' for index in range(33)
+    )
+    with pytest.raises(ConfigError, match="more than 32"):
+        parse_config(document, host_id=HOST_A)
+
+
 def full_config(path: Path) -> str:
     return f'''
 config_version = 2

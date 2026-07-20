@@ -61,6 +61,8 @@ MAX_AGENT_PROJECT_SESSIONS = 50
 MAX_AGENT_SEARCH_RESULTS = 20
 MAX_AGENT_SEARCH_QUERY = 256
 MAX_AGENT_MEMORY_TEXT_BYTES = 64 * 1024
+FLEET_VERSION = 1
+MAX_FLEET_REMOTES = 32
 
 _SENSITIVE_KEY_PARTS = (
     "accesskey",
@@ -169,6 +171,17 @@ class SessionActionStatus(StrEnum):
     STOPPED = "stopped"
     ALREADY_STOPPED = "already_stopped"
     BLOCKED = "blocked"
+
+
+class FleetSource(StrEnum):
+    LOCAL = "local"
+    REMOTE = "remote"
+
+
+class FleetReachability(StrEnum):
+    ONLINE = "online"
+    OFFLINE = "offline"
+    UNKNOWN = "unknown"
 
 
 def _decode(raw: str | bytes | bytearray) -> Mapping[str, Any]:
@@ -2756,6 +2769,239 @@ class SnapshotEnvelope:
                 "surfaces": list(self.surfaces),
                 "capabilities": [item.to_dict() for item in self.capabilities],
                 "errors": [item.to_dict() for item in self.errors],
+            }
+        )
+
+    def to_dict(self) -> dict[str, JsonValue]:
+        normalized = type(self).from_dict(self._raw_dict())
+        return normalized._raw_dict()
+
+    def to_json(self) -> str:
+        return _dump(self.to_dict(), allow_explicit_multiline=True)
+
+
+@dataclass(frozen=True, slots=True)
+class FleetError:
+    code: str
+    message: str
+    retryable: bool
+
+    @classmethod
+    def from_dict(cls, value: object, path: str = "fleet error") -> Self:
+        table = _object(value, path)
+        code = _string(_required(table, "code", path), f"{path}.code", maximum=128)
+        message = _string(
+            _required(table, "message", path),
+            f"{path}.message",
+            maximum=2048,
+        )
+        assert code is not None and message is not None
+        return cls(
+            code=code,
+            message=message,
+            retryable=_boolean(
+                _required(table, "retryable", path), f"{path}.retryable"
+            ),
+        )
+
+    def to_dict(self) -> dict[str, JsonValue]:
+        return {
+            "code": self.code,
+            "message": self.message,
+            "retryable": self.retryable,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class FleetHost:
+    source: FleetSource
+    remote_name: str | None
+    host_id: HostId | None
+    display_name: str
+    reachability: FleetReachability
+    snapshot_observed_at: int | None
+    snapshot_received_at: int | None
+    last_attempt_at: int | None
+    stale: bool
+    error: FleetError | None
+    snapshot: SnapshotEnvelope | None
+
+    @classmethod
+    def from_dict(cls, value: object, path: str = "fleet host") -> Self:
+        table = _object(value, path)
+        try:
+            source = FleetSource(
+                _string(_required(table, "source", path), f"{path}.source")
+            )
+            reachability = FleetReachability(
+                _string(
+                    _required(table, "reachability", path),
+                    f"{path}.reachability",
+                )
+            )
+        except ValueError as exc:
+            raise ProtocolError(f"{path} contains an unsupported enum") from exc
+        remote_name = _string(
+            _required(table, "remoteName", path),
+            f"{path}.remoteName",
+            optional=True,
+            maximum=128,
+        )
+        raw_host_id = _required(table, "hostId", path)
+        host_id = (
+            None
+            if raw_host_id is None
+            else _uuid(raw_host_id, f"{path}.hostId", HostId)
+        )
+        display_name = _string(
+            _required(table, "displayName", path),
+            f"{path}.displayName",
+            maximum=256,
+        )
+        assert display_name is not None
+
+        def optional_integer(key: str) -> int | None:
+            raw = _required(table, key, path)
+            return None if raw is None else _integer(raw, f"{path}.{key}")
+
+        observed_at = optional_integer("snapshotObservedAt")
+        received_at = optional_integer("snapshotReceivedAt")
+        last_attempt_at = optional_integer("lastAttemptAt")
+        stale = _boolean(_required(table, "stale", path), f"{path}.stale")
+        raw_error = _required(table, "error", path)
+        error = (
+            None
+            if raw_error is None
+            else FleetError.from_dict(raw_error, f"{path}.error")
+        )
+        raw_snapshot = _required(table, "snapshot", path)
+        snapshot = (
+            None if raw_snapshot is None else SnapshotEnvelope.from_dict(raw_snapshot)
+        )
+
+        if source is FleetSource.LOCAL:
+            if remote_name is not None:
+                raise ProtocolError(f"{path}.remoteName must be null for local")
+            if host_id is None or snapshot is None:
+                raise ProtocolError(f"{path} local entry requires host and snapshot")
+            if reachability is not FleetReachability.ONLINE or error is not None:
+                raise ProtocolError(f"{path} local entry must be healthy")
+            if stale:
+                raise ProtocolError(f"{path} local entry cannot be stale")
+        elif remote_name is None:
+            raise ProtocolError(f"{path}.remoteName is required for remote")
+
+        if snapshot is None:
+            if any(value is not None for value in (observed_at, received_at)):
+                raise ProtocolError(f"{path} snapshot timestamps require a snapshot")
+            if reachability is FleetReachability.ONLINE:
+                raise ProtocolError(f"{path} online entry requires a snapshot")
+        else:
+            if host_id != snapshot.host.host_id:
+                raise ProtocolError(f"{path}.hostId disagrees with snapshot")
+            if display_name != snapshot.host.display_name:
+                raise ProtocolError(f"{path}.displayName disagrees with snapshot")
+            if observed_at != snapshot.generated_at or received_at is None:
+                raise ProtocolError(f"{path} snapshot timestamps are inconsistent")
+        if reachability is FleetReachability.ONLINE and error is not None:
+            raise ProtocolError(f"{path} online entry cannot contain an error")
+        if reachability is FleetReachability.OFFLINE and error is None:
+            raise ProtocolError(f"{path} offline entry requires an error")
+        return cls(
+            source=source,
+            remote_name=remote_name,
+            host_id=host_id,
+            display_name=display_name,
+            reachability=reachability,
+            snapshot_observed_at=observed_at,
+            snapshot_received_at=received_at,
+            last_attempt_at=last_attempt_at,
+            stale=stale,
+            error=error,
+            snapshot=snapshot,
+        )
+
+    def to_dict(self) -> dict[str, JsonValue]:
+        return {
+            "source": self.source.value,
+            "remoteName": self.remote_name,
+            "hostId": None if self.host_id is None else str(self.host_id),
+            "displayName": self.display_name,
+            "reachability": self.reachability.value,
+            "snapshotObservedAt": self.snapshot_observed_at,
+            "snapshotReceivedAt": self.snapshot_received_at,
+            "lastAttemptAt": self.last_attempt_at,
+            "stale": self.stale,
+            "error": None if self.error is None else self.error.to_dict(),
+            "snapshot": None if self.snapshot is None else self.snapshot.to_dict(),
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class FleetEnvelope:
+    generated_at: int
+    local_host_id: HostId
+    hosts: tuple[FleetHost, ...]
+
+    @classmethod
+    def from_dict(cls, value: object) -> Self:
+        table = _object(value, "envelope")
+        _versions(table, allow_explicit_multiline=True)
+        fleet_version = _integer(
+            _required(table, "fleetVersion", "envelope"),
+            "envelope.fleetVersion",
+        )
+        if fleet_version != FLEET_VERSION:
+            raise ProtocolError(
+                f"fleet version {fleet_version} is not supported; "
+                f"expected {FLEET_VERSION}"
+            )
+        local_host_id = _uuid(
+            _required(table, "localHostId", "envelope"),
+            "envelope.localHostId",
+            HostId,
+        )
+        raw_hosts = _array(_required(table, "hosts", "envelope"), "envelope.hosts")
+        if not raw_hosts or len(raw_hosts) > MAX_FLEET_REMOTES + 1:
+            raise ProtocolError("envelope.hosts has an invalid bounded count")
+        hosts = tuple(
+            FleetHost.from_dict(item, f"envelope.hosts[{index}]")
+            for index, item in enumerate(raw_hosts)
+        )
+        if hosts[0].source is not FleetSource.LOCAL:
+            raise ProtocolError("envelope.hosts[0] must be local")
+        if hosts[0].host_id != local_host_id:
+            raise ProtocolError("envelope.localHostId disagrees with local entry")
+        if any(host.source is not FleetSource.REMOTE for host in hosts[1:]):
+            raise ProtocolError("envelope contains more than one local entry")
+        remote_names = [host.remote_name or "" for host in hosts[1:]]
+        if remote_names != sorted(remote_names):
+            raise ProtocolError("envelope remote entries are not ordered by alias")
+        if len(remote_names) != len(set(remote_names)):
+            raise ProtocolError("envelope contains duplicate remote aliases")
+        known_ids = [host.host_id for host in hosts if host.host_id is not None]
+        if len(known_ids) != len(set(known_ids)):
+            raise ProtocolError("envelope contains duplicate known host IDs")
+        return cls(
+            generated_at=_integer(
+                _required(table, "generatedAt", "envelope"),
+                "envelope.generatedAt",
+            ),
+            local_host_id=local_host_id,
+            hosts=hosts,
+        )
+
+    @classmethod
+    def from_json(cls, raw: str | bytes | bytearray) -> Self:
+        return cls.from_dict(_decode(raw))
+
+    def _raw_dict(self) -> dict[str, JsonValue]:
+        return _envelope(
+            {
+                "fleetVersion": FLEET_VERSION,
+                "generatedAt": self.generated_at,
+                "localHostId": str(self.local_host_id),
+                "hosts": [host.to_dict() for host in self.hosts],
             }
         )
 

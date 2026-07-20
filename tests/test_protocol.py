@@ -20,6 +20,7 @@ from agent_switchboard.protocol import (
     ErrorEnvelope,
     ErrorRecord,
     ErrorScope,
+    FleetEnvelope,
     IncompatibleProtocolError,
     IncompatibleSchemaError,
     PresentationPlan,
@@ -46,6 +47,7 @@ SESSION_KEY = f"{HOST}:codex:{SESSION_ID}"
 CLAUDE_SESSION_KEY = SessionKey.parse(f"{HOST}:claude:{SESSION_ID}")
 HANDOFF_ONE = "77777777-7777-4777-8777-777777777777"
 HANDOFF_TWO = "88888888-8888-4888-8888-888888888888"
+REMOTE_HOST = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
 
 
 def session_detail_value() -> dict[str, object]:
@@ -87,6 +89,81 @@ def session_detail_value() -> dict[str, object]:
         ],
         "handoffsTruncated": False,
     }
+
+
+def fleet_value() -> dict[str, object]:
+    local = json.loads((FIXTURES / "snapshot.json").read_text())
+    remote = json.loads(json.dumps(local).replace(str(HOST), REMOTE_HOST))
+    remote["host"]["displayName"] = "snap"
+    remote["generatedAt"] = 90
+    return {
+        "schemaVersion": 2,
+        "protocolVersion": 2,
+        "fleetVersion": 1,
+        "generatedAt": 100,
+        "localHostId": str(HOST),
+        "hosts": [
+            {
+                "source": "local",
+                "remoteName": None,
+                "hostId": str(HOST),
+                "displayName": local["host"]["displayName"],
+                "reachability": "online",
+                "snapshotObservedAt": local["generatedAt"],
+                "snapshotReceivedAt": 100,
+                "lastAttemptAt": 100,
+                "stale": False,
+                "error": None,
+                "snapshot": local,
+            },
+            {
+                "source": "remote",
+                "remoteName": "snap",
+                "hostId": REMOTE_HOST,
+                "displayName": "snap",
+                "reachability": "offline",
+                "snapshotObservedAt": 90,
+                "snapshotReceivedAt": 95,
+                "lastAttemptAt": 99,
+                "stale": True,
+                "error": {
+                    "code": "ssh_unreachable",
+                    "message": "The remote is unavailable.",
+                    "retryable": True,
+                },
+                "snapshot": remote,
+            },
+        ],
+    }
+
+
+def test_fleet_round_trip_preserves_independent_host_snapshots() -> None:
+    fleet = FleetEnvelope.from_dict(fleet_value())
+    assert FleetEnvelope.from_json(fleet.to_json()) == fleet
+    assert fleet.hosts[0].snapshot is not None
+    assert fleet.hosts[1].snapshot is not None
+    assert fleet.hosts[0].snapshot.host.host_id == HOST
+    assert str(fleet.hosts[1].snapshot.host.host_id) == REMOTE_HOST
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        lambda value: value.__setitem__("fleetVersion", 2),
+        lambda value: value["hosts"].reverse(),
+        lambda value: value["hosts"][1].__setitem__("remoteName", None),
+        lambda value: value["hosts"][1].__setitem__("hostId", str(HOST)),
+        lambda value: value["hosts"][1].__setitem__("snapshotObservedAt", 91),
+    ],
+)
+def test_fleet_rejects_version_order_routing_and_timestamp_conflicts(
+    mutation: object,
+) -> None:
+    value = fleet_value()
+    assert callable(mutation)
+    mutation(value)
+    with pytest.raises(ProtocolError):
+        FleetEnvelope.from_dict(value)
 
 
 @pytest.mark.parametrize(

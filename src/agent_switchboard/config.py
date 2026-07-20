@@ -36,6 +36,7 @@ from .paths import config_path, load_or_create_host_id
 from .repository_discovery import RepositoryDiscoveryError, probe_git_repository
 
 _MAX_CONTEXT_SOURCES = 32
+MAX_REMOTES = 32
 _DEFAULT_HOOK_LATENCY_BUDGET_MS = 125
 _ALIAS_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
 _TMUX_PREFIX_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,31}$")
@@ -263,6 +264,8 @@ def _parse_providers(raw: object) -> tuple[ProviderConfig, ...]:
 
 def _parse_remotes(raw: object) -> tuple[RemoteConfig, ...]:
     table = _table(raw, "remotes")
+    if len(table) > MAX_REMOTES:
+        _fail("remotes", f"contains more than {MAX_REMOTES} entries")
     remotes: list[RemoteConfig] = []
     for alias in sorted(table):
         if not _ALIAS_RE.fullmatch(alias):
