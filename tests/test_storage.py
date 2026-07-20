@@ -29,6 +29,7 @@ from agent_switchboard.storage import (
     RequestConflict,
     StorageError,
     TaskConflict,
+    handoff_content_hash,
     launch_request_fingerprint,
 )
 
@@ -223,6 +224,99 @@ def test_task_creation_and_launch_reservation_are_atomic_and_idempotent(
             expires_at=220,
         )
     assert missing_task.value.code == "task_required"
+
+
+def test_imported_handoff_task_creation_and_launch_are_atomic_and_idempotent(
+    registry: Registry,
+) -> None:
+    registry.upsert_host(REMOTE_HOST_ID, "remote", observed_at=80)
+    task_id = stable_uuid("imported-continuation-task")
+    handoff_id = stable_uuid("imported-continuation-handoff")
+    request_id = stable_uuid("imported-continuation-request")
+    summary = "Remote work is wrapped and ready to move."
+    next_action = "Continue from the imported handoff."
+    request = new_request() | {
+        "task_id": task_id,
+        "source_handoff_id": handoff_id,
+    }
+    creation = {
+        "task_id": task_id,
+        "title": "Imported continuation",
+        "purpose": "Move work between pinned hosts",
+        "preferred_provider": "codex",
+    }
+    imported = {
+        "source_host_id": REMOTE_HOST_ID,
+        "source_project_id": PROJECT_ID,
+        "source_task_id": stable_uuid("imported-source-task"),
+        "source_session_key": REMOTE_SESSION_KEY,
+        "handoff_id": handoff_id,
+        "sequence": 4,
+        "summary": summary,
+        "next_action": next_action,
+        "created_at": 70,
+        "content_hash": handoff_content_hash(summary, next_action),
+    }
+
+    first = registry.reserve_launch(
+        request,
+        request_id=request_id,
+        launch_id=stable_uuid("imported-continuation-launch"),
+        lease_owner="import-test",
+        capability_hash=digest("imported-continuation"),
+        task_create=creation,
+        imported_handoff=imported,
+        created_at=100,
+        expires_at=200,
+    )
+    retry = registry.reserve_launch(
+        request,
+        request_id=request_id,
+        lease_owner="import-retry",
+        capability_hash=digest("ignored-import-retry"),
+        task_create=creation,
+        imported_handoff=imported,
+        created_at=110,
+        expires_at=210,
+    )
+
+    assert first.kind == "created"
+    assert retry.kind == "idempotent"
+    assert retry.launch["launch_id"] == first.launch["launch_id"]
+    assert retry.launch["source_handoff_id"] == handoff_id
+    assert registry.get_task(task_id)["title"] == "Imported continuation"
+    assert registry.get_task_imported_handoff(task_id, handoff_id) == {
+        **registry.get_handoff(handoff_id),
+        "source_task_id": imported["source_task_id"],
+        "source_project_id": PROJECT_ID,
+        "imported_at": 100,
+    }
+
+    missing_task_id = stable_uuid("unknown-import-source-task")
+    with pytest.raises(StorageError, match="source host is not configured"):
+        registry.reserve_launch(
+            request
+            | {
+                "task_id": missing_task_id,
+                "source_handoff_id": stable_uuid("unknown-import-handoff"),
+            },
+            request_id=stable_uuid("unknown-import-source-request"),
+            lease_owner="import-unknown",
+            capability_hash=digest("import-unknown"),
+            task_create=creation | {"task_id": missing_task_id},
+            imported_handoff=imported
+            | {
+                "source_host_id": stable_uuid("unknown-import-host"),
+                "source_session_key": (
+                    f"{stable_uuid('unknown-import-host')}:codex:"
+                    f"{stable_uuid('unknown-import-session')}"
+                ),
+                "handoff_id": stable_uuid("unknown-import-handoff"),
+            },
+            created_at=120,
+            expires_at=220,
+        )
+    assert registry.get_task(missing_task_id) is None
 
 
 def remote_snapshot(

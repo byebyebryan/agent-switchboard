@@ -63,6 +63,7 @@ MAX_AGENT_SEARCH_QUERY = 256
 MAX_AGENT_MEMORY_TEXT_BYTES = 64 * 1024
 FLEET_VERSION = 1
 MAX_FLEET_REMOTES = 32
+CONTINUATION_VERSION = 1
 
 _SENSITIVE_KEY_PARTS = (
     "accesskey",
@@ -912,7 +913,7 @@ def _handoff_record(
     content_hash = _hash(_required(table, "contentHash", path), f"{path}.contentHash")
     if content_hash != handoff_content_hash(summary, next_action):
         raise ProtocolError(f"{path}.contentHash does not match handoff content")
-    return {
+    result: dict[str, JsonValue] = {
         "handoffId": _uuid_text(
             _required(table, "handoffId", path),
             f"{path}.handoffId",
@@ -933,6 +934,25 @@ def _handoff_record(
         "createdAt": _integer(_required(table, "createdAt", path), f"{path}.createdAt"),
         "contentHash": content_hash,
     }
+    provenance_fields = {"sourceTaskId", "sourceProjectId", "importedAt"}
+    present_provenance = provenance_fields.intersection(table)
+    if present_provenance and present_provenance != provenance_fields:
+        raise ProtocolError(f"{path} imported provenance is incomplete")
+    if present_provenance:
+        result["sourceTaskId"] = _uuid_text(
+            _required(table, "sourceTaskId", path),
+            f"{path}.sourceTaskId",
+            TaskId,
+        )
+        result["sourceProjectId"] = _uuid_text(
+            _required(table, "sourceProjectId", path),
+            f"{path}.sourceProjectId",
+            ProjectId,
+        )
+        result["importedAt"] = _integer(
+            _required(table, "importedAt", path), f"{path}.importedAt"
+        )
+    return result
 
 
 def _runtime_record(
@@ -2194,13 +2214,23 @@ class AgentHandoffEnvelope:
             _required(handoff_table, "sessionKey", "envelope.handoff"),
             "envelope.handoff.sessionKey",
         )
-        if handoff_key.host_id != HostId(str(caller["hostId"])):
-            raise ProtocolError("envelope.handoff belongs to another host")
         handoff = _handoff_record(
             handoff_table,
             "envelope.handoff",
             expected_session_key=handoff_key,
         )
+        caller_host_id = HostId(str(caller["hostId"]))
+        source_host_id = HostId(str(handoff["sourceHostId"]))
+        if handoff["source"] is HandoffSource.IMPORTED:
+            if (
+                handoff_key.host_id != source_host_id
+                or source_host_id == caller_host_id
+            ):
+                raise ProtocolError(
+                    "envelope imported handoff source identity is inconsistent"
+                )
+        elif handoff_key.host_id != caller_host_id or source_host_id != caller_host_id:
+            raise ProtocolError("envelope.handoff belongs to another host")
         return cls(
             generated_at=_integer(
                 _required(table, "generatedAt", "envelope"), "envelope.generatedAt"
@@ -2769,6 +2799,162 @@ class SnapshotEnvelope:
                 "surfaces": list(self.surfaces),
                 "capabilities": [item.to_dict() for item in self.capabilities],
                 "errors": [item.to_dict() for item in self.errors],
+            }
+        )
+
+    def to_dict(self) -> dict[str, JsonValue]:
+        normalized = type(self).from_dict(self._raw_dict())
+        return normalized._raw_dict()
+
+    def to_json(self) -> str:
+        return _dump(self.to_dict(), allow_explicit_multiline=True)
+
+
+@dataclass(frozen=True, slots=True)
+class ContinuationEnvelope:
+    """One exact immutable handoff exported for cross-host continuation."""
+
+    generated_at: int
+    source_host_id: HostId
+    source_project_id: ProjectId
+    source_task_id: TaskId
+    source_session_key: SessionKey
+    task_title: str
+    task_purpose: str | None
+    handoff_id: HandoffId
+    handoff_sequence: int
+    summary: str
+    next_action: str
+    handoff_created_at: int
+    content_hash: str
+
+    @classmethod
+    def from_dict(cls, value: object) -> Self:
+        table = _object(value, "envelope")
+        _versions(table, allow_explicit_multiline=True)
+        version = _integer(
+            _required(table, "continuationVersion", "envelope"),
+            "envelope.continuationVersion",
+        )
+        if version != CONTINUATION_VERSION:
+            raise ProtocolError(
+                f"continuation version {version} is not supported; "
+                f"expected {CONTINUATION_VERSION}"
+            )
+        source_host_id = _uuid(
+            _required(table, "sourceHostId", "envelope"),
+            "envelope.sourceHostId",
+            HostId,
+        )
+        source_session_key = SessionKey.parse(
+            _string(
+                _required(table, "sourceSessionKey", "envelope"),
+                "envelope.sourceSessionKey",
+                maximum=512,
+            )
+            or ""
+        )
+        if source_session_key.host_id != source_host_id:
+            raise ProtocolError("continuation source session belongs to another host")
+        title = _string(
+            _required(table, "taskTitle", "envelope"),
+            "envelope.taskTitle",
+            maximum=256,
+        )
+        assert title is not None
+        raw_purpose = _required(table, "taskPurpose", "envelope")
+        purpose = (
+            None
+            if raw_purpose is None
+            else _multiline_string(
+                raw_purpose,
+                "envelope.taskPurpose",
+                maximum=4096,
+            ).strip()
+        )
+        if purpose == "":
+            raise ProtocolError("envelope.taskPurpose must be null or non-empty")
+        summary = normalize_handoff_text(
+            _required(table, "summary", "envelope"),
+            "summary",
+        )
+        next_action = normalize_handoff_text(
+            _required(table, "nextAction", "envelope"),
+            "next action",
+        )
+        content_hash = _string(
+            _required(table, "contentHash", "envelope"),
+            "envelope.contentHash",
+            maximum=64,
+        )
+        if (
+            content_hash is None
+            or len(content_hash) != 64
+            or any(character not in "0123456789abcdef" for character in content_hash)
+            or content_hash != handoff_content_hash(summary, next_action)
+        ):
+            raise ProtocolError("continuation content hash is invalid")
+        sequence = _integer(
+            _required(table, "handoffSequence", "envelope"),
+            "envelope.handoffSequence",
+        )
+        if sequence == 0:
+            raise ProtocolError("envelope.handoffSequence must be positive")
+        return cls(
+            generated_at=_integer(
+                _required(table, "generatedAt", "envelope"),
+                "envelope.generatedAt",
+            ),
+            source_host_id=source_host_id,
+            source_project_id=_uuid(
+                _required(table, "sourceProjectId", "envelope"),
+                "envelope.sourceProjectId",
+                ProjectId,
+            ),
+            source_task_id=_uuid(
+                _required(table, "sourceTaskId", "envelope"),
+                "envelope.sourceTaskId",
+                TaskId,
+            ),
+            source_session_key=source_session_key,
+            task_title=title,
+            task_purpose=purpose,
+            handoff_id=_uuid(
+                _required(table, "handoffId", "envelope"),
+                "envelope.handoffId",
+                HandoffId,
+            ),
+            handoff_sequence=sequence,
+            summary=summary,
+            next_action=next_action,
+            handoff_created_at=_integer(
+                _required(table, "handoffCreatedAt", "envelope"),
+                "envelope.handoffCreatedAt",
+            ),
+            content_hash=content_hash,
+        )
+
+    @classmethod
+    def from_json(cls, raw: str | bytes | bytearray) -> Self:
+        return cls.from_dict(_decode(raw))
+
+    def _raw_dict(self) -> dict[str, JsonValue]:
+        return _envelope(
+            {
+                "continuationVersion": CONTINUATION_VERSION,
+                "generatedAt": self.generated_at,
+                "sourceHostId": str(self.source_host_id),
+                "sourceProjectId": str(self.source_project_id),
+                "sourceTaskId": str(self.source_task_id),
+                "sourceSessionKey": str(self.source_session_key),
+                "taskTitle": self.task_title,
+                "taskPurpose": self.task_purpose,
+                "handoffId": str(self.handoff_id),
+                "handoffSequence": self.handoff_sequence,
+                "summary": self.summary,
+                "nextAction": self.next_action,
+                "handoffCreatedAt": self.handoff_created_at,
+                "contentHash": self.content_hash,
             }
         )
 

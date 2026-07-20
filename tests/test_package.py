@@ -102,6 +102,7 @@ def test_ci_smokes_wheel_and_source_distribution_installations() -> None:
     assert "migrations/v0005_history_launch.py" in workflow
     assert "migrations/v0007_repository_checkouts.py" in workflow
     assert "migrations/v0008_tasks.py" in workflow
+    assert "migrations/v0009_imported_task_handoffs.py" in workflow
     assert 'snapshot --help | grep -F -- "--reconcile {none,live,full}"' in workflow
     assert 'list --help | grep -F -- "--refresh"' in workflow
     assert 'show --help | grep -F -- "--handoff-limit"' in workflow
@@ -141,6 +142,9 @@ def test_ci_smokes_wheel_and_source_distribution_installations() -> None:
     assert '"agent_switchboard/migrations/v0006_agent_tools.py"' in verifier
     assert '"agent_switchboard/migrations/v0007_repository_checkouts.py"' in verifier
     assert '"agent_switchboard/migrations/v0008_tasks.py"' in verifier
+    assert '"agent_switchboard/migrations/v0009_imported_task_handoffs.py"' in (
+        verifier
+    )
 
 
 def test_cli_help_and_version(capsys: pytest.CaptureFixture[str]) -> None:

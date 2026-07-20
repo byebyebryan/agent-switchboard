@@ -36,6 +36,7 @@ _REMOTE_COMMAND_OPTIONS = frozenset(
         "--can-launch-terminal",
         "--checkout",
         "--client",
+        "--continue-json-stdin",
         "--create",
         "--has-current-terminal",
         "--json",

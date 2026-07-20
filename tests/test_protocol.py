@@ -17,6 +17,7 @@ from agent_switchboard.protocol import (
     MAX_JSON_BYTES,
     Capability,
     CapabilityEnvelope,
+    ContinuationEnvelope,
     ErrorEnvelope,
     ErrorRecord,
     ErrorScope,
@@ -135,6 +136,55 @@ def fleet_value() -> dict[str, object]:
             },
         ],
     }
+
+
+def continuation_value() -> dict[str, object]:
+    summary = "Source work is wrapped.\nThe contract is exact."
+    next_action = "Create the destination task from this handoff."
+    return {
+        "schemaVersion": 2,
+        "protocolVersion": 2,
+        "continuationVersion": 1,
+        "generatedAt": 100,
+        "sourceHostId": REMOTE_HOST,
+        "sourceProjectId": PROJECT,
+        "sourceTaskId": TASK,
+        "sourceSessionKey": f"{REMOTE_HOST}:claude:{SESSION_ID}",
+        "taskTitle": "Move the task",
+        "taskPurpose": "Continue on the destination host",
+        "handoffId": HANDOFF_ONE,
+        "handoffSequence": 2,
+        "summary": summary,
+        "nextAction": next_action,
+        "handoffCreatedAt": 90,
+        "contentHash": handoff_content_hash(summary, next_action),
+    }
+
+
+def test_continuation_round_trip_preserves_exact_handoff_and_task_context() -> None:
+    continuation = ContinuationEnvelope.from_dict(continuation_value())
+    assert ContinuationEnvelope.from_json(continuation.to_json()) == continuation
+    assert continuation.source_host_id == HostId(REMOTE_HOST)
+    assert continuation.summary == "Source work is wrapped.\nThe contract is exact."
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        lambda value: value.__setitem__("continuationVersion", 2),
+        lambda value: value.__setitem__("contentHash", "a" * 64),
+        lambda value: value.__setitem__("sourceHostId", str(HOST)),
+        lambda value: value.__setitem__("handoffSequence", 0),
+    ],
+)
+def test_continuation_rejects_version_hash_identity_and_sequence_conflicts(
+    mutation: object,
+) -> None:
+    value = continuation_value()
+    assert callable(mutation)
+    mutation(value)
+    with pytest.raises(ProtocolError):
+        ContinuationEnvelope.from_dict(value)
 
 
 def test_fleet_round_trip_preserves_independent_host_snapshots() -> None:

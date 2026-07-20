@@ -16,6 +16,7 @@ from agent_switchboard.domain import (
     Project,
     ProjectId,
     ProviderId,
+    handoff_content_hash,
 )
 from agent_switchboard.presentation import (
     PREPARE_CLAUDE_CAPABILITY_HASH,
@@ -46,6 +47,7 @@ REQUEST_ID = "44444444-4444-4444-8444-444444444444"
 PROJECT_ID = "55555555-5555-4555-8555-555555555555"
 LOCATION_ID = "66666666-6666-4666-8666-666666666666"
 TASK_ID = "67666666-6666-4666-8666-666666666666"
+REMOTE_HOST_ID = "88888888-8888-4888-8888-888888888888"
 NEW_SESSION_ID = "77777777-7777-4777-8777-777777777777"
 NEW_SESSION_KEY = f"{HOST_ID}:codex:{NEW_SESSION_ID}"
 NEW_CLAUDE_SESSION_KEY = f"{HOST_ID}:claude:{NEW_SESSION_ID}"
@@ -450,6 +452,52 @@ def test_new_continuation_resolves_exact_handoff_and_retains_lineage(
     assert stored["checkout_id"] == LOCATION_ID
     assert stored["provider"] == "codex"
 
+
+def test_imported_continuation_creates_destination_task_and_exact_lineage(
+    registry: Registry, tmp_path: Path
+) -> None:
+    project_path = tmp_path / "project"
+    project_path.mkdir()
+    tmux = FakeTmux()
+    launch = new_coordinator(registry, tmux, project_path, clock=100)
+    registry.upsert_host(REMOTE_HOST_ID, "remote", observed_at=50)
+    task_id = stable_uuid("imported-destination-task")
+    handoff_id = stable_uuid("imported-source-handoff")
+    summary = "The source task is ready to move."
+    next_action = "Continue on this host."
+    imported = {
+        "source_host_id": REMOTE_HOST_ID,
+        "source_project_id": PROJECT_ID,
+        "source_task_id": stable_uuid("imported-source-task"),
+        "source_session_key": (
+            f"{REMOTE_HOST_ID}:claude:{stable_uuid('imported-source-session')}"
+        ),
+        "handoff_id": handoff_id,
+        "sequence": 2,
+        "summary": summary,
+        "next_action": next_action,
+        "created_at": 50,
+        "content_hash": handoff_content_hash(summary, next_action),
+    }
+
+    plan = launch.prepare_task_create(
+        task_id=task_id,
+        project_id=PROJECT_ID,
+        title="Imported destination",
+        purpose="Prove the cross-host seam",
+        checkout_id=LOCATION_ID,
+        provider="codex",
+        request_id=REQUEST_ID,
+        context=ATTACH_CONTEXT,
+        imported_handoff=imported,
+    )
+
+    assert plan.kind is PresentationPlanKind.ATTACH
+    stored = registry.list_launches()[0]
+    assert stored["task_id"] == task_id
+    assert stored["source_handoff_id"] == handoff_id
+    assert registry.get_task_imported_handoff(task_id, handoff_id)["summary"] == summary
+
     tmux.attached = True
 
     def capture(_executable: str, _argv: Sequence[str]) -> None:
@@ -471,7 +519,7 @@ def test_new_continuation_resolves_exact_handoff_and_retains_lineage(
         observed_at=150,
     )
     assert bound.kind == "bound"
-    assert bound.session["continued_from_handoff_id"] == handoff.handoff["handoff_id"]
+    assert bound.session["continued_from_handoff_id"] == handoff_id
 
 
 def test_new_continuation_blocks_without_handoff_or_matching_checkout(

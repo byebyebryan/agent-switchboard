@@ -49,6 +49,7 @@ from .presentation import (
     select_surface,
 )
 from .protocol import (
+    ContinuationEnvelope,
     FleetEnvelope,
     PresentationPlanEnvelope,
     SessionActionEnvelope,
@@ -69,7 +70,7 @@ from .storage import DEFAULT_HANDOFF_LIMIT, MAX_HANDOFF_LIMIT, Registry, Storage
 from .tmux import TmuxController, TmuxError
 
 _MAX_ERROR_MESSAGE_LENGTH = 1_024
-_MAX_REMOTE_ACTION_INPUT_BYTES = 16 * 1024
+_MAX_REMOTE_ACTION_INPUT_BYTES = MAX_HANDOFF_INPUT_BYTES
 _EPHEMERAL_CONFIG_HOST_ID = HostId("00000000-0000-4000-8000-000000000000")
 
 
@@ -213,6 +214,13 @@ def build_parser() -> argparse.ArgumentParser:
         task_handoff.add_argument("task_id")
         task_handoff.add_argument("--json-stdin", action="store_true", required=True)
         task_handoff.add_argument("--json", action="store_true")
+    task_export = task_actions.add_parser(
+        "export-handoff",
+        help="export one exact local task handoff for cross-host continuation",
+    )
+    task_export.add_argument("task_id")
+    task_export.add_argument("--handoff", required=True)
+    task_export.add_argument("--json", action="store_true", required=True)
     task_reopen = task_actions.add_parser("reopen", help="reopen a closed task")
     task_reopen.add_argument("task_id")
     task_reopen.add_argument("--json", action="store_true")
@@ -346,7 +354,9 @@ def build_parser() -> argparse.ArgumentParser:
     prepare_task.add_argument("task_id")
     prepare_task.add_argument("--host")
     prepare_task.add_argument("--create", action="store_true")
-    prepare_task.add_argument("--json-stdin", action="store_true")
+    prepare_task_input = prepare_task.add_mutually_exclusive_group()
+    prepare_task_input.add_argument("--json-stdin", action="store_true")
+    prepare_task_input.add_argument("--continue-json-stdin", action="store_true")
     prepare_task.add_argument("--project")
     prepare_task.add_argument("--title")
     prepare_task.add_argument("--purpose")
@@ -626,7 +636,43 @@ def _prepare_open(arguments: argparse.Namespace) -> str:
 
 def _prepare_task_input(
     arguments: argparse.Namespace,
-) -> tuple[str | None, str | None, str | None, str | None, str | None]:
+) -> tuple[
+    str | None,
+    str | None,
+    str | None,
+    str | None,
+    str | None,
+    ContinuationEnvelope | None,
+]:
+    if arguments.continue_json_stdin:
+        if (
+            not arguments.create
+            or arguments.project is not None
+            or arguments.title is not None
+            or arguments.purpose is not None
+        ):
+            raise PresentationError(
+                "--continue-json-stdin requires --create and supplies project, "
+                "title, and purpose"
+            )
+        if arguments.provider is None:
+            raise PresentationError("an imported continuation requires --provider")
+        stream = getattr(sys.stdin, "buffer", sys.stdin)
+        raw = stream.read(_MAX_REMOTE_ACTION_INPUT_BYTES + 1)
+        if len(raw) > _MAX_REMOTE_ACTION_INPUT_BYTES:
+            raise PresentationError("continuation input is too large")
+        try:
+            continuation = ContinuationEnvelope.from_json(raw)
+        except ValidationError as error:
+            raise PresentationError("continuation input is incompatible") from error
+        return (
+            str(continuation.source_project_id),
+            continuation.task_title,
+            continuation.task_purpose,
+            arguments.checkout,
+            arguments.provider,
+            continuation,
+        )
     if not arguments.json_stdin:
         return (
             arguments.project,
@@ -634,6 +680,7 @@ def _prepare_task_input(
             arguments.purpose,
             arguments.checkout,
             arguments.provider,
+            None,
         )
     if not arguments.create or any(
         value is not None
@@ -676,6 +723,7 @@ def _prepare_task_input(
         value["purpose"],
         value["checkout"],
         value["provider"],
+        None,
     )
 
 
@@ -684,12 +732,21 @@ def _prepare_task(arguments: argparse.Namespace) -> str:
     config = load_config(host_id=host_id)
     target_host_id = _action_host(arguments, host_id)
     context = _presentation_context(arguments)
-    project, title, purpose, checkout, provider = _prepare_task_input(arguments)
+    project, title, purpose, checkout, provider, continuation = _prepare_task_input(
+        arguments
+    )
     if target_host_id != host_id:
         remote = _remote_endpoint(config, target_host_id)
         remote_arguments = ["prepare-task", arguments.task_id]
         stdin: bytes | None = None
-        if arguments.create:
+        if continuation is not None:
+            remote_arguments.extend(("--create", "--continue-json-stdin"))
+            if checkout is not None:
+                remote_arguments.extend(("--checkout", checkout))
+            assert provider is not None
+            remote_arguments.extend(("--provider", provider))
+            stdin = continuation.to_json().encode("utf-8")
+        elif arguments.create:
             remote_arguments.extend(("--create", "--json-stdin"))
             stdin = json.dumps(
                 {
@@ -720,6 +777,25 @@ def _prepare_task(arguments: argparse.Namespace) -> str:
         return _validate_remote_plan(envelope, target_host_id).to_json()
     with Registry(database_path()) as registry:
         materialize_configured_projects(registry, str(host_id), config)
+        imported_handoff: dict[str, object] | None = None
+        if continuation is not None:
+            if continuation.source_host_id == host_id:
+                raise PresentationError(
+                    "an imported continuation must come from another host"
+                )
+            resolve_remote_host(registry, config, continuation.source_host_id)
+            imported_handoff = {
+                "source_host_id": str(continuation.source_host_id),
+                "source_project_id": str(continuation.source_project_id),
+                "source_task_id": str(continuation.source_task_id),
+                "source_session_key": str(continuation.source_session_key),
+                "handoff_id": str(continuation.handoff_id),
+                "sequence": continuation.handoff_sequence,
+                "summary": continuation.summary,
+                "next_action": continuation.next_action,
+                "created_at": continuation.handoff_created_at,
+                "content_hash": continuation.content_hash,
+            }
         reconcile_live(registry, str(host_id))
         coordinator = _coordinator(registry, host_id=host_id, config=config)
         if arguments.create:
@@ -736,6 +812,7 @@ def _prepare_task(arguments: argparse.Namespace) -> str:
                 provider=provider,
                 request_id=arguments.request_id,
                 context=context,
+                imported_handoff=imported_handoff,
             )
         else:
             if any(
@@ -1018,6 +1095,32 @@ def _task_command(arguments: argparse.Namespace) -> str:
                 ),
                 as_json=arguments.json,
             )
+        if action == "export-handoff":
+            task, session, handoff = registry.export_task_handoff(
+                arguments.task_id,
+                arguments.handoff,
+                host_id=str(host_id),
+            )
+            return ContinuationEnvelope.from_dict(
+                {
+                    "schemaVersion": 2,
+                    "protocolVersion": 2,
+                    "continuationVersion": 1,
+                    "generatedAt": time.time_ns() // 1_000_000,
+                    "sourceHostId": str(host_id),
+                    "sourceProjectId": task["project_id"],
+                    "sourceTaskId": task["task_id"],
+                    "sourceSessionKey": session["session_key"],
+                    "taskTitle": task["title"],
+                    "taskPurpose": task["purpose"],
+                    "handoffId": handoff["handoff_id"],
+                    "handoffSequence": handoff["sequence"],
+                    "summary": handoff["summary"],
+                    "nextAction": handoff["next_action"],
+                    "handoffCreatedAt": handoff["created_at"],
+                    "contentHash": handoff["content_hash"],
+                }
+            ).to_json()
         if action == "create":
             task = registry.create_task(
                 task_id=arguments.task_id,

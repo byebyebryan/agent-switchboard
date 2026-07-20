@@ -204,6 +204,7 @@ def audit_contents(wheel: Path, sdist: Path) -> dict[str, object]:
         "agent_switchboard/migrations/v0006_agent_tools.py",
         "agent_switchboard/migrations/v0007_repository_checkouts.py",
         "agent_switchboard/migrations/v0008_tasks.py",
+        "agent_switchboard/migrations/v0009_imported_task_handoffs.py",
     }
     if not required_migrations <= set(wheel_content):
         raise DistributionError("wheel is missing migration modules")

@@ -2929,6 +2929,97 @@ class Registry:
             ).fetchone()
         )
 
+    def export_task_handoff(
+        self,
+        task_id: str,
+        handoff_id: str,
+        *,
+        host_id: str,
+    ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+        """Read one exact local task handoff for a bounded export envelope."""
+
+        task_id = _canonical_uuid_id(task_id, TaskId, "task_id")
+        handoff_id = _canonical_uuid_id(handoff_id, HandoffId, "handoff_id")
+        host_id = _canonical_host_id(host_id)
+        with self.transaction() as connection:
+            task = connection.execute(
+                "SELECT * FROM tasks WHERE task_id = ? AND host_id = ?",
+                (task_id, host_id),
+            ).fetchone()
+            row = connection.execute(
+                """
+                SELECT h.*, s.task_id AS session_task_id, s.host_id AS session_host_id,
+                       s.project_id AS session_project_id
+                FROM handoffs AS h
+                JOIN sessions AS s ON s.session_key = h.session_key
+                WHERE h.handoff_id = ?
+                """,
+                (handoff_id,),
+            ).fetchone()
+            if (
+                task is None
+                or row is None
+                or row["source"] == "imported"
+                or row["session_task_id"] != task_id
+                or row["session_host_id"] != host_id
+                or row["session_project_id"] != task["project_id"]
+            ):
+                raise StorageError("handoff does not belong to the local task")
+        handoff = dict(row)
+        handoff.pop("session_task_id", None)
+        handoff.pop("session_host_id", None)
+        handoff.pop("session_project_id", None)
+        session = self.get_session(str(handoff["session_key"]))
+        assert session is not None
+        return dict(task), session, handoff
+
+    def list_task_imported_handoffs(
+        self,
+        task_id: str,
+        *,
+        limit: int = DEFAULT_HANDOFF_LIMIT,
+    ) -> list[dict[str, Any]]:
+        task_id = _canonical_uuid_id(task_id, TaskId, "task_id")
+        if (
+            isinstance(limit, bool)
+            or not isinstance(limit, int)
+            or not 1 <= limit <= MAX_HANDOFF_LIMIT
+        ):
+            raise StorageError(f"limit must be between 1 and {MAX_HANDOFF_LIMIT}")
+        rows = self.connection.execute(
+            """
+            SELECT h.*, link.source_task_id, link.source_project_id,
+                   link.imported_at
+            FROM task_imported_handoffs AS link
+            JOIN handoffs AS h ON h.handoff_id = link.handoff_id
+            WHERE link.task_id = ?
+            ORDER BY link.imported_at DESC, h.handoff_id
+            LIMIT ?
+            """,
+            (task_id, limit),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def get_task_imported_handoff(
+        self,
+        task_id: str,
+        handoff_id: str,
+    ) -> dict[str, Any] | None:
+        task_id = _canonical_uuid_id(task_id, TaskId, "task_id")
+        handoff_id = _canonical_uuid_id(handoff_id, HandoffId, "handoff_id")
+        return _row_dict(
+            self.connection.execute(
+                """
+                SELECT h.*, link.source_task_id, link.source_project_id,
+                       link.imported_at
+                FROM task_imported_handoffs AS link
+                JOIN handoffs AS h ON h.handoff_id = link.handoff_id
+                WHERE link.task_id = ? AND link.handoff_id = ?
+                """,
+                (task_id, handoff_id),
+            ).fetchone()
+        )
+
     def resolve_continuation_source(
         self,
         reference: str,
@@ -3566,6 +3657,7 @@ class Registry:
         created_at: int | None = None,
         source_session_key: str | None = None,
         task_create: Mapping[str, Any] | None = None,
+        imported_handoff: Mapping[str, Any] | None = None,
     ) -> ReservationResult:
         """Reserve a launch, optionally creating its task in the same transaction."""
 
@@ -3656,6 +3748,88 @@ class Registry:
                 "purpose": _normalize_task_purpose(task_create.get("purpose")),
                 "preferred_provider": preferred_provider,
             }
+        normalized_import: dict[str, Any] | None = None
+        if imported_handoff is not None:
+            if normalized_task_create is None or source_session_key is not None:
+                raise ContinuationError(
+                    "continuation_import_context_invalid",
+                    "an imported handoff requires atomic destination task creation",
+                )
+            try:
+                source_host_id = _canonical_host_id(imported_handoff["source_host_id"])
+                source_project_id = _canonical_uuid_id(
+                    imported_handoff["source_project_id"],
+                    ProjectId,
+                    "source_project_id",
+                )
+                source_task_id = _canonical_uuid_id(
+                    imported_handoff["source_task_id"],
+                    TaskId,
+                    "source_task_id",
+                )
+                imported_session_key = str(
+                    _canonical_session_key(imported_handoff["source_session_key"])
+                )
+                imported_handoff_id = _canonical_uuid_id(
+                    imported_handoff["handoff_id"], HandoffId, "handoff_id"
+                )
+                imported_sequence = _nonnegative_integer(
+                    imported_handoff["sequence"], "handoff sequence"
+                )
+                imported_created_at = _nonnegative_integer(
+                    imported_handoff["created_at"], "handoff created_at"
+                )
+                imported_summary = normalize_handoff_text(
+                    imported_handoff["summary"], "summary"
+                )
+                imported_next = normalize_handoff_text(
+                    imported_handoff["next_action"], "next_action"
+                )
+                imported_hash = _require_hash(
+                    imported_handoff["content_hash"], "content_hash"
+                )
+            except KeyError as error:
+                raise ContinuationError(
+                    "continuation_import_incomplete",
+                    f"missing imported handoff field: {error.args[0]}",
+                ) from error
+            if imported_sequence == 0:
+                raise ContinuationError(
+                    "continuation_import_invalid",
+                    "imported handoff sequence must be positive",
+                )
+            parsed_imported_session = SessionKey.parse(imported_session_key)
+            if parsed_imported_session.host_id != HostId(source_host_id):
+                raise ContinuationError(
+                    "continuation_import_host_mismatch",
+                    "imported handoff session belongs to another source host",
+                )
+            if (
+                request.get("source_handoff_id") != imported_handoff_id
+                or request.get("project_id") != source_project_id
+                or normalized_task_create["project_id"] != source_project_id
+            ):
+                raise ContinuationError(
+                    "continuation_import_context_mismatch",
+                    "imported handoff does not match the destination project",
+                )
+            if handoff_content_hash(imported_summary, imported_next) != imported_hash:
+                raise ContinuationError(
+                    "continuation_import_hash_mismatch",
+                    "imported handoff content hash is invalid",
+                )
+            normalized_import = {
+                "source_host_id": source_host_id,
+                "source_project_id": source_project_id,
+                "source_task_id": source_task_id,
+                "source_session_key": imported_session_key,
+                "handoff_id": imported_handoff_id,
+                "sequence": imported_sequence,
+                "summary": imported_summary,
+                "next_action": imported_next,
+                "created_at": imported_created_at,
+                "content_hash": imported_hash,
+            }
 
         with self.transaction(immediate=True) as connection:
             placeholders = ", ".join("?" for _ in _LEASED_LAUNCH_STATES)
@@ -3735,6 +3909,73 @@ class Registry:
                     raise RequestConflict(
                         "request ID task creation parameters do not match"
                     )
+            if normalized_import is not None:
+                assert normalized_task_create is not None
+                if (
+                    connection.execute(
+                        "SELECT 1 FROM hosts WHERE host_id = ? AND is_local = 0",
+                        (normalized_import["source_host_id"],),
+                    ).fetchone()
+                    is None
+                ):
+                    raise ContinuationError(
+                        "continuation_source_host_unknown",
+                        "the imported handoff source host is not configured",
+                    )
+                handoff = self._append_handoff_row(
+                    connection,
+                    session_key=normalized_import["source_session_key"],
+                    summary=normalized_import["summary"],
+                    source="imported",
+                    source_host_id=normalized_import["source_host_id"],
+                    next_action=normalized_import["next_action"],
+                    handoff_id=normalized_import["handoff_id"],
+                    sequence=normalized_import["sequence"],
+                    created_at=normalized_import["created_at"],
+                    content_hash=normalized_import["content_hash"],
+                )
+                existing_link = connection.execute(
+                    """
+                    SELECT * FROM task_imported_handoffs WHERE handoff_id = ?
+                    """,
+                    (normalized_import["handoff_id"],),
+                ).fetchone()
+                expected_link = {
+                    "task_id": normalized_task_create["task_id"],
+                    "handoff_id": normalized_import["handoff_id"],
+                    "source_task_id": normalized_import["source_task_id"],
+                    "source_project_id": normalized_import["source_project_id"],
+                }
+                if existing_link is None:
+                    try:
+                        connection.execute(
+                            """
+                            INSERT INTO task_imported_handoffs(
+                                task_id, handoff_id, source_task_id,
+                                source_project_id, imported_at
+                            ) VALUES (?, ?, ?, ?, ?)
+                            """,
+                            (
+                                expected_link["task_id"],
+                                expected_link["handoff_id"],
+                                expected_link["source_task_id"],
+                                expected_link["source_project_id"],
+                                timestamp,
+                            ),
+                        )
+                    except sqlite3.IntegrityError as error:
+                        raise ContinuationError(
+                            "continuation_import_conflict",
+                            "the imported handoff conflicts with destination state",
+                        ) from error
+                elif any(
+                    existing_link[field] != value
+                    for field, value in expected_link.items()
+                ):
+                    raise RequestConflict(
+                        "request ID imported handoff parameters do not match"
+                    )
+                request["source_handoff_id"] = str(handoff["handoff_id"])
             if source_session_key is not None:
                 if existing_request is not None:
                     exact_handoff_id = existing_request["source_handoff_id"]
@@ -3788,22 +4029,33 @@ class Registry:
                         "continuation_handoff_not_found",
                         "The selected handoff is not retained.",
                     )
-                source = self._local_session_row(
-                    connection,
-                    host_id=request["host_id"],
-                    session_key=str(handoff["session_key"]),
-                )
                 if handoff["source"] == "imported":
-                    raise ContinuationError(
-                        "continuation_remote_not_supported",
-                        "Imported handoff continuation remains a remote-host feature.",
-                    )
-                for field in ("project_id", "checkout_id", "cwd"):
-                    if source[field] != request.get(field):
+                    link = connection.execute(
+                        """
+                        SELECT * FROM task_imported_handoffs
+                        WHERE task_id = ? AND handoff_id = ?
+                        """,
+                        (request.get("task_id"), request["source_handoff_id"]),
+                    ).fetchone()
+                    if link is None or link["source_project_id"] != request.get(
+                        "project_id"
+                    ):
                         raise ContinuationError(
                             "continuation_source_changed",
-                            "The source session's project checkout changed.",
+                            "The imported handoff is not linked to this task.",
                         )
+                else:
+                    source = self._local_session_row(
+                        connection,
+                        host_id=request["host_id"],
+                        session_key=str(handoff["session_key"]),
+                    )
+                    for field in ("project_id", "checkout_id", "cwd"):
+                        if source[field] != request.get(field):
+                            raise ContinuationError(
+                                "continuation_source_changed",
+                                "The source session's project checkout changed.",
+                            )
             if request["action"] == "new" and existing_request is None:
                 task_id = request.get("task_id")
                 if task_id is None:
@@ -3831,6 +4083,7 @@ class Registry:
                     task is not None
                     and current_session_key is None
                     and request.get("source_handoff_id") is not None
+                    and normalized_import is None
                 ):
                     raise TaskConflict(
                         "task_continuation_conflict",

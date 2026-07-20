@@ -461,7 +461,7 @@ def _configured_scope(
 
 
 def _handoff_record(row: Mapping[str, object]) -> dict[str, object]:
-    return {
+    record = {
         "handoffId": row["handoff_id"],
         "sessionKey": row["session_key"],
         "sequence": row["sequence"],
@@ -472,6 +472,14 @@ def _handoff_record(row: Mapping[str, object]) -> dict[str, object]:
         "createdAt": row["created_at"],
         "contentHash": row["content_hash"],
     }
+    for source, target in (
+        ("source_task_id", "sourceTaskId"),
+        ("source_project_id", "sourceProjectId"),
+        ("imported_at", "importedAt"),
+    ):
+        if row.get(source) is not None:
+            record[target] = row[source]
+    return record
 
 
 def build_agent_context(
@@ -686,6 +694,7 @@ class AgentToolService:
 
     def _task_payload(self, task: Mapping[str, object]) -> dict[str, object]:
         sessions = self.registry.list_task_sessions(str(task["task_id"]))
+        imported = self.registry.list_task_imported_handoffs(str(task["task_id"]))
         return {
             "schemaVersion": 2,
             "protocolVersion": 2,
@@ -693,6 +702,7 @@ class AgentToolService:
             "caller": _caller_record(self.authorized),
             "task": _agent_task_record(task),
             "sessions": [_agent_session_record(session) for session in sessions],
+            "importedHandoffs": [_handoff_record(row) for row in imported],
         }
 
     def task(self) -> dict[str, object]:
@@ -733,6 +743,14 @@ class AgentToolService:
                 _handoff_record(row)
                 for row in self.registry.list_handoffs(
                     str(session["session_key"]), limit=remaining
+                )
+            )
+        remaining = limit - len(handoffs)
+        if remaining > 0:
+            handoffs.extend(
+                _handoff_record(row)
+                for row in self.registry.list_task_imported_handoffs(
+                    str(task["task_id"]), limit=remaining
                 )
             )
         return {
@@ -786,6 +804,23 @@ class AgentToolService:
 
     def handoff(self, handoff_id: str) -> AgentHandoffEnvelope:
         task = self._current_task()
+        imported = self.registry.get_task_imported_handoff(
+            str(task["task_id"]), handoff_id
+        )
+        if imported is not None:
+            caller = self.registry.get_session(str(self.authorized.session_key))
+            assert caller is not None
+            project, _, _ = _configured_scope(self.config, caller)
+            return AgentHandoffEnvelope.from_dict(
+                {
+                    "schemaVersion": 2,
+                    "protocolVersion": 2,
+                    "generatedAt": time.time_ns() // 1_000_000,
+                    "caller": _caller_record(self.authorized),
+                    "projectId": str(project.project_id),
+                    "handoff": _handoff_record(imported),
+                }
+            )
         caller, handoff = self.registry.read_project_handoff(
             str(self.authorized.session_key),
             handoff_id,

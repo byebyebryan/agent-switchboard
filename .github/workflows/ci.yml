@@ -127,6 +127,7 @@ jobs:
               "migrations/v0006_agent_tools.py",
               "migrations/v0007_repository_checkouts.py",
               "migrations/v0008_tasks.py",
+              "migrations/v0009_imported_task_handoffs.py",
           ):
               assert package.joinpath(migration).is_file()
           with TemporaryDirectory() as directory:

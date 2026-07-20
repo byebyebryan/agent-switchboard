@@ -16,6 +16,7 @@ from . import (
     v0006_agent_tools,
     v0007_repository_checkouts,
     v0008_tasks,
+    v0009_imported_task_handoffs,
 )
 
 PROTOCOL_VERSION = 2
@@ -77,6 +78,11 @@ MIGRATIONS = (
         v0008_tasks.NAME,
         v0008_tasks.STATEMENTS,
         requires_foreign_keys_off=v0008_tasks.REQUIRES_FOREIGN_KEYS_OFF,
+    ),
+    Migration(
+        v0009_imported_task_handoffs.VERSION,
+        v0009_imported_task_handoffs.NAME,
+        v0009_imported_task_handoffs.STATEMENTS,
     ),
 )
 CURRENT_SCHEMA_VERSION = MIGRATIONS[-1].version
@@ -225,12 +231,12 @@ def migrate(
     try:
         current = _validated_current(connection, migrations, target_version)
         for migration in migrations:
-            if (
-                migration.version <= current
-                or migration.version > target_version
-                or migration.requires_foreign_keys_off
-            ):
+            if migration.version <= current:
                 continue
+            if migration.version > target_version:
+                break
+            if migration.requires_foreign_keys_off:
+                break
             _apply_migration(connection, migration, applied_at)
             current = migration.version
         connection.execute("COMMIT")
@@ -272,6 +278,28 @@ def migrate(
             connection.execute(
                 f"PRAGMA foreign_keys = {1 if original_foreign_keys else 0}"
             )
+
+    connection.execute("BEGIN IMMEDIATE")
+    try:
+        current = _validated_current(connection, migrations, target_version)
+        for migration in migrations:
+            if migration.version <= current:
+                continue
+            if migration.version > target_version:
+                break
+            if migration.requires_foreign_keys_off:
+                raise MigrationError(
+                    "foreign-key migration is not the next schema version"
+                )
+            if migration.version != current + 1:
+                raise MigrationError("migration is not the next schema version")
+            _apply_migration(connection, migration, applied_at)
+            current = migration.version
+        connection.execute("COMMIT")
+    except BaseException:
+        if connection.in_transaction:
+            connection.execute("ROLLBACK")
+        raise
 
     return current
 

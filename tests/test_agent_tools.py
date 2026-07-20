@@ -54,6 +54,7 @@ REQUEST_ID = "66666666-6666-4666-8666-666666666666"
 SURFACE_ID = "77777777-7777-4777-8777-777777777777"
 HANDOFF_ID = "88888888-8888-4888-8888-888888888888"
 TASK_ID = "99999999-9999-4999-8999-999999999999"
+REMOTE_HOST_ID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
 CAPABILITY = "a" * 43
 LOCATOR = TmuxLocator("/tmp/agent-tools.sock", "as-session", "@1", "%1")
 
@@ -429,6 +430,51 @@ def test_agent_mutations_are_current_only_and_durably_attributed(
     assert registry.list_handoffs(SESSION_KEY)[0]["handoff_id"] == wrapped_id
     stored = registry.get_session(SESSION_KEY)
     assert stored is not None and stored["wrapped_at"] is not None
+
+
+def test_agent_can_discover_and_read_exact_imported_task_handoff(
+    registry: Registry, tmp_path: Path
+) -> None:
+    configured, observed, environment = bound_agent(registry, tmp_path)
+    registry.upsert_host(REMOTE_HOST_ID, "remote", observed_at=20)
+    handoff_id = stable_uuid("imported-handoff")
+    source_task_id = stable_uuid("imported-source-task")
+    source_session_key = (
+        f"{REMOTE_HOST_ID}:claude:{stable_uuid('imported-source-session')}"
+    )
+    registry.append_handoff(
+        session_key=source_session_key,
+        summary="The remote task is ready to continue.",
+        source="imported",
+        source_host_id=REMOTE_HOST_ID,
+        next_action="Use this exact handoff as destination context.",
+        handoff_id=handoff_id,
+        created_at=20,
+    )
+    registry.connection.execute(
+        """
+        INSERT INTO task_imported_handoffs(
+            task_id, handoff_id, source_task_id, source_project_id, imported_at
+        ) VALUES (?, ?, ?, ?, 21)
+        """,
+        (TASK_ID, handoff_id, source_task_id, PROJECT_ID),
+    )
+    service = AgentToolService(
+        registry,
+        host_id=HOST_ID,
+        config=configured,
+        environment=environment,
+        tmux=CurrentPane(observed),  # type: ignore[arg-type]
+    )
+
+    task_payload = service.task()
+    assert task_payload["importedHandoffs"][0]["sourceTaskId"] == source_task_id
+    listed = service.list_task_handoffs(limit=20)
+    assert listed["handoffs"][0]["handoffId"] == handoff_id
+    exact = service.handoff(handoff_id)
+    assert exact.handoff["source"] == "imported"
+    assert exact.handoff["sessionKey"] == source_session_key
+    assert exact.handoff["sourceTaskId"] == source_task_id
 
 
 def test_context_is_bounded_same_project_and_reports_unsafe_sources(

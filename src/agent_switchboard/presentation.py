@@ -231,6 +231,7 @@ class LaunchCoordinator:
         request_id: str,
         context: PresentationContext,
         task_create: Mapping[str, object] | None = None,
+        imported_handoff: Mapping[str, object] | None = None,
     ) -> PresentationPlan:
         request_id = self._request_id(request_id)
         now = self.clock()
@@ -239,6 +240,12 @@ class LaunchCoordinator:
                 "task_required", "A new session must belong to a task.", now
             )
         parsed_task_id = self._stable_id(task_id, TaskId, "task ID")
+        if source_ref is not None and imported_handoff is not None:
+            return self._blocked_new(
+                "continuation_source_conflict",
+                "A continuation may use one local or imported source.",
+                now,
+            )
         source = None
         if source_ref is not None:
             try:
@@ -386,7 +393,13 @@ class LaunchCoordinator:
             context=context,
             now=now,
             source_handoff_id=(
-                str(source.handoff["handoff_id"]) if source is not None else None
+                str(source.handoff["handoff_id"])
+                if source is not None
+                else (
+                    None
+                    if imported_handoff is None
+                    else str(imported_handoff["handoff_id"])
+                )
             ),
             source_session_key=(
                 str(source.session["session_key"])
@@ -394,6 +407,7 @@ class LaunchCoordinator:
                 else None
             ),
             task_create=task_create,
+            imported_handoff=imported_handoff,
         )
 
     def prepare_task_create(
@@ -407,6 +421,7 @@ class LaunchCoordinator:
         purpose: str | None = None,
         request_id: str,
         context: PresentationContext,
+        imported_handoff: Mapping[str, object] | None = None,
     ) -> PresentationPlan:
         """Atomically create a task and reserve its first provider launch."""
 
@@ -423,6 +438,7 @@ class LaunchCoordinator:
                 "purpose": purpose,
                 "preferred_provider": provider,
             },
+            imported_handoff=imported_handoff,
         )
 
     def prepare_task(
@@ -1024,6 +1040,7 @@ class LaunchCoordinator:
         source_handoff_id: str | None = None,
         source_session_key: str | None = None,
         task_create: Mapping[str, object] | None = None,
+        imported_handoff: Mapping[str, object] | None = None,
     ) -> PresentationPlan:
         capability_hash = (
             PREPARE_NEW_CAPABILITY_HASH
@@ -1043,6 +1060,7 @@ class LaunchCoordinator:
             source_handoff_id=source_handoff_id,
             source_session_key=source_session_key,
             task_create=task_create,
+            imported_handoff=imported_handoff,
         )
 
     def _prepare_unbound(
@@ -1060,6 +1078,7 @@ class LaunchCoordinator:
         source_handoff_id: str | None = None,
         source_session_key: str | None = None,
         task_create: Mapping[str, object] | None = None,
+        imported_handoff: Mapping[str, object] | None = None,
     ) -> PresentationPlan:
         if action not in {"new", "history"}:
             raise PresentationError("unbound launch action is unsupported")
@@ -1092,6 +1111,7 @@ class LaunchCoordinator:
                 created_at=now,
                 source_session_key=source_session_key,
                 task_create=task_create,
+                imported_handoff=imported_handoff,
             )
         except RequestConflict:
             return self._blocked_new(

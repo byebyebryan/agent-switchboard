@@ -19,8 +19,9 @@ import agent_switchboard.storage as storage_module
 from agent_switchboard import __version__
 from agent_switchboard.cli import main
 from agent_switchboard.config import RemoteConfig
-from agent_switchboard.domain import HostId, SessionKey
+from agent_switchboard.domain import HostId, SessionKey, handoff_content_hash
 from agent_switchboard.protocol import (
+    ContinuationEnvelope,
     ErrorRecord,
     ErrorScope,
     FleetEnvelope,
@@ -335,7 +336,110 @@ def test_remote_prepare_task_json_input_is_exact_and_bounded(
         "Finish the SSH slice",
         LOCATION_ID,
         "claude",
+        None,
     )
+
+
+def test_remote_imported_continuation_routes_canonical_envelope_over_stdin(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    local_host = HostId(CURATION_HOST_ID)
+    remote_host = HostId(REMOTE_HOST_ID)
+    remote = RemoteConfig("snap", "snap.lan", "snap")
+    summary = "The source host is wrapped."
+    next_action = "Continue on snap."
+    continuation = ContinuationEnvelope.from_dict(
+        {
+            "schemaVersion": 2,
+            "protocolVersion": 2,
+            "continuationVersion": 1,
+            "generatedAt": 100,
+            "sourceHostId": CURATION_HOST_ID,
+            "sourceProjectId": PROJECT_ID,
+            "sourceTaskId": CURATION_TASK_ID,
+            "sourceSessionKey": CURATION_SESSION_KEY,
+            "taskTitle": "Move this task",
+            "taskPurpose": "Exercise the cross-host contract",
+            "handoffId": CURATION_HANDOFF_ID,
+            "handoffSequence": 3,
+            "summary": summary,
+            "nextAction": next_action,
+            "handoffCreatedAt": 90,
+            "contentHash": handoff_content_hash(summary, next_action),
+        }
+    )
+    plan = PresentationPlanEnvelope(
+        PresentationPlan(
+            PresentationPlanKind.BLOCKED,
+            remote_host,
+            error=ErrorRecord(
+                "provider_unavailable",
+                "Provider unavailable.",
+                ErrorScope.PROVIDER,
+                False,
+                100,
+                host_id=remote_host,
+                provider="codex",
+            ),
+        )
+    )
+    calls: list[tuple[tuple[str, ...], bytes | None]] = []
+
+    async def invoke(remote_value, arguments, parser, *, stdin=None, **_kwargs):
+        assert remote_value is remote
+        assert parser.__self__ is PresentationPlanEnvelope
+        calls.append((tuple(arguments), stdin))
+        return plan
+
+    monkeypatch.setattr(cli_module, "load_or_create_host_id", lambda: local_host)
+    monkeypatch.setattr(cli_module, "load_config", lambda **_kwargs: object())
+    monkeypatch.setattr(cli_module, "_remote_endpoint", lambda *_args: remote)
+    monkeypatch.setattr(cli_module, "invoke_remote_json", invoke)
+    monkeypatch.setattr(
+        cli_module.sys,
+        "stdin",
+        io.BytesIO(continuation.to_json().encode()),
+    )
+
+    assert (
+        main(
+            [
+                "prepare-task",
+                "99999999-9999-4999-8999-999999999999",
+                "--host",
+                REMOTE_HOST_ID,
+                "--create",
+                "--continue-json-stdin",
+                "--checkout",
+                LOCATION_ID,
+                "--provider",
+                "codex",
+                "--request-id",
+                "77777777-7777-4777-8777-777777777777",
+                "--json",
+            ]
+        )
+        == 0
+    )
+    assert PresentationPlanEnvelope.from_json(capsys.readouterr().out) == plan
+    assert calls == [
+        (
+            (
+                "prepare-task",
+                "99999999-9999-4999-8999-999999999999",
+                "--create",
+                "--continue-json-stdin",
+                "--checkout",
+                LOCATION_ID,
+                "--provider",
+                "codex",
+                "--request-id",
+                "77777777-7777-4777-8777-777777777777",
+                "--json",
+            ),
+            continuation.to_json().encode(),
+        )
+    ]
 
 
 def test_remote_prepare_rejects_a_plan_from_another_host(

@@ -43,7 +43,17 @@ def test_migrations_are_explicit_contiguous_and_idempotent(tmp_path) -> None:
     database = tmp_path / "switchboard.db"
     connection = configured_connection(str(database))
 
-    assert [migration.version for migration in MIGRATIONS] == [1, 2, 3, 4, 5, 6, 7, 8]
+    assert [migration.version for migration in MIGRATIONS] == [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+    ]
     assert [migration.name for migration in MIGRATIONS] == [
         "initial_registry",
         "remote_snapshot_cache",
@@ -53,6 +63,7 @@ def test_migrations_are_explicit_contiguous_and_idempotent(tmp_path) -> None:
         "agent_tools",
         "repository_checkouts",
         "tasks",
+        "imported_task_handoffs",
     ]
     assert migrate(connection, now=100) == CURRENT_SCHEMA_VERSION
     assert migrate(connection, now=200) == CURRENT_SCHEMA_VERSION
@@ -69,11 +80,12 @@ def test_migrations_are_explicit_contiguous_and_idempotent(tmp_path) -> None:
         (6, "agent_tools", 100),
         (7, "repository_checkouts", 100),
         (8, "tasks", 100),
+        (9, "imported_task_handoffs", 100),
     ]
-    assert connection.execute("PRAGMA user_version").fetchone()[0] == 8
+    assert connection.execute("PRAGMA user_version").fetchone()[0] == 9
     assert dict(
         connection.execute("SELECT key, value FROM registry_metadata").fetchall()
-    ) == {"protocol_version": "2", "schema_version": "8"}
+    ) == {"protocol_version": "2", "schema_version": "9"}
     assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
     connection.close()
 
@@ -120,7 +132,7 @@ def test_upgrade_from_v1_preserves_registry_rows(tmp_path) -> None:
     connection.close()
 
     upgraded = connect_database(database)
-    assert upgraded.execute("PRAGMA user_version").fetchone()[0] == 8
+    assert upgraded.execute("PRAGMA user_version").fetchone()[0] == 9
     assert (
         upgraded.execute(
             """
@@ -145,6 +157,74 @@ def test_upgrade_from_v1_preserves_registry_rows(tmp_path) -> None:
     )
     assert upgraded.execute("PRAGMA foreign_key_check").fetchall() == []
     upgraded.close()
+
+
+def test_upgrade_from_v8_links_imported_handoffs_append_only(tmp_path) -> None:
+    connection = configured_connection(str(tmp_path / "switchboard.db"))
+    assert migrate(connection, target_version=8, now=10) == 8
+    local_host_id = stable_uuid("v9-local-host")
+    remote_host_id = stable_uuid("v9-remote-host")
+    project_id = stable_uuid("v9-project")
+    task_id = stable_uuid("v9-task")
+    source_task_id = stable_uuid("v9-source-task")
+    handoff_id = stable_uuid("v9-handoff")
+    source_session_key = f"{remote_host_id}:codex:{stable_uuid('v9-session')}"
+    connection.executemany(
+        """
+        INSERT INTO hosts(host_id, display_name, is_local, created_at, updated_at)
+        VALUES (?, ?, ?, 10, 10)
+        """,
+        ((local_host_id, "local", 1), (remote_host_id, "remote", 0)),
+    )
+    connection.execute(
+        """
+        INSERT INTO projects(project_id, name, declared, created_at, updated_at)
+        VALUES (?, 'project', 1, 10, 10)
+        """,
+        (project_id,),
+    )
+    connection.execute(
+        """
+        INSERT INTO tasks(
+            task_id, host_id, project_id, checkout_id, title, purpose,
+            preferred_provider, status, pinned, current_session_key,
+            created_at, updated_at, closed_at
+        ) VALUES (?, ?, ?, NULL, 'destination', NULL, 'codex', 'open', 0,
+                  NULL, 10, 10, NULL)
+        """,
+        (task_id, local_host_id, project_id),
+    )
+    connection.execute(
+        """
+        INSERT INTO handoffs(
+            handoff_id, session_key, sequence, summary, next_action, source,
+            source_host_id, created_at, content_hash
+        ) VALUES (?, ?, 1, 'summary', 'next', 'imported', ?, 10, ?)
+        """,
+        (handoff_id, source_session_key, remote_host_id, "a" * 64),
+    )
+
+    assert migrate(connection, now=20) == CURRENT_SCHEMA_VERSION
+    connection.execute(
+        """
+        INSERT INTO task_imported_handoffs(
+            task_id, handoff_id, source_task_id, source_project_id, imported_at
+        ) VALUES (?, ?, ?, ?, 20)
+        """,
+        (task_id, handoff_id, source_task_id, project_id),
+    )
+    with pytest.raises(sqlite3.IntegrityError, match="append-only"):
+        connection.execute(
+            "UPDATE task_imported_handoffs SET imported_at = 21 WHERE handoff_id = ?",
+            (handoff_id,),
+        )
+    with pytest.raises(sqlite3.IntegrityError, match="append-only"):
+        connection.execute(
+            "DELETE FROM task_imported_handoffs WHERE handoff_id = ?",
+            (handoff_id,),
+        )
+    assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
+    connection.close()
 
 
 def test_v6_to_v8_preserves_identity_and_leaves_sessions_in_inbox(tmp_path) -> None:
@@ -194,7 +274,7 @@ def test_v6_to_v8_preserves_identity_and_leaves_sessions_in_inbox(tmp_path) -> N
         (session_key, project_id, location_id, session_id, host_id),
     )
 
-    assert migrate(connection, now=20) == 8
+    assert migrate(connection, target_version=8, now=20) == 8
 
     repository = connection.execute(
         "SELECT * FROM repositories WHERE repository_id = ?", (project_id,)
