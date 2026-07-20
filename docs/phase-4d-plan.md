@@ -2,8 +2,8 @@
 
 Date: 2026-07-19
 
-Status: implementation complete; deterministic acceptance passed in core and
-the separate DMS adapter, guarded installed rollout pending
+Status: complete; deterministic and guarded installed acceptance passed in
+core and the separate DMS adapter
 
 ## Decision
 
@@ -377,8 +377,24 @@ Rollback restores the saved config and registry together, reinstalls the prior
 core commit, and returns the DMS checkout to its prior commit. Source changes do
 not trigger a live DMS reload during partial implementation.
 
-Phase 4D is complete only when both repositories pass their full static/unit
-gates, reproducible core distributions pass isolated install tests, the DMS
-component harness passes on copied v2 state, live same-session reopen preserves
-all runtime/window counts, and the current documentation contains no
-unclassified normative `location` or Snapshot v1 contract.
+The guarded 2026-07-20 cutover completed those steps on the development host.
+The private rollback set preserved the v1 config and coherent schema-v6
+registry with hashes and `0600` modes. Opening a duplicate with core `0.2.0`
+migrated it to schema 8/protocol 2 with all 50 sessions retained in Inbox and
+no foreign-key errors. The reviewed config-v2 candidate declared one project,
+one Git repository, one primary membership, and one default main checkout.
+
+The installed core then migrated the live registry to schema 8 and emitted a
+clean Snapshot v2. The current Codex session was explicitly adopted into one
+open task; the remaining 49 historical sessions stayed unassigned. A managed
+Ghostty attach reused that session's existing tmux pane, and a second open
+returned `focused` without adding a Claude or Codex process or a tmux session.
+The test-owned attach window was removed through its exact systemd scope, which
+returned the compositor window count to baseline. The active Claude session
+was not stopped, restarted, or signalled.
+
+Phase 4D completion required both repositories' full static/unit gates,
+reproducible core distributions with isolated install tests, the DMS component
+harness on copied v2 state, live same-session reopen with preserved runtime and
+window counts, and current documentation with no unclassified normative
+`location` or Snapshot v1 contract.

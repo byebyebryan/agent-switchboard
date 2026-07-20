@@ -99,7 +99,8 @@ contract and isolated installed evidence are recorded in
 Phase 5. Phase 4D is the clean `0.2.0` local-management cutover: Snapshot v2,
 configuration v2, repositories/checkouts, explicit tasks, and the task-first
 TUI are implemented in core. Its accepted contract and acceptance checklist
-are recorded in [`docs/phase-4d-plan.md`](docs/phase-4d-plan.md). See
+and the completed guarded local rollout are recorded in
+[`docs/phase-4d-plan.md`](docs/phase-4d-plan.md). See
 [the design](docs/design.md), the
 [Phase 1 validation record](docs/phase-1-validation.md), and the
 [Phase 2 validation record](docs/phase-2-validation.md), the
