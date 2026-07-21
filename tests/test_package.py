@@ -45,6 +45,7 @@ def test_static_pep_621_metadata_and_stdlib_runtime() -> None:
         "docs/phase-4c-plan.md",
         "docs/phase-4d-plan.md",
         "docs/phase-5-plan.md",
+        "docs/project-management-plan.md",
     ]
     assert metadata["tool"]["pytest"]["ini_options"]["pythonpath"] == ["src"]
 
