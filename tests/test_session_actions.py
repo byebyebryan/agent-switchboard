@@ -30,7 +30,11 @@ TASK_ID = "88888888-8888-4888-8888-888888888888"
 
 
 class FakeTmux:
-    def __init__(self) -> None:
+    def __init__(
+        self, *, provider: str = "claude", session_key: str = SESSION_KEY
+    ) -> None:
+        self.provider = provider
+        self.session_key = session_key
         self.requested: list[TmuxLocator] = []
         self.killed: list[TmuxLocator] = []
 
@@ -39,7 +43,13 @@ class FakeTmux:
         return TmuxSurfaceObservation(
             LOCATOR,
             False,
-            TmuxMetadata(SURFACE_ID, SESSION_KEY, "claude", LAUNCH_ID, "session"),
+            TmuxMetadata(
+                SURFACE_ID,
+                self.session_key,
+                self.provider,
+                LAUNCH_ID,
+                "session",
+            ),
         )
 
     def request_provider_exit(self, locator: TmuxLocator) -> None:
@@ -59,8 +69,8 @@ class IncrementingMonotonic:
         return current
 
 
-@pytest.fixture
-def managed_registry(tmp_path: Path) -> Registry:
+def create_managed_registry(tmp_path: Path, *, provider: str = "claude") -> Registry:
+    session_key = f"{HOST_ID}:{provider}:{SESSION_ID}"
     registry = Registry(tmp_path / "switchboard.db")
     registry.upsert_host(HOST_ID, "local", is_local=True, observed_at=10)
     registry.materialize_projects(
@@ -69,7 +79,7 @@ def managed_registry(tmp_path: Path) -> Registry:
             {
                 "project_id": PROJECT_ID,
                 "name": "project",
-                "default_provider": "claude",
+                "default_provider": provider,
                 "default_transport": "tmux",
                 "checkouts": [
                     {
@@ -87,13 +97,13 @@ def managed_registry(tmp_path: Path) -> Registry:
         host_id=HOST_ID,
         project_id=PROJECT_ID,
         checkout_id=LOCATION_ID,
-        title="Managed Claude",
+        title="Managed provider",
         observed_at=21,
     )
     registry.reserve_launch(
         {
             "host_id": HOST_ID,
-            "provider": "claude",
+            "provider": provider,
             "action": "new",
             "project_id": PROJECT_ID,
             "task_id": TASK_ID,
@@ -115,7 +125,7 @@ def managed_registry(tmp_path: Path) -> Registry:
         {
             "surface_id": SURFACE_ID,
             "host_id": HOST_ID,
-            "provider": "claude",
+            "provider": provider,
             "transport": "tmux",
             "transport_locator": LOCATOR.to_storage(),
             "role": "session",
@@ -134,9 +144,9 @@ def managed_registry(tmp_path: Path) -> Registry:
     registry.bind_provider_session(
         LAUNCH_ID,
         {
-            "session_key": SESSION_KEY,
+            "session_key": session_key,
             "host_id": HOST_ID,
-            "provider": "claude",
+            "provider": provider,
             "provider_session_id": SESSION_ID,
             "runtime_presence": "live",
             "runtime_pid": 100,
@@ -154,8 +164,14 @@ def managed_registry(tmp_path: Path) -> Registry:
         SET runtime_process_birth_id = ?, tmux_socket = ?
         WHERE session_key = ?
         """,
-        (BIRTH_ID, LOCATOR.socket, SESSION_KEY),
+        (BIRTH_ID, LOCATOR.socket, session_key),
     )
+    return registry
+
+
+@pytest.fixture
+def managed_registry(tmp_path: Path) -> Registry:
+    registry = create_managed_registry(tmp_path)
     yield registry
     registry.close()
 
@@ -251,3 +267,23 @@ def test_stop_blocks_when_process_group_is_not_isolated(
     assert action.error is not None and action.error.code == "unsafe_process_group"
     assert tmux.requested == []
     assert tmux.killed == []
+
+
+def test_stop_supports_exact_owned_codex_runtime(tmp_path: Path) -> None:
+    registry = create_managed_registry(tmp_path, provider="codex")
+    codex_key = f"{HOST_ID}:codex:{SESSION_ID}"
+    tmux = FakeTmux(provider="codex", session_key=codex_key)
+    scans = iter((scan(present=True), scan(present=False)))
+    try:
+        action = controller(
+            registry,
+            tmux,
+            process_scanner=lambda: next(scans),
+        ).stop(codex_key)
+
+        assert action.status is SessionActionStatus.STOPPED
+        assert action.session_key.provider.value == "codex"
+        assert tmux.requested == [LOCATOR]
+        assert tmux.killed == [LOCATOR]
+    finally:
+        registry.close()

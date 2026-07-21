@@ -1626,14 +1626,12 @@ class SessionAction:
             object.__setattr__(self, "session_key", SessionKey.parse(self.session_key))
         if self.session_key.host_id != self.host_id:
             raise ProtocolError("session action host and session identity disagree")
-        if self.session_key.provider is not ProviderId.CLAUDE:
-            raise ProtocolError("session actions currently support Claude only")
         if status is SessionActionStatus.BLOCKED:
             if self.error is None:
                 raise ProtocolError("blocked session action requires an error")
             if (
                 self.error.host_id not in {None, self.host_id}
-                or self.error.provider not in {None, ProviderId.CLAUDE}
+                or self.error.provider not in {None, self.session_key.provider}
                 or self.error.session_key not in {None, self.session_key}
             ):
                 raise ProtocolError("blocked session action error routing disagrees")

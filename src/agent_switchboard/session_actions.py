@@ -1,4 +1,4 @@
-"""Fail-closed actions for launch-owned provider sessions."""
+"""Fail-closed actions for exact launch-owned provider sessions."""
 
 from __future__ import annotations
 
@@ -39,7 +39,7 @@ def _now_ms() -> int:
 
 
 class ManagedSessionController:
-    """Stop only an exact, launch-owned Claude process and its tmux surface."""
+    """Stop only an exact, launch-owned provider process and tmux surface."""
 
     def __init__(
         self,
@@ -77,11 +77,11 @@ class ManagedSessionController:
                 "invalid_session",
                 "The selected session identity is invalid.",
             )
-        if key.host_id != self.host_id or key.provider is not ProviderId.CLAUDE:
+        if key.host_id != self.host_id:
             return self._blocked(
                 key,
                 "unsupported_session",
-                "Only host-local Claude sessions can be stopped.",
+                "Only host-local managed sessions can be stopped.",
             )
 
         self.reconcile_runtime()
@@ -110,7 +110,7 @@ class ManagedSessionController:
             return self._blocked(
                 key,
                 "surface_changed",
-                "The managed Claude surface changed before it could be stopped.",
+                "The managed provider surface changed before it could be stopped.",
                 retryable=True,
             )
 
@@ -119,7 +119,7 @@ class ManagedSessionController:
                 return self._blocked(
                     key,
                     "runtime_changed",
-                    "The Claude process identity changed during graceful stop.",
+                    "The provider process identity changed during graceful stop.",
                     retryable=True,
                 )
             if not self._wait_for_exit(pid, birth_id, SIGNAL_EXIT_SECONDS):
@@ -127,14 +127,14 @@ class ManagedSessionController:
                     return self._blocked(
                         key,
                         "runtime_changed",
-                        "The Claude process identity changed during forced stop.",
+                        "The provider process identity changed during forced stop.",
                         retryable=True,
                     )
                 if not self._wait_for_exit(pid, birth_id, SIGNAL_EXIT_SECONDS):
                     return self._blocked(
                         key,
                         "runtime_did_not_exit",
-                        "The exact managed Claude process did not exit.",
+                        "The exact managed provider process did not exit.",
                         retryable=True,
                     )
 
@@ -169,7 +169,7 @@ class ManagedSessionController:
         if (
             surface is None
             or surface["host_id"] != str(self.host_id)
-            or surface["provider"] != ProviderId.CLAUDE.value
+            or surface["provider"] != key.provider.value
             or surface["role"] != "session"
             or surface["current_session_key"] != str(key)
             or surface["binding_confidence"] != "confirmed"
@@ -179,7 +179,7 @@ class ManagedSessionController:
             return self._blocked(
                 key,
                 "surface_not_owned",
-                "The live session is not bound to a launch-owned Claude surface.",
+                "The live session is not bound to a launch-owned provider surface.",
             )
         launch = self.registry.get_launch(str(surface["launch_id"]))
         if (
@@ -187,7 +187,7 @@ class ManagedSessionController:
             or launch["state"] != "bound"
             or launch["action"] not in {"new", "resume", "history"}
             or launch["host_id"] != str(self.host_id)
-            or launch["provider"] != ProviderId.CLAUDE.value
+            or launch["provider"] != key.provider.value
             or launch["target_session_key"] != str(key)
             or launch["surface_id"] != surface_id
         ):
@@ -207,7 +207,7 @@ class ManagedSessionController:
             return self._blocked(
                 key,
                 "surface_changed",
-                "The managed Claude surface did not revalidate.",
+                "The managed provider surface did not revalidate.",
                 retryable=True,
             )
         if (
@@ -232,7 +232,7 @@ class ManagedSessionController:
             return self._blocked(
                 key,
                 "runtime_not_revalidated",
-                "The exact Claude process identity could not be revalidated.",
+                "The exact provider process identity could not be revalidated.",
                 retryable=not scan.complete,
             )
         try:
@@ -241,14 +241,14 @@ class ManagedSessionController:
             return self._blocked(
                 key,
                 "runtime_changed",
-                "The Claude process exited before stop could begin.",
+                "The provider process exited before stop could begin.",
                 retryable=True,
             )
         if process_group != pid:
             return self._blocked(
                 key,
                 "unsafe_process_group",
-                "The Claude process does not own an isolated process group.",
+                "The provider process does not own an isolated process group.",
             )
         return surface, locator, pid, birth_id
 
@@ -304,7 +304,7 @@ class ManagedSessionController:
                 retryable,
                 self.clock(),
                 host_id=self.host_id,
-                provider=ProviderId.CLAUDE,
+                provider=parsed.provider,
                 session_key=parsed,
             ),
         )

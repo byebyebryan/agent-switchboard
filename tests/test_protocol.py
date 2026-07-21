@@ -783,6 +783,12 @@ def test_session_stop_action_is_versioned_and_fail_closed() -> None:
         "sessionKey": str(CLAUDE_SESSION_KEY),
     }
 
+    codex_key = SessionKey.parse(SESSION_KEY)
+    codex = SessionActionEnvelope(
+        SessionAction(SessionActionStatus.ALREADY_STOPPED, HOST, codex_key)
+    )
+    assert SessionActionEnvelope.from_json(codex.to_json()) == codex
+
     error = ErrorRecord(
         "surface_not_owned",
         "The surface is unmanaged.",
