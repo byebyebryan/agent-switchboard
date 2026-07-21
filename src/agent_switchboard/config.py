@@ -37,7 +37,7 @@ from .repository_discovery import RepositoryDiscoveryError, probe_git_repository
 
 _MAX_CONTEXT_SOURCES = 32
 MAX_REMOTES = 32
-_DEFAULT_HOOK_LATENCY_BUDGET_MS = 125
+_DEFAULT_HOOK_LATENCY_BUDGET_MS = 250
 _ALIAS_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
 _TMUX_PREFIX_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,31}$")
 _MEMORY_TOOL_RE = re.compile(r"^[A-Za-z0-9_.-]{1,128}$")

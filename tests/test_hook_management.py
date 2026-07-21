@@ -66,7 +66,7 @@ def hook_metadata(
 
 def test_hooks_config_defaults_custom_values_and_validation() -> None:
     default = parse_config("", host_id=HOST_ID)
-    assert default.hooks == HooksConfig(timeout_seconds=1, latency_budget_ms=125)
+    assert default.hooks == HooksConfig(timeout_seconds=1, latency_budget_ms=250)
 
     custom = parse_config(
         "config_version=2\n[hooks]\ntimeout_seconds=3\nlatency_budget_ms=750\n",

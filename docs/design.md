@@ -937,7 +937,7 @@ Switchboard hooks coexist with provider plugins such as claude-mem and do not
 replace other matching hooks. Installation uses one identifiable user-level
 definition per provider. `doctor` detects duplicate Switchboard definitions,
 stale trusted hashes, a missing absolute executable, and hook latency above the
-configured budget. The default warm-p95 budget is 125 ms: measurements above
+configured budget. The default warm-p95 budget is 250 ms: measurements above
 it remain unhealthy, while the separate one-second handler timeout bounds an
 individual hook execution. Hosts may set `hooks.latency_budget_ms` explicitly
 when their measured environment requires a different performance policy.

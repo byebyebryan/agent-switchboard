@@ -428,3 +428,8 @@ noise with modest headroom rather than removing the performance gate. A warm
 p95 above 125 ms remains unhealthy, hook execution still has a separate
 one-second timeout, and the threshold remains explicitly configurable per
 host.
+
+The 2026-07-21 installed follow-up raised the current default to 250 ms after
+otherwise healthy samples reached 143.4 ms. This deliberately leaves ample
+scheduler headroom while preserving a fourfold gap to the independent
+one-second execution timeout. Explicit per-host overrides remain unchanged.

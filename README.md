@@ -242,7 +242,7 @@ Switchboard never edits Codex trust state. `doctor` checks the effective
 `hooks/list` result, executable paths, trust and enablement, source warnings or
 errors, and isolated cold/warm event latency. Its latency probe uses temporary
 HOME, `CODEX_HOME`, and XDG roots and never writes the user's registry.
-The default warm-p95 health budget is 125 ms and can be overridden with
+The default warm-p95 health budget is 250 ms and can be overridden with
 `hooks.latency_budget_ms`; each hook still has a separate one-second timeout.
 
 `prepare-open` performs a bounded full reconciliation before making an atomic
