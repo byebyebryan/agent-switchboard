@@ -47,6 +47,11 @@ from .tui_gateway import (
     resolve_terminal_context,
 )
 from .tui_model import FrontendModel, LaunchTarget, SessionRow, TaskRow, ViewFilters
+from .tui_projects import (
+    CatalogConfirmation,
+    CatalogFormScreen,
+    ProjectManagerScreen,
+)
 
 MIN_TERMINAL_WIDTH = 72
 MIN_TERMINAL_HEIGHT = 20
@@ -397,6 +402,7 @@ class SwitchboardApp(App[tuple[str, ...] | None]):
         Binding("1", "show_open", "Open tasks", show=False),
         Binding("2", "show_inbox", "Inbox", show=False),
         Binding("3", "show_closed", "Closed", show=False),
+        Binding("4", "projects", "Projects", show=False),
         Binding("h", "history", "History"),
         Binding("x", "stop_session", "Stop"),
         Binding("a", "edit_name", "Name"),
@@ -507,9 +513,11 @@ class SwitchboardApp(App[tuple[str, ...] | None]):
         request_id_factory: Callable[[], UUID] = uuid4,
         handoff_id_factory: Callable[[], UUID] = uuid4,
         initial_view: str = "open",
+        initial_project_id: str | None = None,
+        add_project: bool = False,
     ) -> None:
         super().__init__()
-        if initial_view not in {"open", "inbox", "closed"}:
+        if initial_view not in {"open", "inbox", "closed", "projects"}:
             raise ValueError("initial view is invalid")
         self.gateway = gateway
         self.snapshots = FleetSnapshotSource(gateway)
@@ -526,7 +534,10 @@ class SwitchboardApp(App[tuple[str, ...] | None]):
         self._now_ms = (lambda: int(time.time() * 1000)) if now_ms is None else now_ms
         self._request_id_factory = request_id_factory
         self._handoff_id_factory = handoff_id_factory
-        self._initial_view = initial_view
+        self._initial_view = "open" if initial_view == "projects" else initial_view
+        self._open_projects_on_mount = initial_view == "projects" or add_project
+        self._initial_project_id = initial_project_id
+        self._add_project_on_mount = add_project
         self._snapshot_request_id = 0
         self._detail_request_id = 0
         self._filter_request_id = 0
@@ -633,7 +644,8 @@ class SwitchboardApp(App[tuple[str, ...] | None]):
                     yield Static("No current issues.", id="issues", markup=False)
             yield Static(
                 "/ search · 1 open · 2 Inbox · 3 closed · Enter/o open · n new task\n"
-                "u adopt · a title/name · p purpose · v pin · z close · e reopen\n"
+                "4 projects · u adopt · a title/name · p purpose · v pin · z close · "
+                "e reopen\n"
                 "x safe stop · h Claude history · d detail · r refresh · i issues · "
                 "? help · q quit",
                 id="help",
@@ -652,6 +664,8 @@ class SwitchboardApp(App[tuple[str, ...] | None]):
         self._apply_responsive_layout(self.size.width)
         self.set_interval(30, self._render_status, name="snapshot-age")
         self._request_snapshot(full=False)
+        if self._open_projects_on_mount:
+            self.call_after_refresh(self.action_projects)
 
     def on_resize(self, event: events.Resize) -> None:
         self._apply_responsive_layout(event.size.width)
@@ -2076,6 +2090,25 @@ class SwitchboardApp(App[tuple[str, ...] | None]):
     def action_show_closed(self) -> None:
         self._show_view("closed")
 
+    def action_projects(self) -> None:
+        if any(
+            isinstance(screen, ProjectManagerScreen) for screen in self.screen_stack
+        ):
+            return
+        add_project = self._add_project_on_mount
+        self._add_project_on_mount = False
+        self.push_screen(
+            ProjectManagerScreen(
+                self.gateway,
+                project_id=self._initial_project_id,
+                add_project=add_project,
+            ),
+            self._project_manager_closed,
+        )
+
+    def _project_manager_closed(self, _result: None) -> None:
+        self._request_snapshot(full=True)
+
     def action_focus_sessions(self) -> None:
         table = self.query_one("#sessions", DataTable)
         if not table.disabled:
@@ -2186,12 +2219,21 @@ def _execute_terminal_handoff(
     return 1
 
 
-def run_tui(*, swbctl_executable: str | Path) -> int:
+def run_tui(
+    *,
+    swbctl_executable: str | Path,
+    initial_view: str = "open",
+    project_id: str | None = None,
+    add_project: bool = False,
+) -> int:
     """Run the optional terminal frontend."""
 
     command = SwitchboardApp(
         gateway=SwbctlGateway(swbctl_executable),
         terminal_context=resolve_terminal_context(),
+        initial_view=initial_view,
+        initial_project_id=project_id,
+        add_project=add_project,
     ).run()
     return 0 if command is None else _execute_terminal_handoff(command)
 
@@ -2199,9 +2241,12 @@ def run_tui(*, swbctl_executable: str | Path) -> int:
 __all__ = [
     "MIN_TERMINAL_HEIGHT",
     "MIN_TERMINAL_WIDTH",
+    "CatalogConfirmation",
+    "CatalogFormScreen",
     "EditResult",
     "HandoffDraft",
     "HandoffEditor",
+    "ProjectManagerScreen",
     "StopConfirmation",
     "SwitchboardApp",
     "TargetPicker",

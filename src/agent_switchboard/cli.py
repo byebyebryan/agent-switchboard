@@ -155,10 +155,17 @@ def build_parser() -> argparse.ArgumentParser:
         help="diagnose provider hooks and local event latency",
     )
 
-    commands.add_parser(
+    tui = commands.add_parser(
         "tui",
         help="open the optional terminal session picker",
     )
+    tui.add_argument(
+        "--view",
+        choices=("open", "inbox", "closed", "projects"),
+        default="open",
+    )
+    tui.add_argument("--project")
+    tui.add_argument("--add-project", action="store_true")
 
     config = commands.add_parser("config", help="inspect or migrate configuration")
     config_actions = config.add_subparsers(dest="config_action", required=True)
@@ -854,7 +861,7 @@ def _project_command(arguments: argparse.Namespace) -> str:
         return catalog_json(manager.document(include_archived=True, mutation=mutation))
 
 
-def _run_tui_command() -> int:
+def _run_tui_command(arguments: argparse.Namespace) -> int:
     try:
         tui = importlib.import_module(".tui", __package__)
     except ModuleNotFoundError as error:
@@ -871,7 +878,14 @@ def _run_tui_command() -> int:
             return 1
         raise
     try:
-        return int(tui.run_tui(swbctl_executable=resolve_swbctl_executable()))
+        return int(
+            tui.run_tui(
+                swbctl_executable=resolve_swbctl_executable(),
+                initial_view=arguments.view,
+                project_id=arguments.project,
+                add_project=arguments.add_project,
+            )
+        )
     except (ValidationError, TmuxError, OSError, ValueError) as error:
         print(f"swbctl: {_safe_error_message(error)}", file=sys.stderr)
         return 1
@@ -1936,16 +1950,24 @@ def main(argv: Sequence[str] | None = None) -> int:
     if arguments.command == "project":
         try:
             sys.stdout.write(f"{_project_command(arguments)}\n")
+        except CatalogError as error:
+            print(
+                f"swbctl: {error.code}: {_safe_error_message(error)}",
+                file=sys.stderr,
+            )
+            return 1
         except (
-            CatalogError,
             ValidationError,
             StorageError,
             MigrationError,
             sqlite3.Error,
             OSError,
             ValueError,
-        ) as error:
-            print(f"swbctl: {_safe_error_message(error)}", file=sys.stderr)
+        ):
+            print(
+                "swbctl: project_action_failed: The project catalog action failed.",
+                file=sys.stderr,
+            )
             return 1
         return 0
 
@@ -1984,7 +2006,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 1
 
     if arguments.command == "tui":
-        return _run_tui_command()
+        return _run_tui_command(arguments)
 
     if arguments.command == "fleet":
         try:

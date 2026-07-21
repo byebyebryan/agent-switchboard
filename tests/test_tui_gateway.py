@@ -122,6 +122,80 @@ TASK_RECORD = (
     ).encode()
     + b"\n"
 )
+CATALOG_RECORD = (
+    json.dumps(
+        {
+            "schemaVersion": 2,
+            "protocolVersion": 2,
+            "catalogVersion": 1,
+            "generatedAt": 1,
+            "hostId": HOST_ID,
+            "operation": None,
+            "projects": [
+                {
+                    "projectId": PROJECT_ID,
+                    "name": "Switchboard",
+                    "aliases": ["asb"],
+                    "defaultProvider": "codex",
+                    "defaultTransport": "tmux",
+                    "declared": True,
+                    "references": {},
+                    "repositories": [
+                        {
+                            "repositoryId": "33333333-3333-4333-8333-333333333333",
+                            "name": "Switchboard",
+                            "kind": "git",
+                            "isPrimary": True,
+                            "declared": True,
+                            "contextSources": ["AGENTS.md"],
+                            "references": {},
+                            "checkouts": [
+                                {
+                                    "checkoutId": LOCATION_ID,
+                                    "path": "/work/switchboard",
+                                    "kind": "main",
+                                    "displayName": "main",
+                                    "providerOverride": None,
+                                    "transportOverride": None,
+                                    "isDefault": True,
+                                    "declared": True,
+                                    "present": True,
+                                    "branch": "main",
+                                    "headOid": None,
+                                    "references": {},
+                                }
+                            ],
+                        }
+                    ],
+                }
+            ],
+        },
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode()
+    + b"\n"
+)
+PROJECT_EXPORT_RECORD = (
+    json.dumps(
+        {
+            "schemaVersion": 2,
+            "protocolVersion": 2,
+            "projectExportVersion": 1,
+            "generatedAt": 1,
+            "project": {
+                "projectId": PROJECT_ID,
+                "name": "Switchboard",
+                "aliases": [],
+                "defaultProvider": "codex",
+                "defaultTransport": "tmux",
+                "repositories": [],
+            },
+        },
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode()
+    + b"\n"
+)
 
 
 class RecordingRunner:
@@ -328,6 +402,7 @@ def test_gateway_routes_remote_plan_attach_and_stop_with_host_id(
             )
         )
     )
+
     calls: list[tuple[str, ...]] = []
 
     async def runner(argv, timeout, stdin):
@@ -382,6 +457,73 @@ def test_gateway_routes_remote_plan_attach_and_stop_with_host_id(
         "--host",
         REMOTE_HOST_ID,
     )
+
+
+def test_gateway_project_catalog_uses_bounded_public_commands(tmp_path: Path) -> None:
+    executable = tmp_path / "swbctl"
+    executable.touch(mode=0o755)
+    calls: list[tuple[str, ...]] = []
+
+    async def runner(argv, timeout, stdin):
+        command = tuple(argv)
+        calls.append(command)
+        assert timeout == 15.0
+        assert stdin is None
+        output = PROJECT_EXPORT_RECORD if command[2] == "export" else CATALOG_RECORD
+        return CommandOutput(output, b"", 0)
+
+    gateway = SwbctlGateway(executable, runner=runner)
+
+    async def exercise() -> None:
+        catalog = await gateway.project_catalog(include_archived=True)
+        assert catalog["projects"][0]["projectId"] == PROJECT_ID
+        changed = await gateway.project_action(
+            ("update", PROJECT_ID, "--name", "Renamed")
+        )
+        assert changed["catalogVersion"] == 1
+        exported = await gateway.project_export(PROJECT_ID)
+        assert exported["projectExportVersion"] == 1
+
+    asyncio.run(exercise())
+    assert calls == [
+        (
+            str(executable),
+            "project",
+            "list",
+            "--include-archived",
+            "--json",
+        ),
+        (
+            str(executable),
+            "project",
+            "update",
+            PROJECT_ID,
+            "--name",
+            "Renamed",
+            "--json",
+        ),
+        (str(executable), "project", "export", PROJECT_ID, "--json"),
+    ]
+
+
+def test_gateway_project_catalog_preserves_safe_structured_rejection(
+    tmp_path: Path,
+) -> None:
+    executable = tmp_path / "swbctl"
+    executable.touch(mode=0o755)
+
+    async def runner(argv, timeout, stdin):
+        return CommandOutput(
+            b"",
+            b"swbctl: project_active: Close open tasks before archive.\n",
+            1,
+        )
+
+    gateway = SwbctlGateway(executable, runner=runner)
+    with pytest.raises(GatewayError) as failure:
+        asyncio.run(gateway.project_action(("archive", PROJECT_ID, "--confirm")))
+    assert failure.value.code == "project_active"
+    assert failure.value.message == "Close open tasks before archive."
 
 
 def test_gateway_curation_uses_exact_public_argv_and_bounded_json_stdin(

@@ -41,6 +41,8 @@ MAX_STDIN_BYTES = 2 * MAX_HANDOFF_FIELD_BYTES + 8 * 1024
 READ_CHUNK_BYTES = 64 * 1024
 DEFAULT_TIMEOUT_SECONDS = 15.0
 PROCESS_REAP_SECONDS = 1.0
+MAX_CATALOG_PROJECTS = 10_000
+MAX_PROJECT_ARGUMENTS = 64
 
 Envelope = TypeVar(
     "Envelope",
@@ -79,6 +81,86 @@ class CommandOutput:
 AsyncCommandRunner = Callable[
     [Sequence[str], float, bytes | None], Awaitable[CommandOutput]
 ]
+CatalogDocument = Mapping[str, object]
+
+
+def _catalog_document(payload: str | bytes | bytearray) -> CatalogDocument:
+    try:
+        value = json.loads(payload)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ValidationError("invalid catalog JSON") from error
+    if (
+        not isinstance(value, dict)
+        or set(value)
+        != {
+            "schemaVersion",
+            "protocolVersion",
+            "catalogVersion",
+            "generatedAt",
+            "hostId",
+            "operation",
+            "projects",
+        }
+        or value["schemaVersion"] != 2
+        or value["protocolVersion"] != 2
+        or value["catalogVersion"] != 1
+        or not isinstance(value["generatedAt"], int)
+        or not isinstance(value["projects"], list)
+        or len(value["projects"]) > MAX_CATALOG_PROJECTS
+    ):
+        raise ValidationError("invalid catalog envelope")
+    _host_argument(value["hostId"])
+    for project in value["projects"]:
+        if (
+            not isinstance(project, dict)
+            or not isinstance(project.get("name"), str)
+            or not isinstance(project.get("declared"), bool)
+            or not isinstance(project.get("aliases"), list)
+            or not isinstance(project.get("repositories"), list)
+        ):
+            raise ValidationError("invalid catalog project")
+        _uuid_argument(project.get("projectId"), "project ID")
+        for repository in project["repositories"]:
+            if (
+                not isinstance(repository, dict)
+                or not isinstance(repository.get("name"), str)
+                or repository.get("kind") not in {"git", "directory"}
+                or not isinstance(repository.get("isPrimary"), bool)
+                or not isinstance(repository.get("declared"), bool)
+                or not isinstance(repository.get("contextSources"), list)
+                or not isinstance(repository.get("checkouts"), list)
+            ):
+                raise ValidationError("invalid catalog repository")
+            _uuid_argument(repository.get("repositoryId"), "repository ID")
+            for checkout in repository["checkouts"]:
+                if (
+                    not isinstance(checkout, dict)
+                    or not isinstance(checkout.get("path"), str)
+                    or checkout.get("kind") not in {"main", "worktree", "directory"}
+                    or not isinstance(checkout.get("isDefault"), bool)
+                    or not isinstance(checkout.get("declared"), bool)
+                    or not isinstance(checkout.get("present"), bool)
+                ):
+                    raise ValidationError("invalid catalog checkout")
+                _uuid_argument(checkout.get("checkoutId"), "checkout ID")
+    return value
+
+
+def _project_export(payload: str | bytes | bytearray) -> Mapping[str, object]:
+    try:
+        value = json.loads(payload)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ValidationError("invalid project export JSON") from error
+    if (
+        not isinstance(value, dict)
+        or value.get("schemaVersion") != 2
+        or value.get("protocolVersion") != 2
+        or value.get("projectExportVersion") != 1
+        or not isinstance(value.get("project"), dict)
+    ):
+        raise ValidationError("invalid project export")
+    _uuid_argument(value["project"].get("projectId"), "project ID")
+    return value
 
 
 class TmuxClientResolver(Protocol):
@@ -402,6 +484,125 @@ class SwbctlGateway:
                 "The Switchboard command emitted unexpected output.",
                 retryable=False,
             )
+
+    async def _project_json(
+        self,
+        arguments: Sequence[str],
+        parser: Callable[[str | bytes | bytearray], Mapping[str, object]],
+    ) -> Mapping[str, object]:
+        output = await self._runner(
+            (self.executable, "project", *arguments),
+            self.timeout_seconds,
+            None,
+        )
+        if output.exit_code != 0:
+            prefix = b"swbctl: "
+            if output.stdout or not output.stderr.startswith(prefix):
+                raise GatewayError(
+                    "catalog_action_failed",
+                    "The project catalog action was rejected.",
+                    retryable=False,
+                )
+            try:
+                diagnostic = output.stderr.decode("utf-8").strip()
+            except UnicodeDecodeError:
+                diagnostic = ""
+            code, separator, message = diagnostic[len(prefix) :].partition(": ")
+            if (
+                separator
+                and code
+                and len(code) <= 64
+                and all(character.islower() or character == "_" for character in code)
+                and message
+                and len(message) <= 1024
+                and all(character.isprintable() for character in message)
+            ):
+                raise GatewayError(code, message, retryable=False)
+            raise GatewayError(
+                "catalog_action_failed",
+                "The project catalog action was rejected.",
+                retryable=False,
+            )
+        if output.stderr:
+            raise GatewayError(
+                "response_invalid",
+                "The project catalog command emitted unexpected diagnostics.",
+                retryable=False,
+            )
+        if (
+            not output.stdout.endswith(b"\n")
+            or b"\n" in output.stdout[:-1]
+            or b"\r" in output.stdout
+        ):
+            raise GatewayError(
+                "response_invalid",
+                "The project catalog command did not emit one JSON record.",
+                retryable=False,
+            )
+        payload = output.stdout[:-1]
+        if not payload or payload[:1].isspace() or payload[-1:].isspace():
+            raise GatewayError(
+                "response_invalid",
+                "The project catalog command emitted invalid JSON framing.",
+                retryable=False,
+            )
+        try:
+            return parser(payload)
+        except (GatewayError, ValidationError, ValueError) as error:
+            raise GatewayError(
+                "response_invalid",
+                "The project catalog command emitted an incompatible response.",
+                retryable=False,
+            ) from error
+
+    @staticmethod
+    def _project_arguments(arguments: Sequence[str]) -> tuple[str, ...]:
+        if not arguments or len(arguments) > MAX_PROJECT_ARGUMENTS:
+            raise GatewayError(
+                "argument_invalid",
+                "The project catalog command is invalid.",
+                retryable=False,
+            )
+        allowed = {
+            "add",
+            "update",
+            "archive",
+            "restore",
+            "repository",
+            "checkout",
+            "import",
+        }
+        if arguments[0] not in allowed:
+            raise GatewayError(
+                "argument_invalid",
+                "The project catalog action is invalid.",
+                retryable=False,
+            )
+        bounded = tuple(
+            _bounded_argument(value, "project argument", maximum=4096)
+            for value in arguments
+        )
+        return (*bounded, "--json")
+
+    async def project_catalog(
+        self, *, include_archived: bool = True
+    ) -> CatalogDocument:
+        arguments = ["list"]
+        if include_archived:
+            arguments.append("--include-archived")
+        arguments.append("--json")
+        return await self._project_json(arguments, _catalog_document)
+
+    async def project_action(self, arguments: Sequence[str]) -> CatalogDocument:
+        return await self._project_json(
+            self._project_arguments(arguments), _catalog_document
+        )
+
+    async def project_export(self, project_id: str) -> Mapping[str, object]:
+        return await self._project_json(
+            ("export", _uuid_argument(project_id, "project ID"), "--json"),
+            _project_export,
+        )
 
     async def _task_action(
         self,

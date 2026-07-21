@@ -324,6 +324,55 @@ def _curated_detail(
     )
 
 
+def _catalog() -> dict[str, Any]:
+    return {
+        "schemaVersion": 2,
+        "protocolVersion": 2,
+        "catalogVersion": 1,
+        "generatedAt": NOW_MS,
+        "hostId": HOST_ID,
+        "operation": None,
+        "projects": [
+            {
+                "projectId": PROJECT_ID,
+                "name": "Switchboard",
+                "aliases": ["asb"],
+                "defaultProvider": "codex",
+                "defaultTransport": "tmux",
+                "declared": True,
+                "references": {},
+                "repositories": [
+                    {
+                        "repositoryId": "33333333-3333-4333-8333-333333333333",
+                        "name": "Switchboard",
+                        "kind": "git",
+                        "isPrimary": True,
+                        "declared": True,
+                        "contextSources": ["AGENTS.md"],
+                        "references": {},
+                        "checkouts": [
+                            {
+                                "checkoutId": LOCATION_ID,
+                                "path": "/work/switchboard",
+                                "kind": "main",
+                                "displayName": "main",
+                                "providerOverride": None,
+                                "transportOverride": None,
+                                "isDefault": True,
+                                "declared": True,
+                                "present": True,
+                                "branch": "main",
+                                "headOid": None,
+                                "references": {},
+                            }
+                        ],
+                    }
+                ],
+            }
+        ],
+    }
+
+
 class FakeGateway:
     def __init__(
         self,
@@ -339,6 +388,7 @@ class FakeGateway:
         prepare_cancelled: asyncio.Event | None = None,
         detail: Any | None = None,
         mutation_detail: Any | None = None,
+        catalog: Any | None = None,
     ) -> None:
         self.retained = retained
         self.full = [] if full is None else list(full)
@@ -353,6 +403,7 @@ class FakeGateway:
         self.prepare_cancelled = prepare_cancelled
         self.detail = detail
         self.mutation_detail = mutation_detail
+        self.catalog = _catalog() if catalog is None else catalog
         self.calls: list[str] = []
         self.detail_calls: list[str] = []
         self.action_calls: list[tuple[Any, ...]] = []
@@ -386,6 +437,25 @@ class FakeGateway:
     async def fleet(self, *, refresh: bool) -> Any:
         snapshot = await self.snapshot(reconcile="full" if refresh else "none")
         return _fleet(snapshot)
+
+    async def project_catalog(self, *, include_archived: bool = True) -> Any:
+        assert include_archived is True
+        self.action_calls.append(("project-list",))
+        return self.catalog
+
+    async def project_action(self, arguments: tuple[str, ...] | list[str]) -> Any:
+        self.action_calls.append(("project-action", *arguments))
+        return self.catalog
+
+    async def project_export(self, project_id: str) -> Any:
+        self.action_calls.append(("project-export", project_id))
+        return {
+            "schemaVersion": 2,
+            "protocolVersion": 2,
+            "projectExportVersion": 1,
+            "generatedAt": NOW_MS,
+            "project": {"projectId": project_id},
+        }
 
     async def _prepare(self) -> Any:
         if self.prepare_started is not None:
@@ -564,6 +634,8 @@ def _app(
     request_ids: tuple[UUID, ...] = REQUEST_IDS,
     handoff_ids: tuple[UUID, ...] = HANDOFF_IDS,
     initial_view: str = "inbox",
+    initial_project_id: str | None = None,
+    add_project: bool = False,
 ) -> Any:
     ids = iter(request_ids)
     handoffs = iter(handoff_ids)
@@ -579,6 +651,8 @@ def _app(
         request_id_factory=lambda: next(ids),
         handoff_id_factory=lambda: next(handoffs),
         initial_view=initial_view,
+        initial_project_id=initial_project_id,
+        add_project=add_project,
     )
 
 
@@ -787,6 +861,164 @@ def test_refresh_failure_preserves_rows_and_exposes_then_clears_error() -> None:
             assert (
                 str(app.query_one("#issues", widgets_module.Static).content)
                 == "No current issues."
+            )
+
+    asyncio.run(exercise())
+
+
+def test_projects_view_lists_hierarchy_and_edits_through_gateway() -> None:
+    async def exercise() -> None:
+        gateway = FakeGateway(retained=_empty_snapshot())
+        app = _app(gateway, initial_view="open")
+        async with app.run_test(size=(120, 34)) as pilot:
+            await _wait_until(
+                pilot,
+                lambda: app.model is not None and not app.refreshing,
+                message="retained snapshot did not render",
+            )
+            await pilot.press("4")
+            await _wait_until(
+                pilot,
+                lambda: (
+                    isinstance(app.screen, tui_module.ProjectManagerScreen)
+                    and not app.screen.busy
+                ),
+                message="project manager did not load",
+            )
+            manager = app.screen
+            table = manager.query_one("#catalog-table", widgets_module.DataTable)
+            assert table.row_count == 3
+            assert "Project: Switchboard" in str(
+                manager.query_one("#catalog-detail-text", widgets_module.Static).content
+            )
+
+            await pilot.press("e")
+            assert isinstance(app.screen, tui_module.CatalogFormScreen)
+            app.screen.query_one(
+                "#catalog-field-name", widgets_module.Input
+            ).value = "Switchboard Core"
+            await pilot.press("ctrl+s")
+            await _wait_until(
+                pilot,
+                lambda: (
+                    isinstance(app.screen, tui_module.ProjectManagerScreen)
+                    and not app.screen.busy
+                ),
+                message="project edit did not complete",
+            )
+            assert gateway.action_calls[-1] == (
+                "project-action",
+                "update",
+                PROJECT_ID,
+                "--name",
+                "Switchboard Core",
+                "--provider",
+                "codex",
+                "--alias",
+                "asb",
+            )
+
+    asyncio.run(exercise())
+
+
+def test_projects_startup_add_flag_opens_path_first_form() -> None:
+    async def exercise() -> None:
+        gateway = FakeGateway(retained=_empty_snapshot())
+        app = _app(gateway, initial_view="projects", add_project=True)
+        async with app.run_test(size=(110, 32)) as pilot:
+            await _wait_until(
+                pilot,
+                lambda: isinstance(app.screen, tui_module.CatalogFormScreen),
+                message="path-first add form did not open",
+            )
+            app.screen.query_one(
+                "#catalog-field-path", widgets_module.Input
+            ).value = "/work/new-project"
+            app.screen.query_one(
+                "#catalog-field-name", widgets_module.Input
+            ).value = "New Project"
+            await pilot.press("ctrl+s")
+            await _wait_until(
+                pilot,
+                lambda: (
+                    isinstance(app.screen, tui_module.ProjectManagerScreen)
+                    and not app.screen.busy
+                ),
+                message="path-first add did not complete",
+            )
+            assert gateway.action_calls[-1] == (
+                "project-action",
+                "add",
+                "/work/new-project",
+                "--kind",
+                "auto",
+                "--provider",
+                "codex",
+                "--name",
+                "New Project",
+            )
+
+    asyncio.run(exercise())
+
+
+def test_projects_view_routes_structural_actions_with_confirmation() -> None:
+    async def exercise() -> None:
+        gateway = FakeGateway(retained=_empty_snapshot())
+        app = _app(gateway, initial_view="projects")
+        async with app.run_test(size=(110, 32)) as pilot:
+            await _wait_until(
+                pilot,
+                lambda: (
+                    isinstance(app.screen, tui_module.ProjectManagerScreen)
+                    and not app.screen.busy
+                ),
+                message="project manager did not load",
+            )
+            manager = app.screen
+            await pilot.press("down", "m")
+            await _wait_until(
+                pilot,
+                lambda: not manager.busy and len(gateway.action_calls) >= 2,
+                message="primary repository action did not complete",
+            )
+            assert gateway.action_calls[-1] == (
+                "project-action",
+                "repository",
+                "primary",
+                PROJECT_ID,
+                "33333333-3333-4333-8333-333333333333",
+            )
+
+            await pilot.press("down", "d")
+            await _wait_until(
+                pilot,
+                lambda: not manager.busy and len(gateway.action_calls) >= 3,
+                message="default checkout action did not complete",
+            )
+            assert gateway.action_calls[-1] == (
+                "project-action",
+                "checkout",
+                "default",
+                LOCATION_ID,
+            )
+
+            await pilot.press("x")
+            assert isinstance(app.screen, tui_module.CatalogConfirmation)
+            await pilot.press("y")
+            await _wait_until(
+                pilot,
+                lambda: (
+                    isinstance(app.screen, tui_module.ProjectManagerScreen)
+                    and not app.screen.busy
+                ),
+                message="checkout archive action did not complete",
+            )
+            assert gateway.action_calls[-1] == (
+                "project-action",
+                "checkout",
+                "archive",
+                LOCATION_ID,
+                "--confirm",
             )
 
     asyncio.run(exercise())

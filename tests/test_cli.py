@@ -705,8 +705,17 @@ def test_tui_command_is_lazy_and_returns_the_frontend_status(
 
     class FakeTui:
         @staticmethod
-        def run_tui(*, swbctl_executable: Path) -> int:
+        def run_tui(
+            *,
+            swbctl_executable: Path,
+            initial_view: str,
+            project_id: str | None,
+            add_project: bool,
+        ) -> int:
             assert swbctl_executable == cli_environment.executable
+            assert initial_view == "projects"
+            assert project_id == PROJECT_ID
+            assert add_project is True
             return 7
 
     def import_module(name: str, package: str | None = None) -> FakeTui:
@@ -720,7 +729,19 @@ def test_tui_command_is_lazy_and_returns_the_frontend_status(
         lambda: cli_environment.executable,
     )
 
-    assert main(["tui"]) == 7
+    assert (
+        main(
+            [
+                "tui",
+                "--view",
+                "projects",
+                "--project",
+                PROJECT_ID,
+                "--add-project",
+            ]
+        )
+        == 7
+    )
     assert capsys.readouterr() == ("", "")
     assert calls == [(".tui", "agent_switchboard")]
 
