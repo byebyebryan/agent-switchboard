@@ -421,6 +421,14 @@ declarations and owns discovered checkouts, tasks, session assignments,
 handoffs, launches, runtimes, surfaces, and caches. Removing a declaration
 marks it undeclared or missing without erasing historical task/session state.
 
+The authoritative catalog is user-manageable through the public `swbctl project`
+contract rather than only by hand-editing TOML. Core owns validated,
+backed-up, atomic canonical config replacement; frontends never write config
+or manufacture identity. The TUI exposes the complete local manager, while DMS
+lists local projects and opens that focused TUI surface. Exact mutation,
+archive, portability, and acceptance rules are in
+[`docs/project-management-plan.md`](project-management-plan.md).
+
 A session observed without launch identity is assigned only when bounded Git
 evidence identifies one configured repository/checkout, or one directory
 checkout wins canonical longest-path containment. Ambiguity leaves the session
@@ -1436,6 +1444,12 @@ The TUI groups tasks by project and exposes repository memberships, available
 checkouts, active and pinned tasks, and retained task/session history. Inbox
 retains ad-hoc and legacy sessions without manufacturing task identity.
 
+A separate Projects view exposes declared and archived projects even when they
+have no tasks or sessions. It owns guided path-first project creation,
+repository membership and checkout management, catalog metadata, archive and
+restore, and project-scoped task entry. Open Tasks remains the default daily
+view.
+
 ### Initial actions
 
 - Open or continue the selected task's current session.
@@ -2051,6 +2065,12 @@ Deterministic gates pass in both repositories, and the installed DMS adapter
 passes local Fleet/cache/reload acceptance. The existing DMS helper remains
 available for remote fallback until a configured test host passes live remote
 fetch, open, create, and exact continuation acceptance.
+
+Guarded two-host acceptance is intentionally paused while the local project
+catalog becomes self-managing. That follow-up does not change Fleet v1 or the
+SSH ownership boundary; it removes the manual-TOML prerequisite before the
+same stable ProjectIds are carried to another host. See
+[`docs/project-management-plan.md`](project-management-plan.md).
 
 ## Test Strategy
 

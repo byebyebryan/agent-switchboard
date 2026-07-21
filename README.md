@@ -107,7 +107,10 @@ continuation, and the separate DMS model-v4 vertical slice. Deterministic core,
 DMS, and installed local-Fleet acceptance pass; live SSH open/create/
 continuation remains pending an explicitly configured test host. The exact
 contract and evidence boundary are in
-[`docs/phase-5-plan.md`](docs/phase-5-plan.md). See
+[`docs/phase-5-plan.md`](docs/phase-5-plan.md). Before guarded two-host
+acceptance, the local project-catalog follow-up adds the missing list/add/edit/
+archive/restore workflow through core, TUI, and DMS; its approved contract is
+in [`docs/project-management-plan.md`](docs/project-management-plan.md). See
 [the design](docs/design.md), the
 [Phase 1 validation record](docs/phase-1-validation.md), and the
 [Phase 2 validation record](docs/phase-2-validation.md), the

@@ -1,7 +1,8 @@
 # Phase 5 Plan: Pull-based SSH Federation and Remote Actions
 
 Status: implementation complete; deterministic and installed local-Fleet
-acceptance passed; guarded live-SSH acceptance pending a configured test host
+acceptance passed; guarded live-SSH acceptance paused behind the approved local
+project-catalog management follow-up and a configured test host
 
 Phase 5 extends the completed local Snapshot v2, task, managed-tmux, TUI, and
 DMS contracts across explicitly configured SSH hosts. It keeps every owning
@@ -305,6 +306,12 @@ This host has no configured remote endpoint. Therefore automated two-host
 transport/action/continuation coverage and installed local-Fleet coverage are
 complete, while the live-SSH steps below remain pending. No provider was
 launched, stopped, restarted, or signalled during the installed checkpoint.
+
+Before live SSH acceptance, the approved local catalog follow-up in
+[`project-management-plan.md`](project-management-plan.md) closes the missing
+project list/add/edit/archive/restore and export/import workflow. Fleet v1 and
+the completed remote implementation remain unchanged while that local UX gate
+is delivered.
 
 ## Automated acceptance
 
