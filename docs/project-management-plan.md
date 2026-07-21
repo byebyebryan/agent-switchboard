@@ -1,7 +1,7 @@
 # Local Project Catalog Management Plan
 
-Status: approved implementation plan; implementation in progress before live
-Phase 5 SSH acceptance
+Status: implemented and locally accepted; live Phase 5 SSH acceptance remains
+pending an explicitly configured test host
 
 ## Goal
 
@@ -99,3 +99,35 @@ Acceptance begins under private XDG roots and then uses only a test-owned
 temporary catalog declaration with an exact config backup and cleanup. It must
 not launch, stop, restart, or signal Codex, Claude, tmux provider sessions, or
 DMS. Live SSH acceptance resumes only after this local workflow passes.
+
+## Implementation checkpoint
+
+The six delivery slices are complete in separate core and DMS commits. Core
+adds the atomic catalog writer, complete catalog service and CLI, and the
+dedicated Textual manager. DMS adds the static Projects category, local-only
+project rows, Add/Manage actions, singleton Ghostty handoff, and post-manager
+Bridge v3 cache refresh. The package verifier and installed smoke lane now
+include the new plan documents and project command surface.
+
+Core formatting, Ruff, all 656 tests, two byte-identical wheel/sdist builds,
+distribution-content audit, and clean wheel installation pass. DMS passes 107
+Python tests, 17 JavaScript behavior groups, QML formatting, Ruff, Pyright, and
+whitespace checks.
+
+Guarded acceptance used only temporary XDG config/state roots. An installed
+wheel classified a directory path, proved add dry-run created no config,
+created a mode-0600 canonical config and exact backup, updated metadata,
+archived/restored the project, exported it, and imported its stable ProjectId
+and RepositoryId into a second host-local catalog with a newly issued
+CheckoutId. The actual user `swbctl` was then rebuilt from this checkout with
+the TUI extra, and a headless Textual pilot opened `--view projects --project`
+through that installed executable and rendered project, repository, and
+checkout rows.
+
+The DMS installed-import harness used a private copy of retained state. It
+proved that Projects, Add Project, Manage Projects, and exactly the local-route
+project rows survive model load, cache round-trip, full refresh, retained
+failure, and recovery. The live DMS service was not reloaded or restarted, and
+no Codex, Claude, tmux, SSH, or provider/model action was launched, stopped, or
+signalled. This is complete local catalog acceptance, not live remote parity or
+a live DMS manager-window interaction claim.

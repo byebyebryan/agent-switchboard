@@ -109,7 +109,7 @@ continuation remains pending an explicitly configured test host. The exact
 contract and evidence boundary are in
 [`docs/phase-5-plan.md`](docs/phase-5-plan.md). Before guarded two-host
 acceptance, the local project-catalog follow-up adds the missing list/add/edit/
-archive/restore workflow through core, TUI, and DMS; its approved contract is
+archive/restore workflow through core, TUI, and DMS; its implemented contract is
 in [`docs/project-management-plan.md`](docs/project-management-plan.md). See
 [the design](docs/design.md), the
 [Phase 1 validation record](docs/phase-1-validation.md), and the
@@ -151,6 +151,7 @@ swbctl agent handoff --json-stdin --json
 swbctl agent close --json-stdin --json
 swbctl agent-mcp
 swbctl tui
+swbctl tui --view projects [--project <project-id> | --add-project]
 swbctl config migrate-v2 --input <legacy-config> --print
 swbctl task list [--project <project-id>] [--status open|closed] --json
 swbctl task create --task-id <uuid> --project <project-id> --title <title> --json
@@ -162,6 +163,18 @@ swbctl task pin <task-id> [--off] --json
 swbctl task export-handoff <task-id> --handoff <handoff-id> --json
 swbctl task close <task-id> --json-stdin --json
 swbctl task reopen <task-id> --json
+swbctl project inspect-path <path> [--kind auto|git|directory] --json
+swbctl project list [--include-archived] --json
+swbctl project show <project-id> --json
+swbctl project add <path> [--name <name>] [--kind auto|git|directory] --json
+swbctl project update <project-id> [metadata options] --json
+swbctl project archive <project-id> --confirm --json
+swbctl project restore <project-id> --json
+swbctl project repository <add|link|update|primary|unlink> ... --json
+swbctl project checkout <add|update|default|archive|restore> ... --json
+swbctl project export <project-id> --json
+swbctl project import --input <export.json> \
+  [--checkout <repository-id>=<path>] --json
 swbctl hooks install --provider codex --dry-run
 swbctl hooks uninstall --provider codex --dry-run
 swbctl hooks install --provider claude --dry-run
