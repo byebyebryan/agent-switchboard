@@ -173,6 +173,215 @@ def test_parser_requires_json_and_retains_global_version(
     assert capsys.readouterr().out == f"swbctl {__version__}\n"
 
 
+def test_project_parser_requires_json_and_destructive_confirmation(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    for arguments in (
+        ["project", "list"],
+        ["project", "inspect-path", "/tmp"],
+        ["project", "archive", PROJECT_ID, "--json"],
+        [
+            "project",
+            "repository",
+            "unlink",
+            PROJECT_ID,
+            LOCATION_ID,
+            "--json",
+        ],
+    ):
+        with pytest.raises(SystemExit) as exit_info:
+            main(arguments)
+        assert exit_info.value.code == 2
+    error = capsys.readouterr().err
+    assert "--json" in error
+    assert "--confirm" in error
+
+
+def test_project_cli_path_first_lifecycle_and_catalog_envelope(
+    cli_environment: CliEnvironment,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    checkout = tmp_path / "project-directory"
+    checkout.mkdir()
+
+    assert (
+        main(
+            [
+                "project",
+                "inspect-path",
+                str(checkout),
+                "--kind",
+                "directory",
+                "--json",
+            ]
+        )
+        == 0
+    )
+    inspected = json.loads(capsys.readouterr().out)
+    assert inspected["catalogVersion"] == 1
+    assert inspected["inspection"]["kind"] == "directory"
+
+    assert (
+        main(
+            [
+                "project",
+                "add",
+                str(checkout),
+                "--name",
+                "Local Project",
+                "--kind",
+                "directory",
+                "--json",
+            ]
+        )
+        == 0
+    )
+    added = json.loads(capsys.readouterr().out)
+    operation = added["operation"]
+    project_id = operation["identities"]["projectId"]
+    checkout_id = operation["identities"]["checkoutId"]
+    assert operation["name"] == "project-add"
+    assert operation["changed"] is True
+    assert Path(operation["backupPath"]).is_file()
+    assert cli_environment.config.stat().st_mode & 0o777 == 0o600
+
+    assert (
+        main(
+            [
+                "project",
+                "update",
+                project_id,
+                "--name",
+                "Renamed Project",
+                "--alias",
+                "local",
+                "--provider",
+                "none",
+                "--json",
+            ]
+        )
+        == 0
+    )
+    updated = json.loads(capsys.readouterr().out)
+    project = next(
+        item for item in updated["projects"] if item["projectId"] == project_id
+    )
+    assert project["name"] == "Renamed Project"
+    assert project["aliases"] == ["local"]
+    assert project["defaultProvider"] is None
+
+    assert (
+        main(
+            [
+                "project",
+                "checkout",
+                "archive",
+                checkout_id,
+                "--confirm",
+                "--json",
+            ]
+        )
+        == 0
+    )
+    archived = json.loads(capsys.readouterr().out)
+    checkout_record = archived["projects"][0]["repositories"][0]["checkouts"][0]
+    assert checkout_record["declared"] is False
+
+    assert (
+        main(
+            [
+                "project",
+                "checkout",
+                "restore",
+                checkout_id,
+                "--json",
+            ]
+        )
+        == 0
+    )
+    restored = json.loads(capsys.readouterr().out)
+    assert restored["operation"]["identities"]["checkoutId"] == checkout_id
+
+    assert main(["project", "archive", project_id, "--confirm", "--json"]) == 0
+    archived_project = json.loads(capsys.readouterr().out)
+    assert archived_project["projects"][0]["declared"] is False
+    assert main(["project", "restore", project_id, "--json"]) == 0
+    restored_project = json.loads(capsys.readouterr().out)
+    assert restored_project["projects"][0]["declared"] is True
+
+
+def test_project_cli_export_and_import_mapping_fail_closed(
+    cli_environment: CliEnvironment,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    checkout = tmp_path / "portable"
+    checkout.mkdir()
+    assert (
+        main(
+            [
+                "project",
+                "add",
+                str(checkout),
+                "--kind",
+                "directory",
+                "--json",
+            ]
+        )
+        == 0
+    )
+    added = json.loads(capsys.readouterr().out)
+    project_id = added["operation"]["identities"]["projectId"]
+    repository_id = added["operation"]["identities"]["repositoryId"]
+
+    assert main(["project", "export", project_id, "--json"]) == 0
+    exported_text = capsys.readouterr().out
+    exported = json.loads(exported_text)
+    assert exported["projectExportVersion"] == 1
+    assert exported["project"]["projectId"] == project_id
+    assert "path" not in exported_text.casefold()
+
+    export_path = tmp_path / "project.json"
+    export_path.write_text(exported_text, encoding="utf-8")
+    assert (
+        main(
+            [
+                "project",
+                "import",
+                "--input",
+                str(export_path),
+                "--checkout",
+                f"{repository_id}={checkout}",
+                "--dry-run",
+                "--json",
+            ]
+        )
+        == 0
+    )
+    imported = json.loads(capsys.readouterr().out)
+    assert imported["operation"]["name"] == "project-import"
+    assert imported["operation"]["dryRun"] is True
+
+    assert (
+        main(
+            [
+                "project",
+                "import",
+                "--input",
+                str(export_path),
+                "--checkout",
+                "invalid",
+                "--json",
+            ]
+        )
+        == 1
+    )
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "REPOSITORY_ID=PATH" in captured.err
+
+
 def test_fleet_cli_emits_one_local_host_without_network(
     cli_environment: CliEnvironment,
     capsys: pytest.CaptureFixture[str],

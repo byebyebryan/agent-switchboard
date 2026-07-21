@@ -12,9 +12,12 @@ import sys
 import time
 from collections.abc import Sequence
 from pathlib import Path
+from typing import Any
 
 from . import __version__
 from .agent_tools import AgentToolError, AgentToolService
+from .catalog import CatalogEditor, CatalogError
+from .catalog_management import CATALOG_VERSION, CatalogManager, catalog_json
 from .config import RemoteConfig, SwitchboardConfig, load_config, migrate_legacy_config
 from .curation import (
     MAX_HANDOFF_INPUT_BYTES,
@@ -71,6 +74,7 @@ from .tmux import TmuxController, TmuxError
 
 _MAX_ERROR_MESSAGE_LENGTH = 1_024
 _MAX_REMOTE_ACTION_INPUT_BYTES = MAX_HANDOFF_INPUT_BYTES
+_MAX_PROJECT_IMPORT_BYTES = 2 * 1024 * 1024
 _EPHEMERAL_CONFIG_HOST_ID = HostId("00000000-0000-4000-8000-000000000000")
 
 
@@ -165,6 +169,160 @@ def build_parser() -> argparse.ArgumentParser:
     migrate_v2.add_argument(
         "--print", dest="print_output", action="store_true", required=True
     )
+
+    project = commands.add_parser("project", help="manage the local project catalog")
+    project_actions = project.add_subparsers(dest="project_action", required=True)
+    project_inspect = project_actions.add_parser(
+        "inspect-path", help="classify a project or checkout path"
+    )
+    project_inspect.add_argument("path", type=Path)
+    project_inspect.add_argument(
+        "--kind", choices=("auto", "git", "directory"), default="auto"
+    )
+    project_inspect.add_argument("--json", action="store_true", required=True)
+    project_list = project_actions.add_parser("list", help="list catalog projects")
+    project_list.add_argument("--include-archived", action="store_true")
+    project_list.add_argument("--json", action="store_true", required=True)
+    project_show = project_actions.add_parser("show", help="show one catalog project")
+    project_show.add_argument("project_id")
+    project_show.add_argument("--json", action="store_true", required=True)
+    project_add = project_actions.add_parser("add", help="add a path-first project")
+    project_add.add_argument("path", type=Path)
+    project_add.add_argument("--name")
+    project_add.add_argument(
+        "--kind", choices=("auto", "git", "directory"), default="auto"
+    )
+    project_add.add_argument(
+        "--provider", choices=("codex", "claude", "none"), default="codex"
+    )
+    project_add.add_argument("--transport", choices=("tmux",), default="tmux")
+    project_add.add_argument("--dry-run", action="store_true")
+    project_add.add_argument("--json", action="store_true", required=True)
+    project_update = project_actions.add_parser(
+        "update", help="update project metadata"
+    )
+    project_update.add_argument("project_id")
+    project_update.add_argument("--name")
+    aliases = project_update.add_mutually_exclusive_group()
+    aliases.add_argument("--alias", action="append")
+    aliases.add_argument("--clear-aliases", action="store_true")
+    project_update.add_argument("--provider", choices=("codex", "claude", "none"))
+    project_update.add_argument("--transport", choices=("tmux",))
+    project_update.add_argument("--dry-run", action="store_true")
+    project_update.add_argument("--json", action="store_true", required=True)
+    for action in ("archive", "restore"):
+        lifecycle = project_actions.add_parser(action, help=f"{action} one project")
+        lifecycle.add_argument("project_id")
+        if action == "archive":
+            lifecycle.add_argument("--confirm", action="store_true", required=True)
+        lifecycle.add_argument("--dry-run", action="store_true")
+        lifecycle.add_argument("--json", action="store_true", required=True)
+
+    repository = project_actions.add_parser(
+        "repository", help="manage project repository membership"
+    )
+    repository_actions = repository.add_subparsers(
+        dest="repository_action", required=True
+    )
+    repository_add = repository_actions.add_parser("add", help="add a repository")
+    repository_add.add_argument("project_id")
+    repository_add.add_argument("path", type=Path)
+    repository_add.add_argument("--name")
+    repository_add.add_argument(
+        "--kind", choices=("auto", "git", "directory"), default="auto"
+    )
+    repository_add.add_argument("--primary", action="store_true")
+    repository_add.add_argument("--dry-run", action="store_true")
+    repository_add.add_argument("--json", action="store_true", required=True)
+    repository_link = repository_actions.add_parser("link", help="link a repository")
+    repository_link.add_argument("project_id")
+    repository_link.add_argument("repository_id")
+    repository_link.add_argument("--primary", action="store_true")
+    repository_link.add_argument("--dry-run", action="store_true")
+    repository_link.add_argument("--json", action="store_true", required=True)
+    repository_update = repository_actions.add_parser(
+        "update", help="update repository metadata"
+    )
+    repository_update.add_argument("repository_id")
+    repository_update.add_argument("--name")
+    context_sources = repository_update.add_mutually_exclusive_group()
+    context_sources.add_argument("--context-source", action="append")
+    context_sources.add_argument("--clear-context-sources", action="store_true")
+    repository_update.add_argument("--dry-run", action="store_true")
+    repository_update.add_argument("--json", action="store_true", required=True)
+    repository_primary = repository_actions.add_parser(
+        "primary", help="select the primary repository"
+    )
+    repository_primary.add_argument("project_id")
+    repository_primary.add_argument("repository_id")
+    repository_primary.add_argument("--dry-run", action="store_true")
+    repository_primary.add_argument("--json", action="store_true", required=True)
+    repository_unlink = repository_actions.add_parser(
+        "unlink", help="unlink a repository"
+    )
+    repository_unlink.add_argument("project_id")
+    repository_unlink.add_argument("repository_id")
+    repository_unlink.add_argument("--confirm", action="store_true", required=True)
+    repository_unlink.add_argument("--dry-run", action="store_true")
+    repository_unlink.add_argument("--json", action="store_true", required=True)
+
+    checkout = project_actions.add_parser("checkout", help="manage local checkouts")
+    checkout_actions = checkout.add_subparsers(dest="checkout_action", required=True)
+    checkout_add = checkout_actions.add_parser("add", help="add a local checkout")
+    checkout_add.add_argument("repository_id")
+    checkout_add.add_argument("path", type=Path)
+    checkout_add.add_argument("--display-name")
+    checkout_add.add_argument(
+        "--kind", choices=("auto", "git", "directory"), default="auto"
+    )
+    checkout_add.add_argument(
+        "--provider", choices=("codex", "claude", "none"), default="none"
+    )
+    checkout_add.add_argument("--transport", choices=("tmux", "none"), default="none")
+    checkout_add.add_argument("--default", action="store_true")
+    checkout_add.add_argument("--dry-run", action="store_true")
+    checkout_add.add_argument("--json", action="store_true", required=True)
+    checkout_update = checkout_actions.add_parser(
+        "update", help="update a local checkout"
+    )
+    checkout_update.add_argument("checkout_id")
+    checkout_update.add_argument("--path", type=Path)
+    display_name = checkout_update.add_mutually_exclusive_group()
+    display_name.add_argument("--display-name")
+    display_name.add_argument("--clear-display-name", action="store_true")
+    checkout_update.add_argument("--provider", choices=("codex", "claude", "none"))
+    checkout_update.add_argument("--transport", choices=("tmux", "none"))
+    checkout_update.add_argument("--default", choices=("on", "off"))
+    checkout_update.add_argument("--dry-run", action="store_true")
+    checkout_update.add_argument("--json", action="store_true", required=True)
+    checkout_default = checkout_actions.add_parser(
+        "default", help="select the default checkout"
+    )
+    checkout_default.add_argument("checkout_id")
+    checkout_default.add_argument("--dry-run", action="store_true")
+    checkout_default.add_argument("--json", action="store_true", required=True)
+    for action in ("archive", "restore"):
+        lifecycle = checkout_actions.add_parser(action, help=f"{action} one checkout")
+        lifecycle.add_argument("checkout_id")
+        if action == "archive":
+            lifecycle.add_argument("--confirm", action="store_true", required=True)
+        lifecycle.add_argument("--dry-run", action="store_true")
+        lifecycle.add_argument("--json", action="store_true", required=True)
+
+    project_export = project_actions.add_parser(
+        "export", help="export global project metadata"
+    )
+    project_export.add_argument("project_id")
+    project_export.add_argument("--json", action="store_true", required=True)
+    project_import = project_actions.add_parser(
+        "import", help="import global project metadata"
+    )
+    project_import.add_argument("--input", type=Path, required=True)
+    project_import.add_argument(
+        "--checkout", action="append", default=[], metavar="REPOSITORY_ID=PATH"
+    )
+    project_import.add_argument("--dry-run", action="store_true")
+    project_import.add_argument("--json", action="store_true", required=True)
 
     task = commands.add_parser("task", help="manage explicit project tasks")
     task_actions = task.add_subparsers(dest="task_action", required=True)
@@ -453,6 +611,247 @@ def _config_command(arguments: argparse.Namespace) -> str:
             f"cannot read legacy configuration at {arguments.input}: {error}"
         ) from error
     return migrate_legacy_config(raw, host_id=_EPHEMERAL_CONFIG_HOST_ID)
+
+
+def _optional_choice(value: str) -> str | None:
+    return None if value == "none" else value
+
+
+def _checkout_mappings(values: Sequence[str]) -> dict[str, Path]:
+    result: dict[str, Path] = {}
+    for value in values:
+        repository_id, separator, raw_path = value.partition("=")
+        if not separator or not repository_id or not raw_path:
+            raise CatalogError(
+                "project_import_mapping_invalid",
+                "Checkout mappings must use REPOSITORY_ID=PATH.",
+            )
+        if repository_id in result:
+            raise CatalogError(
+                "project_import_mapping_invalid",
+                "Each repository may have only one checkout mapping.",
+            )
+        result[repository_id] = Path(raw_path)
+    return result
+
+
+def _read_project_export(path: Path) -> object:
+    try:
+        metadata = path.stat()
+        if metadata.st_size > _MAX_PROJECT_IMPORT_BYTES:
+            raise CatalogError(
+                "project_export_too_large", "The project export is too large."
+            )
+        payload = path.read_bytes()
+    except CatalogError:
+        raise
+    except OSError as error:
+        raise CatalogError(
+            "project_export_unavailable", "The project export is unavailable."
+        ) from error
+    if len(payload) > _MAX_PROJECT_IMPORT_BYTES:
+        raise CatalogError(
+            "project_export_too_large", "The project export is too large."
+        )
+
+    def object_pairs(pairs: list[tuple[str, object]]) -> dict[str, object]:
+        result: dict[str, object] = {}
+        for key, value in pairs:
+            if key in result:
+                raise CatalogError(
+                    "project_export_invalid",
+                    "The project export contains duplicate fields.",
+                )
+            result[key] = value
+        return result
+
+    try:
+        return json.loads(
+            payload,
+            object_pairs_hook=object_pairs,
+            parse_constant=lambda _value: (_ for _ in ()).throw(ValueError()),
+        )
+    except CatalogError:
+        raise
+    except (UnicodeDecodeError, ValueError) as error:
+        raise CatalogError(
+            "project_export_invalid", "The project export is invalid."
+        ) from error
+
+
+def _project_command(arguments: argparse.Namespace) -> str:
+    host_id = load_or_create_host_id()
+    with Registry(database_path()) as registry:
+        manager = CatalogManager(
+            host_id=host_id,
+            editor=CatalogEditor(host_id=host_id),
+            registry=registry,
+        )
+        action = arguments.project_action
+        if action == "inspect-path":
+            inspection = manager.inspect(arguments.path, kind=arguments.kind)
+            return catalog_json(
+                {
+                    "schemaVersion": 2,
+                    "protocolVersion": 2,
+                    "catalogVersion": CATALOG_VERSION,
+                    "generatedAt": time.time_ns() // 1_000_000,
+                    "hostId": str(host_id),
+                    "inspection": inspection.to_dict(),
+                }
+            )
+        if action == "list":
+            return catalog_json(
+                manager.document(include_archived=arguments.include_archived)
+            )
+        if action == "show":
+            document = manager.document(include_archived=True)
+            document["projects"] = [
+                project
+                for project in document["projects"]
+                if project["projectId"] == arguments.project_id
+            ]
+            if not document["projects"]:
+                raise CatalogError(
+                    "project_not_found", "The selected project is not retained."
+                )
+            return catalog_json(document)
+        if action == "export":
+            return catalog_json(manager.export_project(arguments.project_id))
+        if action == "import":
+            mutation = manager.import_project(
+                _read_project_export(arguments.input),
+                checkout_paths=_checkout_mappings(arguments.checkout),
+                dry_run=arguments.dry_run,
+            )
+        elif action == "add":
+            mutation = manager.add_project(
+                arguments.path,
+                name=arguments.name,
+                kind=arguments.kind,
+                default_provider=_optional_choice(arguments.provider),
+                default_transport=arguments.transport,
+                dry_run=arguments.dry_run,
+            )
+        elif action == "update":
+            values: dict[str, Any] = {"dry_run": arguments.dry_run}
+            if arguments.name is not None:
+                values["name"] = arguments.name
+            if arguments.alias is not None or arguments.clear_aliases:
+                values["aliases"] = tuple(arguments.alias or ())
+            if arguments.provider is not None:
+                values["default_provider"] = _optional_choice(arguments.provider)
+            if arguments.transport is not None:
+                values["default_transport"] = arguments.transport
+            mutation = manager.update_project(arguments.project_id, **values)
+        elif action == "archive":
+            mutation = manager.archive_project(
+                arguments.project_id,
+                confirmed=arguments.confirm,
+                dry_run=arguments.dry_run,
+            )
+        elif action == "restore":
+            mutation = manager.restore_project(
+                arguments.project_id, dry_run=arguments.dry_run
+            )
+        elif action == "repository":
+            repository_action = arguments.repository_action
+            if repository_action == "add":
+                mutation = manager.add_repository(
+                    arguments.project_id,
+                    arguments.path,
+                    name=arguments.name,
+                    kind=arguments.kind,
+                    primary=arguments.primary,
+                    dry_run=arguments.dry_run,
+                )
+            elif repository_action == "link":
+                mutation = manager.link_repository(
+                    arguments.project_id,
+                    arguments.repository_id,
+                    primary=arguments.primary,
+                    dry_run=arguments.dry_run,
+                )
+            elif repository_action == "update":
+                context_sources = None
+                if (
+                    arguments.context_source is not None
+                    or arguments.clear_context_sources
+                ):
+                    context_sources = tuple(arguments.context_source or ())
+                mutation = manager.update_repository(
+                    arguments.repository_id,
+                    name=arguments.name,
+                    context_sources=context_sources,
+                    dry_run=arguments.dry_run,
+                )
+            elif repository_action == "primary":
+                mutation = manager.set_primary_repository(
+                    arguments.project_id,
+                    arguments.repository_id,
+                    dry_run=arguments.dry_run,
+                )
+            elif repository_action == "unlink":
+                mutation = manager.unlink_repository(
+                    arguments.project_id,
+                    arguments.repository_id,
+                    confirmed=arguments.confirm,
+                    dry_run=arguments.dry_run,
+                )
+            else:
+                raise CatalogError(
+                    "project_action_unsupported",
+                    "The repository action is unsupported.",
+                )
+        elif action == "checkout":
+            checkout_action = arguments.checkout_action
+            if checkout_action == "add":
+                mutation = manager.add_checkout(
+                    arguments.repository_id,
+                    arguments.path,
+                    display_name=arguments.display_name,
+                    kind=arguments.kind,
+                    provider_override=_optional_choice(arguments.provider),
+                    transport_override=_optional_choice(arguments.transport),
+                    is_default=arguments.default,
+                    dry_run=arguments.dry_run,
+                )
+            elif checkout_action == "update":
+                values = {"dry_run": arguments.dry_run}
+                if arguments.path is not None:
+                    values["path"] = arguments.path
+                if arguments.display_name is not None or arguments.clear_display_name:
+                    values["display_name"] = arguments.display_name
+                if arguments.provider is not None:
+                    values["provider_override"] = _optional_choice(arguments.provider)
+                if arguments.transport is not None:
+                    values["transport_override"] = _optional_choice(arguments.transport)
+                if arguments.default is not None:
+                    values["is_default"] = arguments.default == "on"
+                mutation = manager.update_checkout(arguments.checkout_id, **values)
+            elif checkout_action == "default":
+                mutation = manager.set_default_checkout(
+                    arguments.checkout_id, dry_run=arguments.dry_run
+                )
+            elif checkout_action == "archive":
+                mutation = manager.archive_checkout(
+                    arguments.checkout_id,
+                    confirmed=arguments.confirm,
+                    dry_run=arguments.dry_run,
+                )
+            elif checkout_action == "restore":
+                mutation = manager.restore_checkout(
+                    arguments.checkout_id, dry_run=arguments.dry_run
+                )
+            else:
+                raise CatalogError(
+                    "project_action_unsupported", "The checkout action is unsupported."
+                )
+        else:
+            raise CatalogError(
+                "project_action_unsupported", "The project action is unsupported."
+            )
+        return catalog_json(manager.document(include_archived=True, mutation=mutation))
 
 
 def _run_tui_command() -> int:
@@ -1523,6 +1922,22 @@ def main(argv: Sequence[str] | None = None) -> int:
             sys.stdout.write(f"{_task_command(arguments)}\n")
         except (
             CurationError,
+            ValidationError,
+            StorageError,
+            MigrationError,
+            sqlite3.Error,
+            OSError,
+            ValueError,
+        ) as error:
+            print(f"swbctl: {_safe_error_message(error)}", file=sys.stderr)
+            return 1
+        return 0
+
+    if arguments.command == "project":
+        try:
+            sys.stdout.write(f"{_project_command(arguments)}\n")
+        except (
+            CatalogError,
             ValidationError,
             StorageError,
             MigrationError,
