@@ -5,6 +5,12 @@ Date: 2026-07-19
 Status: complete; deterministic and guarded installed acceptance passed in
 core and the separate DMS adapter
 
+> Superseded close behavior (2026-07-21): ordinary task close no longer
+> requires or creates a handoff and now performs best-effort safe managed
+> runtime cleanup. See
+> [Frictionless task close](frictionless-task-close-plan.md). The original
+> Phase 4D text below is retained as implementation history.
+
 ## Decision
 
 Phase 4D replaces the path-centric project-location contract with a clean v2

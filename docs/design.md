@@ -2,7 +2,10 @@
 
 Status: Implementation baseline
 
-Last updated: 2026-07-20
+Last updated: 2026-07-21
+
+Task-close reconciliation:
+[Frictionless task close plan](frictionless-task-close-plan.md)
 
 Related research: [Open-source product landscape](product-landscape.md)
 
@@ -1228,7 +1231,8 @@ swbctl task create --task-id <uuid> --project <project-id> --title <text>
 swbctl task adopt <session-key> (--task <task-id> | --task-id <uuid> --title <text>)
                      [--project <project-id>] [--checkout <checkout-id>] [--json]
 swbctl task title|purpose|pin ...
-swbctl task handoff|close <task-id> --json-stdin [--json]
+swbctl task handoff <task-id> --json-stdin [--json]
+swbctl task close <task-id> [--host <host-id>] [--json]
 swbctl task reopen <task-id> [--json]
 swbctl current [--json]
 swbctl session name [<session-key>|--current] (<name>|--clear) [--json]
@@ -1237,7 +1241,7 @@ swbctl session handoff [<session-key>|--current] --json-stdin [--json]
 swbctl session wrap [<session-key>|--current] --json-stdin [--json]
 swbctl session pin [<session-key>|--current] [--off] [--json]
 swbctl prepare-open <session-key> --request-id <uuid> --json
-swbctl prepare-task <task-id> [--provider codex|claude]
+swbctl prepare-task <task-id> [--provider codex|claude] [--reopen]
                      --request-id <uuid> --json
 swbctl prepare-task <task-id> --create --project <project-id> --title <text>
                      [--checkout <checkout-id>] --provider codex|claude
@@ -1370,7 +1374,6 @@ task_search(query)
 memory_search(query)
 task_update(title?, purpose?, pinned?)
 task_set_handoff(summary, next_action)
-task_close(summary, next_action)
 ```
 
 Mutating agent tools are restricted to the calling session's current task.
@@ -1402,9 +1405,11 @@ routing remains available on every adapter failure. The exact bounds and
 acceptance evidence are recorded in
 [`docs/phase-4c-plan.md`](phase-4c-plan.md).
 
-An optional provider skill can guide the current agent to prepare a concise
-handoff and invoke `task_close`. Switchboard stores the supplied result; it
-does not decide that the underlying work is complete.
+Explicit handoff tools remain available for durable checkpoints and required
+provider or host transitions. Closing is intentionally human-only and never
+injects a prompt or asks an agent to decide that the underlying work is
+complete. The exact close lifecycle is defined in
+[`docs/frictionless-task-close-plan.md`](frictionless-task-close-plan.md).
 
 ## Terminal UI
 
@@ -1455,7 +1460,8 @@ view.
 - Open or continue the selected task's current session.
 - Create a task with an explicit title and selected project/checkout/provider.
 - Adopt an Inbox session into a new or existing task.
-- Close a task with an exact handoff, or reopen it after checkout validation.
+- Close a task immediately with best-effort safe runtime cleanup, or reopen and
+  open it in one action after checkout validation.
 - Filter by project, provider, host, state, and working directory.
 - Pin, title, describe, hand off, or close a task.
 - Refresh/reconcile.

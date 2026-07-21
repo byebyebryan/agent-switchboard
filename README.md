@@ -148,7 +148,6 @@ swbctl agent search <query> [--limit 20] --json
 swbctl agent memory <query> [--limit 20] --json
 swbctl agent update [--title <title>] [--purpose <purpose>] [--pin on|off] --json
 swbctl agent handoff --json-stdin --json
-swbctl agent close --json-stdin --json
 swbctl agent-mcp
 swbctl tui
 swbctl tui --view projects [--project <project-id> | --add-project]
@@ -161,7 +160,7 @@ swbctl task title <task-id> <title> --json
 swbctl task purpose <task-id> <purpose> --json
 swbctl task pin <task-id> [--off] --json
 swbctl task export-handoff <task-id> --handoff <handoff-id> --json
-swbctl task close <task-id> --json-stdin --json
+swbctl task close <task-id> [--host <host-id>] --json
 swbctl task reopen <task-id> --json
 swbctl project inspect-path <path> [--kind auto|git|directory] --json
 swbctl project list [--include-archived] --json
@@ -186,7 +185,7 @@ swbctl prepare-task <task-id> [--host <host-id>] --create \
   --project <project-id> --title <title> \
   --checkout <checkout-id> --provider codex|claude --request-id <uuid> \
   --can-focus-desktop --can-launch-terminal --json
-swbctl prepare-task <task-id> [--host <host-id>] --request-id <uuid> \
+swbctl prepare-task <task-id> [--host <host-id>] [--reopen] --request-id <uuid> \
   --can-focus-desktop --can-launch-terminal --json
 swbctl prepare-task <new-task-id> --host <destination-host-id> --create \
   --continue-json-stdin --checkout <checkout-id> --provider codex|claude \
@@ -276,8 +275,10 @@ frontends receive neither SSH targets nor tmux locators.
 
 Continuation never reads a transcript or injects provider prompt text. A task
 may switch providers only after its current session has an explicit handoff and
-is wrapped. Closing a task appends that handoff and wraps the session in the
-same transaction, but deliberately leaves the runtime and tmux surface alone.
+is wrapped. Closing a task is deliberately frictionless: it records no handoff,
+changes no wrapped state, and makes a best-effort stop of only an exact safely
+owned managed runtime. Cleanup failure leaves the task Closed with a bounded
+warning. Selecting a Closed task can reopen and resume it in one action.
 For cross-host continuation, `task export-handoff` emits one bounded,
 content-hashed envelope for an exact immutable handoff. The destination
 validates the source configured host and matching ProjectId, stores the
@@ -294,7 +295,8 @@ fails the launch without manufacturing a session.
 
 `stop-session` is intentionally narrower than a generic process killer. It
 first performs live reconciliation and requires one confirmed active local
-Claude surface whose current session, bound launch, exact tmux locator, process
+Codex or Claude surface whose current session, bound launch, exact tmux
+locator, process
 birth, UID, and process-group ownership all agree. It sends an exact
 interactive `/exit`, waits a bounded grace period, and only then may signal that
 same launch-owned process group before retiring the exact surface. Already
@@ -324,8 +326,8 @@ project identity for authorization. Reads and search are restricted to the
 caller's configured local project and current task; search covers only curated
 titles, purposes, sessions, and explicit handoffs. `context` reads only
 repository-relative configured text sources. Mutations can update only the
-current task or append its exact handoff. Task creation, adoption, checkout
-routing, provider preference, and reopening remain human-only operations.
+current task or append its exact handoff. Task creation, adoption, checkout,
+close, routing, provider preference, and reopening remain human-only operations.
 Agent commands never reconcile providers, read transcripts, call a model, or
 enter the DMS path.
 
@@ -353,8 +355,9 @@ Fleet v1, retains last-good rows while refreshing, qualifies remote rows by
 host, and exposes host/project filters plus offline/stale state. Open tasks are
 the default view; `1`, `2`, and `3` switch between Open, Inbox, and Closed. It
 can create and launch a titled task, adopt an Inbox session, edit task title or
-purpose, pin, close with an explicit handoff, reopen, continue, inspect task
-session history, open exact Inbox sessions, and request safe Claude stop. It
+purpose, pin, frictionless close, reopen, continue, inspect task
+session history, open exact Inbox sessions, and request safe managed-runtime
+stop. It
 uses only fixed installed commands and validated Fleet v1/Snapshot v2 data
 rather than importing registry or provider internals.
 
