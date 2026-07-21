@@ -1397,6 +1397,169 @@ class Registry:
             projects.append(project)
         return projects
 
+    def catalog_reference_counts(
+        self, host_id: str
+    ) -> dict[str, dict[str, dict[str, int]]]:
+        """Return bounded local history/liveness counts for catalog safety checks."""
+
+        host_id = _canonical_host_id(host_id)
+        fields = (
+            "openTasks",
+            "closedTasks",
+            "sessions",
+            "liveSessions",
+            "pendingLaunches",
+        )
+
+        def empty() -> dict[str, int]:
+            return dict.fromkeys(fields, 0)
+
+        result: dict[str, dict[str, dict[str, int]]] = {
+            "projects": {},
+            "repositories": {},
+            "checkouts": {},
+        }
+
+        def counts(scope: str, identity: str) -> dict[str, int]:
+            return result[scope].setdefault(identity, empty())
+
+        for row in self.connection.execute(
+            """
+            SELECT project_id, checkout_id, status, COUNT(*) AS count
+            FROM tasks WHERE host_id = ?
+            GROUP BY project_id, checkout_id, status
+            """,
+            (host_id,),
+        ).fetchall():
+            field = "openTasks" if row["status"] == "open" else "closedTasks"
+            amount = int(row["count"])
+            counts("projects", str(row["project_id"]))[field] += amount
+            if row["checkout_id"] is not None:
+                counts("checkouts", str(row["checkout_id"]))[field] += amount
+
+        for row in self.connection.execute(
+            """
+            SELECT project_id, checkout_id, runtime_presence, COUNT(*) AS count
+            FROM sessions
+            WHERE host_id = ? AND project_id IS NOT NULL
+            GROUP BY project_id, checkout_id, runtime_presence
+            """,
+            (host_id,),
+        ).fetchall():
+            amount = int(row["count"])
+            project = counts("projects", str(row["project_id"]))
+            project["sessions"] += amount
+            if row["runtime_presence"] == "live":
+                project["liveSessions"] += amount
+            if row["checkout_id"] is not None:
+                checkout = counts("checkouts", str(row["checkout_id"]))
+                checkout["sessions"] += amount
+                if row["runtime_presence"] == "live":
+                    checkout["liveSessions"] += amount
+
+        pending_states = (
+            "reserved",
+            "surface_ready",
+            "waiting_for_client",
+            "provider_started",
+            "manager_ready",
+        )
+        placeholders = ",".join("?" for _value in pending_states)
+        for row in self.connection.execute(
+            f"""
+            SELECT project_id, checkout_id, COUNT(*) AS count
+            FROM launch_intents
+            WHERE host_id = ? AND project_id IS NOT NULL
+              AND state IN ({placeholders})
+            GROUP BY project_id, checkout_id
+            """,
+            (host_id, *pending_states),
+        ).fetchall():
+            amount = int(row["count"])
+            counts("projects", str(row["project_id"]))["pendingLaunches"] += amount
+            if row["checkout_id"] is not None:
+                counts("checkouts", str(row["checkout_id"]))["pendingLaunches"] += (
+                    amount
+                )
+
+        checkout_repositories = {
+            str(row["checkout_id"]): str(row["repository_id"])
+            for row in self.connection.execute(
+                "SELECT checkout_id, repository_id FROM checkouts WHERE host_id = ?",
+                (host_id,),
+            ).fetchall()
+        }
+        for checkout_id, values in result["checkouts"].items():
+            repository_id = checkout_repositories.get(checkout_id)
+            if repository_id is None:
+                continue
+            repository = counts("repositories", repository_id)
+            for field in fields:
+                repository[field] += values[field]
+        return result
+
+    def catalog_membership_reference_counts(
+        self, host_id: str, project_id: str, repository_id: str
+    ) -> dict[str, int]:
+        """Return history/liveness counts scoped to one project-repository link."""
+
+        host_id = _canonical_host_id(host_id)
+        project_id = _canonical_uuid_id(project_id, ProjectId, "project_id")
+        repository_id = _canonical_uuid_id(repository_id, RepositoryId, "repository_id")
+        values = {
+            "openTasks": 0,
+            "closedTasks": 0,
+            "sessions": 0,
+            "liveSessions": 0,
+            "pendingLaunches": 0,
+        }
+        for row in self.connection.execute(
+            """
+            SELECT t.status, COUNT(*) AS count
+            FROM tasks AS t
+            JOIN checkouts AS c ON c.checkout_id = t.checkout_id
+            WHERE t.host_id = ? AND t.project_id = ? AND c.repository_id = ?
+            GROUP BY t.status
+            """,
+            (host_id, project_id, repository_id),
+        ).fetchall():
+            field = "openTasks" if row["status"] == "open" else "closedTasks"
+            values[field] += int(row["count"])
+        for row in self.connection.execute(
+            """
+            SELECT s.runtime_presence, COUNT(*) AS count
+            FROM sessions AS s
+            JOIN checkouts AS c ON c.checkout_id = s.checkout_id
+            WHERE s.host_id = ? AND s.project_id = ? AND c.repository_id = ?
+            GROUP BY s.runtime_presence
+            """,
+            (host_id, project_id, repository_id),
+        ).fetchall():
+            amount = int(row["count"])
+            values["sessions"] += amount
+            if row["runtime_presence"] == "live":
+                values["liveSessions"] += amount
+        pending_states = (
+            "reserved",
+            "surface_ready",
+            "waiting_for_client",
+            "provider_started",
+            "manager_ready",
+        )
+        placeholders = ",".join("?" for _value in pending_states)
+        row = self.connection.execute(
+            f"""
+            SELECT COUNT(*) AS count
+            FROM launch_intents AS launch
+            JOIN checkouts AS c ON c.checkout_id = launch.checkout_id
+            WHERE launch.host_id = ? AND launch.project_id = ?
+              AND c.repository_id = ? AND launch.state IN ({placeholders})
+            """,
+            (host_id, project_id, repository_id, *pending_states),
+        ).fetchone()
+        values["pendingLaunches"] = 0 if row is None else int(row["count"])
+        return values
+
     def reconcile_repository_checkouts(
         self,
         *,
@@ -1553,6 +1716,18 @@ class Registry:
                 (repository_id, host_id),
             ).fetchall()
         return [dict(row) for row in rows]
+
+    def checkout_at_path(self, host_id: str, path: str | Path) -> dict[str, Any] | None:
+        """Return the retained local checkout identity for one canonical path."""
+
+        host_id = _canonical_host_id(host_id)
+        canonical = str(Path(path).resolve(strict=False))
+        return _row_dict(
+            self.connection.execute(
+                "SELECT * FROM checkouts WHERE host_id = ? AND path = ?",
+                (host_id, canonical),
+            ).fetchone()
+        )
 
     def create_task(
         self,

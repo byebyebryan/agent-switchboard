@@ -300,6 +300,16 @@ class CatalogEditor:
         self.now_ns = now_ns
         self.token_hex = token_hex
 
+    def read(self) -> SwitchboardConfig:
+        """Read the current authoritative config through mutation safety checks."""
+
+        _secure_directory(self.path.parent)
+        payload, _existed = _read_source(self.path)
+        try:
+            return parse_config(payload, host_id=self.host_id)
+        except ValidationError as error:
+            raise CatalogError("catalog_config_invalid", str(error)) from error
+
     def apply(
         self,
         operation: str,
