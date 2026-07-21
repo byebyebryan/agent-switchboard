@@ -117,6 +117,8 @@ def test_ci_smokes_wheel_and_source_distribution_installations() -> None:
     assert 'agent memory --help | grep -F -- "--limit LIMIT"' in workflow
     assert 'agent-mcp --help | grep -F "usage: swbctl agent-mcp"' in workflow
     assert 'task --help | grep -F "usage: swbctl task"' in workflow
+    assert 'project --help | grep -F "usage: swbctl project"' in workflow
+    assert '"--view {open,inbox,closed,projects}"' in workflow
     assert 'prepare-task --help | grep -F -- "--create"' in workflow
     assert 'hooks install --help | grep -F -- "--dry-run"' in workflow
     assert 'hooks uninstall --help | grep -F -- "--dry-run"' in workflow
@@ -125,6 +127,7 @@ def test_ci_smokes_wheel_and_source_distribution_installations() -> None:
     assert "grep -F \"pip install 'agent-switchboard[tui]'\"" in workflow
     assert 'snapshot --json > "$smoke_root/snapshot.json"' in workflow
     assert 'list --json > "$smoke_root/list.json"' in workflow
+    assert 'project list --json > "$smoke_root/catalog.json"' in workflow
     assert "Path(sys.argv[1]).read_bytes()" in workflow
     assert "SnapshotEnvelope.from_json" in workflow
     assert '"docs/phase-2-validation.md"' in verifier
@@ -135,6 +138,9 @@ def test_ci_smokes_wheel_and_source_distribution_installations() -> None:
     assert '"docs/phase-4a-plan.md"' in verifier
     assert '"docs/phase-4b-plan.md"' in verifier
     assert '"docs/phase-4c-plan.md"' in verifier
+    assert '"docs/phase-4d-plan.md"' in verifier
+    assert '"docs/phase-5-plan.md"' in verifier
+    assert '"docs/project-management-plan.md"' in verifier
     assert '"agent_switchboard/migrations/v0003_name_provenance_runtime_index.py"' in (
         verifier
     )

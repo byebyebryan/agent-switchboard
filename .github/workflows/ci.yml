@@ -160,11 +160,14 @@ jobs:
             "$swbctl" agent memory --help | grep -F -- "--limit LIMIT"
             "$swbctl" agent-mcp --help | grep -F "usage: swbctl agent-mcp"
             "$swbctl" task --help | grep -F "usage: swbctl task"
+            "$swbctl" project --help | grep -F "usage: swbctl project"
             "$swbctl" prepare-task --help | grep -F -- "--create"
             "$swbctl" hooks install --help | grep -F -- "--dry-run"
             "$swbctl" hooks uninstall --help | grep -F -- "--dry-run"
             "$swbctl" doctor --help | grep -F "usage: swbctl doctor"
             "$swbctl" tui --help | grep -F "usage: swbctl tui"
+            "$swbctl" tui --help | \
+              grep -F -- "--view {open,inbox,closed,projects}"
 
             smoke_root="/tmp/$(basename "$environment")-xdg"
             rm -rf "$smoke_root"
@@ -189,8 +192,11 @@ jobs:
             grep -F "agent authorization failed" "$smoke_root/agent.stderr"
             "$swbctl" snapshot --json > "$smoke_root/snapshot.json"
             "$swbctl" list --json > "$smoke_root/list.json"
+            "$swbctl" project list --json > "$smoke_root/catalog.json"
             "$python" -I - \
-              "$smoke_root/snapshot.json" "$smoke_root/list.json" <<'PY'
+              "$smoke_root/snapshot.json" "$smoke_root/list.json" \
+              "$smoke_root/catalog.json" <<'PY'
+          import json
           import sys
           from pathlib import Path
 
@@ -198,8 +204,11 @@ jobs:
 
           snapshot = SnapshotEnvelope.from_json(Path(sys.argv[1]).read_bytes())
           listed = SnapshotEnvelope.from_json(Path(sys.argv[2]).read_bytes())
+          catalog = json.loads(Path(sys.argv[3]).read_bytes())
           assert snapshot.host.host_id == listed.host.host_id
           assert snapshot.sessions == listed.sessions == ()
+          assert catalog["catalogVersion"] == 1
+          assert catalog["projects"] == []
           PY
           done
       - uses: actions/upload-artifact@v7
