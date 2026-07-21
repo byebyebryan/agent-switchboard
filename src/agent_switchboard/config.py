@@ -927,7 +927,9 @@ def _legacy_projects(raw: object, host_id: HostId) -> ProjectCatalog:
         raise ConfigError(str(error)) from error
 
 
-def _render_v2_config(config: SwitchboardConfig) -> str:
+def render_config(config: SwitchboardConfig) -> str:
+    """Return the canonical, fully validated configuration-v2 representation."""
+
     lines = [
         "config_version = 2",
         "",
@@ -1097,7 +1099,7 @@ def migrate_legacy_config(data: bytes | str, *, host_id: HostId) -> str:
         hooks=base.hooks,
         memory=base.memory,
     )
-    rendered = _render_v2_config(migrated)
+    rendered = render_config(migrated)
     parse_config(rendered, host_id=host_id)
     return rendered.rstrip("\n")
 
