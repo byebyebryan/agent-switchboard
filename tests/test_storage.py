@@ -123,6 +123,46 @@ def add_session(
     )
 
 
+def test_closed_live_task_retains_worktree_claim_until_runtime_stops(
+    registry: Registry,
+) -> None:
+    registry.connection.execute(
+        "UPDATE checkouts SET kind = 'worktree' WHERE checkout_id = ?",
+        (LOCATION_ID,),
+    )
+    add_session(registry)
+    registry.adopt_session(task_id=TASK_ID, session_key=SESSION_KEY, observed_at=31)
+    registry.close_task(TASK_ID, host_id=HOST_ID, observed_at=32)
+
+    second_task_id = stable_uuid("worktree-second-task")
+    with pytest.raises(TaskConflict, match="worktree already belongs"):
+        registry.create_task(
+            task_id=second_task_id,
+            host_id=HOST_ID,
+            project_id=PROJECT_ID,
+            checkout_id=LOCATION_ID,
+            title="Blocked while runtime remains",
+            observed_at=33,
+        )
+
+    registry.upsert_session(
+        {
+            "session_key": SESSION_KEY,
+            "runtime_presence": "stopped",
+            "last_observed_at": 34,
+        }
+    )
+    created = registry.create_task(
+        task_id=second_task_id,
+        host_id=HOST_ID,
+        project_id=PROJECT_ID,
+        checkout_id=LOCATION_ID,
+        title="Allowed after runtime stops",
+        observed_at=35,
+    )
+    assert created["task_id"] == second_task_id
+
+
 def resume_request(session_key: str = SESSION_KEY) -> dict[str, object]:
     return {
         "host_id": HOST_ID,

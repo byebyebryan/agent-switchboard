@@ -947,30 +947,19 @@ class AgentToolService:
         summary: str,
         next_action: str,
         handoff_id: str | None,
-        close: bool,
     ) -> dict[str, object]:
         task = self._current_task()
-        if close:
-            updated = self.registry.close_task(
-                str(task["task_id"]),
-                host_id=str(self.authorized.host_id),
-                summary=summary,
-                next_action=next_action,
-                handoff_id=handoff_id,
-                source="agent",
-            )
-        else:
-            self.registry.curate_session_handoff(
-                str(self.authorized.session_key),
-                host_id=str(self.authorized.host_id),
-                summary=summary,
-                next_action=next_action,
-                handoff_id=handoff_id,
-                wrap=False,
-                source="agent",
-            )
-            updated = self.registry.get_task(str(task["task_id"]))
-            assert updated is not None
+        self.registry.curate_session_handoff(
+            str(self.authorized.session_key),
+            host_id=str(self.authorized.host_id),
+            summary=summary,
+            next_action=next_action,
+            handoff_id=handoff_id,
+            wrap=False,
+            source="agent",
+        )
+        updated = self.registry.get_task(str(task["task_id"]))
+        assert updated is not None
         return self._task_payload(updated)
 
 

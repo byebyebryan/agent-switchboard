@@ -58,6 +58,8 @@ from .protocol import (
     SessionActionEnvelope,
     SessionDetailEnvelope,
     SnapshotEnvelope,
+    TaskCloseActionEnvelope,
+    TaskCloseStatus,
 )
 from .remote import (
     RemoteError,
@@ -70,6 +72,7 @@ from .remote import (
 )
 from .session_actions import ManagedSessionController
 from .storage import DEFAULT_HANDOFF_LIMIT, MAX_HANDOFF_LIMIT, Registry, StorageError
+from .task_actions import TaskCloseController
 from .tmux import TmuxController, TmuxError
 
 _MAX_ERROR_MESSAGE_LENGTH = 1_024
@@ -371,14 +374,18 @@ def build_parser() -> argparse.ArgumentParser:
     task_pin.add_argument("task_id")
     task_pin.add_argument("--off", action="store_true")
     task_pin.add_argument("--json", action="store_true")
-    for action, help_text in (
-        ("handoff", "append a handoff to the task's current session"),
-        ("close", "wrap the current session and close the task"),
-    ):
-        task_handoff = task_actions.add_parser(action, help=help_text)
-        task_handoff.add_argument("task_id")
-        task_handoff.add_argument("--json-stdin", action="store_true", required=True)
-        task_handoff.add_argument("--json", action="store_true")
+    task_handoff = task_actions.add_parser(
+        "handoff", help="append a handoff to the task's current session"
+    )
+    task_handoff.add_argument("task_id")
+    task_handoff.add_argument("--json-stdin", action="store_true", required=True)
+    task_handoff.add_argument("--json", action="store_true")
+    task_close = task_actions.add_parser(
+        "close", help="close a task and safely stop its managed runtime"
+    )
+    task_close.add_argument("task_id")
+    task_close.add_argument("--host")
+    task_close.add_argument("--json", action="store_true")
     task_export = task_actions.add_parser(
         "export-handoff",
         help="export one exact local task handoff for cross-host continuation",
@@ -487,13 +494,11 @@ def build_parser() -> argparse.ArgumentParser:
     agent_update.add_argument("--clear-purpose", action="store_true")
     agent_update.add_argument("--pin", choices=("on", "off"))
     agent_update.add_argument("--json", action="store_true", required=True)
-    for action, help_text in (
-        ("handoff", "append an agent-attributed current-task handoff"),
-        ("close", "append a handoff, wrap the session, and close the task"),
-    ):
-        agent_handoff = agent_actions.add_parser(action, help=help_text)
-        agent_handoff.add_argument("--json-stdin", action="store_true", required=True)
-        agent_handoff.add_argument("--json", action="store_true", required=True)
+    agent_handoff = agent_actions.add_parser(
+        "handoff", help="append an agent-attributed current-task handoff"
+    )
+    agent_handoff.add_argument("--json-stdin", action="store_true", required=True)
+    agent_handoff.add_argument("--json", action="store_true", required=True)
 
     commands.add_parser(
         "agent-mcp", help="serve session-authorized agent tools over stdio MCP"
@@ -519,6 +524,7 @@ def build_parser() -> argparse.ArgumentParser:
     prepare_task.add_argument("task_id")
     prepare_task.add_argument("--host")
     prepare_task.add_argument("--create", action="store_true")
+    prepare_task.add_argument("--reopen", action="store_true")
     prepare_task_input = prepare_task.add_mutually_exclusive_group()
     prepare_task_input.add_argument("--json-stdin", action="store_true")
     prepare_task_input.add_argument("--continue-json-stdin", action="store_true")
@@ -1145,6 +1151,8 @@ def _prepare_task(arguments: argparse.Namespace) -> str:
     config = load_config(host_id=host_id)
     target_host_id = _action_host(arguments, host_id)
     context = _presentation_context(arguments)
+    if arguments.create and arguments.reopen:
+        raise PresentationError("--reopen cannot be combined with --create")
     project, title, purpose, checkout, provider, continuation = _prepare_task_input(
         arguments
     )
@@ -1176,6 +1184,8 @@ def _prepare_task(arguments: argparse.Namespace) -> str:
             ).encode("utf-8")
         elif provider is not None:
             remote_arguments.extend(("--provider", provider))
+        if arguments.reopen:
+            remote_arguments.append("--reopen")
         remote_arguments.extend(("--request-id", arguments.request_id))
         remote_arguments.extend(_remote_context_arguments(arguments))
         remote_arguments.append("--json")
@@ -1245,6 +1255,7 @@ def _prepare_task(arguments: argparse.Namespace) -> str:
                 provider=provider,
                 request_id=arguments.request_id,
                 context=context,
+                reopen=arguments.reopen,
             )
     return PresentationPlanEnvelope(plan).to_json()
 
@@ -1469,6 +1480,8 @@ def _render_task_payload(payload: dict[str, object], *, as_json: bool) -> str:
 
 
 def _task_command(arguments: argparse.Namespace) -> str:
+    if arguments.task_action == "close":
+        return _task_close_command(arguments)
     host_id = load_or_create_host_id()
     config = load_config(host_id=host_id)
     with Registry(database_path()) as registry:
@@ -1592,48 +1605,25 @@ def _task_command(arguments: argparse.Namespace) -> str:
             task = registry.update_task(arguments.task_id, pinned=not arguments.off)
         elif action == "reopen":
             task = registry.reopen_task(arguments.task_id, host_id=str(host_id))
-        elif action in {"handoff", "close"}:
+        elif action == "handoff":
             task = registry.get_task(arguments.task_id)
             if task is None or task["host_id"] != str(host_id):
                 raise StorageError("unknown local task")
             stream = getattr(sys.stdin, "buffer", sys.stdin)
-            if action == "handoff" or task.get("current_session_key") is not None:
-                handoff = read_handoff_input(stream)
-                if action == "handoff":
-                    current = task.get("current_session_key")
-                    if not isinstance(current, str):
-                        raise StorageError("task has no current session")
-                    registry.curate_session_handoff(
-                        current,
-                        host_id=str(host_id),
-                        summary=handoff.summary,
-                        next_action=handoff.next_action,
-                        handoff_id=handoff.handoff_id,
-                        wrap=False,
-                    )
-                    task = registry.get_task(arguments.task_id)
-                    assert task is not None
-                else:
-                    task = registry.close_task(
-                        arguments.task_id,
-                        host_id=str(host_id),
-                        summary=handoff.summary,
-                        next_action=handoff.next_action,
-                        handoff_id=handoff.handoff_id,
-                    )
-            else:
-                raw = stream.read(MAX_HANDOFF_INPUT_BYTES + 1)
-                if len(raw) > MAX_HANDOFF_INPUT_BYTES:
-                    raise CurationError("task close input is too large")
-                try:
-                    empty = json.loads(raw)
-                except (json.JSONDecodeError, UnicodeDecodeError) as error:
-                    raise CurationError(
-                        "task close input must be an empty object"
-                    ) from error
-                if empty != {}:
-                    raise CurationError("a never-started task close requires {}")
-                task = registry.close_task(arguments.task_id, host_id=str(host_id))
+            handoff = read_handoff_input(stream)
+            current = task.get("current_session_key")
+            if not isinstance(current, str):
+                raise StorageError("task has no current session")
+            registry.curate_session_handoff(
+                current,
+                host_id=str(host_id),
+                summary=handoff.summary,
+                next_action=handoff.next_action,
+                handoff_id=handoff.handoff_id,
+                wrap=False,
+            )
+            task = registry.get_task(arguments.task_id)
+            assert task is not None
         else:
             raise StorageError("unsupported task action")
         return _render_task_payload(
@@ -1642,6 +1632,60 @@ def _task_command(arguments: argparse.Namespace) -> str:
             ),
             as_json=arguments.json,
         )
+
+
+def _task_close_command(arguments: argparse.Namespace) -> str:
+    host_id = load_or_create_host_id()
+    config = load_config(host_id=host_id)
+    target_host_id = _action_host(arguments, host_id)
+    if target_host_id != host_id:
+        remote = _remote_endpoint(config, target_host_id)
+        envelope = asyncio.run(
+            invoke_remote_json(
+                remote,
+                ("task", "close", arguments.task_id, "--json"),
+                TaskCloseActionEnvelope.from_json,
+            )
+        )
+        if (
+            envelope.action.host_id != target_host_id
+            or str(envelope.action.task_id) != arguments.task_id
+        ):
+            raise RemoteError(
+                "remote_action_target_mismatch",
+                "The remote close response disagrees with the requested task.",
+                retryable=False,
+            )
+    else:
+        with Registry(database_path()) as registry:
+            materialize_configured_projects(registry, str(host_id), config)
+
+            def reconcile() -> object:
+                return reconcile_live(registry, str(host_id))
+
+            managed = ManagedSessionController(
+                registry,
+                host_id=host_id,
+                tmux=TmuxController(),
+                reconcile_runtime=reconcile,
+            )
+            action = TaskCloseController(
+                registry,
+                host_id=host_id,
+                reconcile_runtime=reconcile,
+                stop_session=managed.stop,
+            ).close(arguments.task_id)
+            envelope = TaskCloseActionEnvelope(action)
+    if arguments.json:
+        return envelope.to_json()
+    action = envelope.action
+    if action.status is TaskCloseStatus.BLOCKED:
+        assert action.error is not None
+        return f"Task close blocked: {action.error.message}"
+    message = f"Task {action.status.value}; runtime {action.runtime_disposition.value}."
+    if action.warning is not None:
+        message += f" Warning: {action.warning.message}"
+    return message
 
 
 def _curation_command(arguments: argparse.Namespace) -> str:
@@ -1775,7 +1819,6 @@ def _agent_command(arguments: argparse.Namespace) -> str:
                 summary=handoff.summary,
                 next_action=handoff.next_action,
                 handoff_id=handoff.handoff_id,
-                close=arguments.agent_action == "close",
             ),
             ensure_ascii=False,
             allow_nan=False,

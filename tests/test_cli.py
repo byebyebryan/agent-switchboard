@@ -19,7 +19,7 @@ import agent_switchboard.storage as storage_module
 from agent_switchboard import __version__
 from agent_switchboard.cli import main
 from agent_switchboard.config import RemoteConfig
-from agent_switchboard.domain import HostId, SessionKey, handoff_content_hash
+from agent_switchboard.domain import HostId, SessionKey, TaskId, handoff_content_hash
 from agent_switchboard.protocol import (
     ContinuationEnvelope,
     ErrorRecord,
@@ -28,8 +28,12 @@ from agent_switchboard.protocol import (
     PresentationPlan,
     PresentationPlanEnvelope,
     PresentationPlanKind,
+    RuntimeDisposition,
     SessionDetailEnvelope,
     SnapshotEnvelope,
+    TaskCloseAction,
+    TaskCloseActionEnvelope,
+    TaskCloseStatus,
 )
 from agent_switchboard.storage import Registry
 
@@ -469,6 +473,81 @@ def test_remote_prepare_task_uses_bounded_json_stdin_and_validates_host(
         "title": "Remote Phase 5",
     }
 
+    calls.clear()
+    assert (
+        main(
+            [
+                "prepare-task",
+                CURATION_TASK_ID,
+                "--host",
+                REMOTE_HOST_ID,
+                "--reopen",
+                "--request-id",
+                CURATION_HANDOFF_ID,
+                "--json",
+            ]
+        )
+        == 0
+    )
+    capsys.readouterr()
+    assert calls == [
+        (
+            (
+                "prepare-task",
+                CURATION_TASK_ID,
+                "--reopen",
+                "--request-id",
+                CURATION_HANDOFF_ID,
+                "--json",
+            ),
+            None,
+        )
+    ]
+
+
+def test_remote_task_close_routes_fixed_argv_and_validates_target(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    local_host = HostId(CURATION_HOST_ID)
+    remote_host = HostId(REMOTE_HOST_ID)
+    remote = RemoteConfig("snap", "snap.lan", "snap")
+    envelope = TaskCloseActionEnvelope(
+        TaskCloseAction(
+            TaskCloseStatus.CLOSED,
+            remote_host,
+            TaskId(CURATION_TASK_ID),
+            RuntimeDisposition.NO_SESSION,
+        )
+    )
+    calls: list[tuple[str, ...]] = []
+
+    async def invoke(remote_value, arguments, parser, **_kwargs):
+        assert remote_value is remote
+        assert parser.__self__ is TaskCloseActionEnvelope
+        calls.append(tuple(arguments))
+        return envelope
+
+    monkeypatch.setattr(cli_module, "load_or_create_host_id", lambda: local_host)
+    monkeypatch.setattr(cli_module, "load_config", lambda **_kwargs: object())
+    monkeypatch.setattr(cli_module, "_remote_endpoint", lambda *_args: remote)
+    monkeypatch.setattr(cli_module, "invoke_remote_json", invoke)
+
+    assert (
+        main(
+            [
+                "task",
+                "close",
+                CURATION_TASK_ID,
+                "--host",
+                REMOTE_HOST_ID,
+                "--json",
+            ]
+        )
+        == 0
+    )
+    assert TaskCloseActionEnvelope.from_json(capsys.readouterr().out) == envelope
+    assert calls == [("task", "close", CURATION_TASK_ID, "--json")]
+
 
 def test_remote_attach_replaces_process_with_exact_ssh_command(
     monkeypatch: pytest.MonkeyPatch,
@@ -830,10 +909,9 @@ def test_agent_cli_projects_exact_machine_forms_through_one_service(
             summary: str,
             next_action: str,
             handoff_id: str | None,
-            close: bool,
         ) -> dict[str, str]:
-            calls.append(("handoff", summary, next_action, handoff_id, close))
-            return {"operation": "close" if close else "handoff"}
+            calls.append(("handoff", summary, next_action, handoff_id))
+            return {"operation": "handoff"}
 
     monkeypatch.setattr(cli_module, "AgentToolService", Service)
 
@@ -888,9 +966,6 @@ def test_agent_cli_projects_exact_machine_forms_through_one_service(
     monkeypatch.setattr("sys.stdin", io.BytesIO(json.dumps(payload).encode()))
     assert main(["agent", "handoff", "--json-stdin", "--json"]) == 0
     assert json.loads(capsys.readouterr().out) == {"operation": "handoff"}
-    monkeypatch.setattr("sys.stdin", io.BytesIO(json.dumps(payload).encode()))
-    assert main(["agent", "close", "--json-stdin", "--json"]) == 0
-    assert json.loads(capsys.readouterr().out) == {"operation": "close"}
 
     assert calls == [
         ("authorize",),
@@ -917,15 +992,6 @@ def test_agent_cli_projects_exact_machine_forms_through_one_service(
             "Agent summary.",
             "Agent next action.",
             CURATION_HANDOFF_ID,
-            False,
-        ),
-        ("authorize",),
-        (
-            "handoff",
-            "Agent summary.",
-            "Agent next action.",
-            CURATION_HANDOFF_ID,
-            True,
         ),
     ]
 

@@ -390,6 +390,63 @@ def test_new_project_launch_is_unbound_waiting_and_idempotent(
     assert len(tmux.create_calls) == 1
 
 
+def test_closed_task_reopens_and_resumes_same_provider_without_handoff(
+    registry: Registry, tmp_path: Path
+) -> None:
+    project_path = tmp_path / "project"
+    project_path.mkdir()
+    tmux = FakeTmux()
+    launch = new_coordinator(registry, tmux, project_path)
+    add_session(registry, project_path)
+    registry.upsert_session(
+        {
+            "session_key": SESSION_KEY,
+            "project_id": PROJECT_ID,
+            "checkout_id": LOCATION_ID,
+            "last_observed_at": 2,
+        }
+    )
+    registry.adopt_session(task_id=TASK_ID, session_key=SESSION_KEY, observed_at=3)
+    registry.close_task(TASK_ID, host_id=HOST_ID, observed_at=4)
+
+    plan = launch.prepare_task(
+        TASK_ID,
+        provider=None,
+        request_id=REQUEST_ID,
+        context=ATTACH_CONTEXT,
+        reopen=True,
+    )
+
+    assert plan.kind is PresentationPlanKind.ATTACH
+    task = registry.get_task(TASK_ID)
+    assert task is not None and task["status"] == "open"
+    session = registry.get_session(SESSION_KEY)
+    assert session is not None and session["wrapped_at"] is None
+
+
+def test_reopen_precondition_failure_leaves_task_closed(
+    registry: Registry, tmp_path: Path
+) -> None:
+    missing = tmp_path / "missing"
+    tmux = FakeTmux()
+    launch = new_coordinator(registry, tmux, missing)
+    registry.close_task(TASK_ID, host_id=HOST_ID, observed_at=4)
+
+    plan = launch.prepare_task(
+        TASK_ID,
+        provider=None,
+        request_id=REQUEST_ID,
+        context=ATTACH_CONTEXT,
+        reopen=True,
+    )
+
+    assert plan.kind is PresentationPlanKind.BLOCKED
+    assert plan.error is not None
+    assert plan.error.code == "working_directory_unavailable"
+    task = registry.get_task(TASK_ID)
+    assert task is not None and task["status"] == "closed"
+
+
 def test_new_continuation_resolves_exact_handoff_and_retains_lineage(
     registry: Registry, tmp_path: Path
 ) -> None:

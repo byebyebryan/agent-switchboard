@@ -448,6 +448,7 @@ class LaunchCoordinator:
         provider: str | None,
         request_id: str,
         context: PresentationContext,
+        reopen: bool = False,
     ) -> PresentationPlan:
         """Open a task's current session or start its first/next session."""
 
@@ -457,7 +458,67 @@ class LaunchCoordinator:
         if task is None or task["host_id"] != str(self.host_id):
             return self._blocked_new("task_not_found", "The task is not local.", now)
         if task["status"] != "open":
-            return self._blocked_new("task_closed", "The task is closed.", now)
+            if not reopen:
+                return self._blocked_new("task_closed", "The task is closed.", now)
+            project_id = str(task["project_id"])
+            checkout_id = task.get("checkout_id")
+            selected_checkout = (
+                None if checkout_id is None else self.checkouts.get(str(checkout_id))
+            )
+            if selected_checkout is None and checkout_id is None:
+                candidates = sorted(
+                    (
+                        checkout
+                        for checkout in self.checkouts.values()
+                        if str(checkout.repository_id)
+                        in self.project_repository_ids.get(project_id, set())
+                        and checkout.host_id == self.host_id
+                    ),
+                    key=lambda checkout: str(checkout.checkout_id),
+                )
+                defaults = [
+                    candidate for candidate in candidates if candidate.is_default
+                ]
+                selected_checkout = (
+                    candidates[0]
+                    if len(candidates) == 1
+                    else defaults[0]
+                    if len(defaults) == 1
+                    else None
+                )
+            if (
+                selected_checkout is None
+                or selected_checkout.host_id != self.host_id
+                or str(selected_checkout.repository_id)
+                not in self.project_repository_ids.get(project_id, set())
+            ):
+                return self._blocked_new(
+                    "task_checkout_missing",
+                    "The closed task has no valid local checkout.",
+                    now,
+                )
+            if (
+                not selected_checkout.path.is_absolute()
+                or not selected_checkout.path.is_dir()
+            ):
+                return self._blocked_new(
+                    "working_directory_unavailable",
+                    "The selected task checkout is unavailable.",
+                    now,
+                )
+            try:
+                task = self.registry.reopen_task(
+                    str(parsed_task_id),
+                    host_id=str(self.host_id),
+                    checkout_id=(
+                        str(selected_checkout.checkout_id)
+                        if checkout_id is None
+                        else None
+                    ),
+                    observed_at=now,
+                )
+            except TaskConflict as error:
+                return self._blocked_new(error.code, str(error), now)
         current_session_key = task.get("current_session_key")
         if isinstance(current_session_key, str):
             current = self.registry.get_session(current_session_key)

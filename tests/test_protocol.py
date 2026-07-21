@@ -11,6 +11,7 @@ from agent_switchboard.domain import (
     ProviderId,
     SessionKey,
     SurfaceId,
+    TaskId,
     handoff_content_hash,
 )
 from agent_switchboard.protocol import (
@@ -28,11 +29,15 @@ from agent_switchboard.protocol import (
     PresentationPlanEnvelope,
     PresentationPlanKind,
     ProtocolError,
+    RuntimeDisposition,
     SessionAction,
     SessionActionEnvelope,
     SessionActionStatus,
     SessionDetailEnvelope,
     SnapshotEnvelope,
+    TaskCloseAction,
+    TaskCloseActionEnvelope,
+    TaskCloseStatus,
 )
 
 FIXTURES = Path(__file__).parent / "fixtures/protocol/v2"
@@ -830,6 +835,43 @@ def test_session_stop_action_is_versioned_and_fail_closed() -> None:
                 1,
                 host_id=HostId("99999999-9999-4999-8999-999999999999"),
             ),
+        )
+
+
+def test_task_close_action_is_versioned_and_allows_cleanup_warning() -> None:
+    task_id = TaskId(TASK)
+    warning = ErrorRecord(
+        "surface_not_owned",
+        "The runtime remains active.",
+        ErrorScope.SESSION,
+        False,
+        12,
+        host_id=HOST,
+        provider=ProviderId.CLAUDE,
+        session_key=CLAUDE_SESSION_KEY,
+    )
+    envelope = TaskCloseActionEnvelope(
+        TaskCloseAction(
+            TaskCloseStatus.CLOSED,
+            HOST,
+            task_id,
+            RuntimeDisposition.RETAINED,
+            CLAUDE_SESSION_KEY,
+            warning=warning,
+        )
+    )
+
+    parsed = TaskCloseActionEnvelope.from_json(envelope.to_json())
+    assert parsed == envelope
+    assert parsed.to_dict()["action"]["kind"] == "close"
+    assert parsed.to_dict()["action"]["runtimeDisposition"] == "retained"
+
+    with pytest.raises(ProtocolError, match="requires an error"):
+        TaskCloseAction(
+            TaskCloseStatus.BLOCKED,
+            HOST,
+            task_id,
+            RuntimeDisposition.UNKNOWN,
         )
 
 

@@ -112,6 +112,7 @@ def test_mcp_lifecycle_lists_exact_tools_and_returns_structured_content() -> Non
     assert responses[0]["result"]["protocolVersion"] == "2025-11-25"  # type: ignore[index]
     listed = responses[1]["result"]["tools"]  # type: ignore[index]
     assert [tool["name"] for tool in listed] == [tool[0] for tool in TOOLS]
+    assert "task_close" not in {tool["name"] for tool in listed}
     result = responses[2]["result"]
     assert result["structuredContent"] == {"kind": "current"}  # type: ignore[index]
     assert result["content"] == [  # type: ignore[index]

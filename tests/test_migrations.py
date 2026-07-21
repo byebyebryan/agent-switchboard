@@ -53,6 +53,7 @@ def test_migrations_are_explicit_contiguous_and_idempotent(tmp_path) -> None:
         7,
         8,
         9,
+        10,
     ]
     assert [migration.name for migration in MIGRATIONS] == [
         "initial_registry",
@@ -64,6 +65,7 @@ def test_migrations_are_explicit_contiguous_and_idempotent(tmp_path) -> None:
         "repository_checkouts",
         "tasks",
         "imported_task_handoffs",
+        "runtime_worktree_claims",
     ]
     assert migrate(connection, now=100) == CURRENT_SCHEMA_VERSION
     assert migrate(connection, now=200) == CURRENT_SCHEMA_VERSION
@@ -81,11 +83,12 @@ def test_migrations_are_explicit_contiguous_and_idempotent(tmp_path) -> None:
         (7, "repository_checkouts", 100),
         (8, "tasks", 100),
         (9, "imported_task_handoffs", 100),
+        (10, "runtime_worktree_claims", 100),
     ]
-    assert connection.execute("PRAGMA user_version").fetchone()[0] == 9
+    assert connection.execute("PRAGMA user_version").fetchone()[0] == 10
     assert dict(
         connection.execute("SELECT key, value FROM registry_metadata").fetchall()
-    ) == {"protocol_version": "2", "schema_version": "9"}
+    ) == {"protocol_version": "2", "schema_version": "10"}
     assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
     connection.close()
 
@@ -132,7 +135,7 @@ def test_upgrade_from_v1_preserves_registry_rows(tmp_path) -> None:
     connection.close()
 
     upgraded = connect_database(database)
-    assert upgraded.execute("PRAGMA user_version").fetchone()[0] == 9
+    assert upgraded.execute("PRAGMA user_version").fetchone()[0] == 10
     assert (
         upgraded.execute(
             """

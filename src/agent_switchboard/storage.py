@@ -2031,13 +2031,9 @@ class Registry:
         task_id: str,
         *,
         host_id: str,
-        summary: str | None = None,
-        next_action: str | None = None,
-        handoff_id: str | None = None,
-        source: str = "user",
         observed_at: int | None = None,
     ) -> dict[str, Any]:
-        """Close a task, wrapping its current session without stopping it."""
+        """Close a task without changing session handoff or wrap state."""
 
         task_id = _canonical_uuid_id(task_id, TaskId, "task_id")
         host_id = _canonical_host_id(host_id)
@@ -2050,39 +2046,6 @@ class Registry:
                 raise TaskConflict("task_not_found", f"unknown local task: {task_id}")
             if task["status"] == "closed":
                 return dict(task)
-            current_session_key = task["current_session_key"]
-            if current_session_key is not None:
-                if summary is None or next_action is None:
-                    raise TaskConflict(
-                        "handoff_required",
-                        "closing a started task requires an explicit handoff",
-                    )
-                normalized_summary = normalize_handoff_text(summary, "summary")
-                normalized_next = normalize_handoff_text(next_action, "next_action")
-                parsed_handoff_id = _canonical_uuid_id(
-                    handoff_id or str(uuid.uuid4()), HandoffId, "handoff_id"
-                )
-                handoff = self._append_handoff_row(
-                    connection,
-                    session_key=current_session_key,
-                    summary=normalized_summary,
-                    source=source,
-                    source_host_id=host_id,
-                    next_action=normalized_next,
-                    handoff_id=parsed_handoff_id,
-                    sequence=None,
-                    created_at=timestamp,
-                    content_hash=None,
-                )
-                connection.execute(
-                    "UPDATE sessions SET wrapped_at = ? WHERE session_key = ?",
-                    (handoff["created_at"], current_session_key),
-                )
-            elif any(value is not None for value in (summary, next_action, handoff_id)):
-                raise TaskConflict(
-                    "handoff_without_session",
-                    "a never-started task cannot receive a close handoff",
-                )
             connection.execute(
                 """
                 UPDATE tasks
@@ -2103,10 +2066,16 @@ class Registry:
         task_id: str,
         *,
         host_id: str,
+        checkout_id: str | None = None,
         observed_at: int | None = None,
     ) -> dict[str, Any]:
         task_id = _canonical_uuid_id(task_id, TaskId, "task_id")
         host_id = _canonical_host_id(host_id)
+        parsed_checkout_id = (
+            None
+            if checkout_id is None
+            else _canonical_uuid_id(checkout_id, CheckoutId, "checkout_id")
+        )
         timestamp = now_ms() if observed_at is None else observed_at
         try:
             with self.transaction(immediate=True) as connection:
@@ -2119,13 +2088,22 @@ class Registry:
                     )
                 if task["status"] == "open":
                     return dict(task)
+                if (
+                    parsed_checkout_id is not None
+                    and task["current_session_key"] is not None
+                ):
+                    raise TaskConflict(
+                        "task_has_history",
+                        "a task checkout cannot change after its first session",
+                    )
                 connection.execute(
                     """
                     UPDATE tasks
-                    SET status = 'open', closed_at = NULL, updated_at = ?
+                    SET status = 'open', closed_at = NULL,
+                        checkout_id = COALESCE(?, checkout_id), updated_at = ?
                     WHERE task_id = ?
                     """,
-                    (timestamp, task_id),
+                    (parsed_checkout_id, timestamp, task_id),
                 )
                 row = connection.execute(
                     "SELECT * FROM tasks WHERE task_id = ?", (task_id,)

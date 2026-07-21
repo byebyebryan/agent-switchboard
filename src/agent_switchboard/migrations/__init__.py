@@ -17,6 +17,7 @@ from . import (
     v0007_repository_checkouts,
     v0008_tasks,
     v0009_imported_task_handoffs,
+    v0010_runtime_worktree_claims,
 )
 
 PROTOCOL_VERSION = 2
@@ -83,6 +84,11 @@ MIGRATIONS = (
         v0009_imported_task_handoffs.VERSION,
         v0009_imported_task_handoffs.NAME,
         v0009_imported_task_handoffs.STATEMENTS,
+    ),
+    Migration(
+        v0010_runtime_worktree_claims.VERSION,
+        v0010_runtime_worktree_claims.NAME,
+        v0010_runtime_worktree_claims.STATEMENTS,
     ),
 )
 CURRENT_SCHEMA_VERSION = MIGRATIONS[-1].version

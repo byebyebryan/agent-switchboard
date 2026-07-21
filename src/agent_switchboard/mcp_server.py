@@ -96,14 +96,6 @@ TOOLS: Final = (
             required=("summary", "nextAction"),
         ),
     ),
-    (
-        "task_close",
-        "Append a handoff, wrap the current session, and close its task.",
-        _schema(
-            {"summary": _STRING, "nextAction": _STRING, "handoffId": _STRING},
-            required=("summary", "nextAction"),
-        ),
-    ),
 )
 
 
@@ -114,8 +106,7 @@ def _tool_records() -> list[dict[str, object]]:
             "description": description,
             "inputSchema": schema,
             "annotations": {
-                "readOnlyHint": name
-                not in {"task_update", "task_set_handoff", "task_close"},
+                "readOnlyHint": name not in {"task_update", "task_set_handoff"},
                 "destructiveHint": False,
                 "idempotentHint": name == "task_update",
                 "openWorldHint": name == "memory_search",
@@ -216,7 +207,7 @@ def _call(
         if "pinned" in arguments and not isinstance(arguments["pinned"], bool):
             raise McpProtocolError(-32602, "pinned must be boolean")
         envelope = service.update_task(arguments)
-    elif name in {"task_set_handoff", "task_close"}:
+    elif name == "task_set_handoff":
         arguments = _arguments(
             raw_params,
             {"summary", "nextAction", "handoffId"},
@@ -226,7 +217,6 @@ def _call(
             summary=str(_text(arguments, "summary")),
             next_action=str(_text(arguments, "nextAction")),
             handoff_id=_text(arguments, "handoffId", optional=True),
-            close=name == "task_close",
         )
     else:
         raise McpProtocolError(-32602, "unknown tool")

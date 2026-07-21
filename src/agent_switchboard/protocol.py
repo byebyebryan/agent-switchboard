@@ -159,6 +159,7 @@ class ErrorScope(StrEnum):
     SESSION = "session"
     LAUNCH = "launch"
     SURFACE = "surface"
+    TASK = "task"
 
 
 class PresentationPlanKind(StrEnum):
@@ -172,6 +173,20 @@ class SessionActionStatus(StrEnum):
     STOPPED = "stopped"
     ALREADY_STOPPED = "already_stopped"
     BLOCKED = "blocked"
+
+
+class TaskCloseStatus(StrEnum):
+    CLOSED = "closed"
+    ALREADY_CLOSED = "already_closed"
+    BLOCKED = "blocked"
+
+
+class RuntimeDisposition(StrEnum):
+    NO_SESSION = "no_session"
+    ALREADY_STOPPED = "already_stopped"
+    STOPPED = "stopped"
+    RETAINED = "retained"
+    UNKNOWN = "unknown"
 
 
 class FleetSource(StrEnum):
@@ -1690,6 +1705,153 @@ class SessionActionEnvelope:
         table = _object(value, "envelope")
         _versions(table)
         return cls(SessionAction.from_dict(_required(table, "action", "envelope")))
+
+    @classmethod
+    def from_json(cls, raw: str | bytes | bytearray) -> Self:
+        return cls.from_dict(_decode(raw))
+
+    def _raw_dict(self) -> dict[str, JsonValue]:
+        return _envelope({"action": self.action.to_dict()})
+
+    def to_dict(self) -> dict[str, JsonValue]:
+        normalized = type(self).from_dict(self._raw_dict())
+        return normalized._raw_dict()
+
+    def to_json(self) -> str:
+        return _dump(self.to_dict())
+
+
+@dataclass(frozen=True, slots=True)
+class TaskCloseAction:
+    status: TaskCloseStatus
+    host_id: HostId
+    task_id: TaskId
+    runtime_disposition: RuntimeDisposition
+    current_session_key: SessionKey | None = None
+    error: ErrorRecord | None = None
+    warning: ErrorRecord | None = None
+
+    def __post_init__(self) -> None:
+        try:
+            status = (
+                self.status
+                if isinstance(self.status, TaskCloseStatus)
+                else TaskCloseStatus(self.status)
+            )
+            disposition = (
+                self.runtime_disposition
+                if isinstance(self.runtime_disposition, RuntimeDisposition)
+                else RuntimeDisposition(self.runtime_disposition)
+            )
+        except ValueError as exc:
+            raise ProtocolError("unsupported task close action value") from exc
+        object.__setattr__(self, "status", status)
+        object.__setattr__(self, "runtime_disposition", disposition)
+        if not isinstance(self.host_id, HostId):
+            object.__setattr__(self, "host_id", HostId(self.host_id))
+        if not isinstance(self.task_id, TaskId):
+            object.__setattr__(self, "task_id", TaskId(self.task_id))
+        if self.current_session_key is not None and not isinstance(
+            self.current_session_key, SessionKey
+        ):
+            object.__setattr__(
+                self,
+                "current_session_key",
+                SessionKey.parse(self.current_session_key),
+            )
+        if (
+            self.current_session_key is not None
+            and self.current_session_key.host_id != self.host_id
+        ):
+            raise ProtocolError("task close host and session identity disagree")
+        if status is TaskCloseStatus.BLOCKED:
+            if self.error is None:
+                raise ProtocolError("blocked task close requires an error")
+            if self.warning is not None:
+                raise ProtocolError("blocked task close cannot contain a warning")
+        elif self.error is not None:
+            raise ProtocolError("successful task close cannot contain an error")
+        for issue in (self.error, self.warning):
+            if issue is None:
+                continue
+            if issue.host_id not in {None, self.host_id}:
+                raise ProtocolError("task close issue host routing disagrees")
+            if (
+                issue.session_key is not None
+                and issue.session_key != self.current_session_key
+            ):
+                raise ProtocolError("task close issue session routing disagrees")
+
+    @classmethod
+    def from_dict(cls, value: object, path: str = "action") -> Self:
+        table = _object(value, path)
+        if _string(_required(table, "kind", path), f"{path}.kind") != "close":
+            raise ProtocolError(f"{path}.kind is not supported")
+        try:
+            status = TaskCloseStatus(
+                _string(_required(table, "status", path), f"{path}.status")
+            )
+            disposition = RuntimeDisposition(
+                _string(
+                    _required(table, "runtimeDisposition", path),
+                    f"{path}.runtimeDisposition",
+                )
+            )
+        except ValueError as exc:
+            raise ProtocolError(f"{path} contains an unsupported value") from exc
+        session_key: SessionKey | None = None
+        if table.get("currentSessionKey") is not None:
+            try:
+                session_key = SessionKey.parse(
+                    _string(table["currentSessionKey"], f"{path}.currentSessionKey")
+                    or ""
+                )
+            except ValidationError as exc:
+                raise ProtocolError(f"{path}.currentSessionKey: {exc}") from exc
+        return cls(
+            status=status,
+            host_id=_uuid(_required(table, "hostId", path), f"{path}.hostId", HostId),
+            task_id=_uuid(_required(table, "taskId", path), f"{path}.taskId", TaskId),
+            runtime_disposition=disposition,
+            current_session_key=session_key,
+            error=(
+                ErrorRecord.from_dict(table["error"], f"{path}.error")
+                if table.get("error") is not None
+                else None
+            ),
+            warning=(
+                ErrorRecord.from_dict(table["warning"], f"{path}.warning")
+                if table.get("warning") is not None
+                else None
+            ),
+        )
+
+    def to_dict(self) -> dict[str, JsonValue]:
+        result: dict[str, JsonValue] = {
+            "kind": "close",
+            "status": self.status,
+            "hostId": str(self.host_id),
+            "taskId": str(self.task_id),
+            "runtimeDisposition": self.runtime_disposition,
+        }
+        if self.current_session_key is not None:
+            result["currentSessionKey"] = str(self.current_session_key)
+        if self.error is not None:
+            result["error"] = self.error.to_dict()
+        if self.warning is not None:
+            result["warning"] = self.warning.to_dict()
+        return result
+
+
+@dataclass(frozen=True, slots=True)
+class TaskCloseActionEnvelope:
+    action: TaskCloseAction
+
+    @classmethod
+    def from_dict(cls, value: object) -> Self:
+        table = _object(value, "envelope")
+        _versions(table)
+        return cls(TaskCloseAction.from_dict(_required(table, "action", "envelope")))
 
     @classmethod
     def from_json(cls, raw: str | bytes | bytearray) -> Self:

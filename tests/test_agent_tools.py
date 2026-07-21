@@ -399,7 +399,6 @@ def test_agent_mutations_are_current_only_and_durably_attributed(
         summary="Summarize the current slice.",
         next_action="Review the agent boundary.",
         handoff_id=HANDOFF_ID,
-        close=False,
     )
     assert handed["task"]["taskId"] == TASK_ID
     assert registry.list_handoffs(SESSION_KEY)[0]["source"] == "agent"
@@ -407,7 +406,6 @@ def test_agent_mutations_are_current_only_and_durably_attributed(
         summary="Summarize the current slice.",
         next_action="Review the agent boundary.",
         handoff_id=HANDOFF_ID,
-        close=False,
     )
     assert replay["task"]["taskId"] == TASK_ID
     assert len(registry.list_handoffs(SESSION_KEY)) == 1
@@ -416,20 +414,9 @@ def test_agent_mutations_are_current_only_and_durably_attributed(
             summary="Conflicting content.",
             next_action="Must fail.",
             handoff_id=HANDOFF_ID,
-            close=False,
         )
-
-    wrapped_id = stable_uuid("wrapped")
-    wrapped = service.append_handoff(
-        summary="The slice is ready for review.",
-        next_action="Run the installed acceptance loop.",
-        handoff_id=wrapped_id,
-        close=True,
-    )
-    assert wrapped["task"]["status"] == "closed"
-    assert registry.list_handoffs(SESSION_KEY)[0]["handoff_id"] == wrapped_id
     stored = registry.get_session(SESSION_KEY)
-    assert stored is not None and stored["wrapped_at"] is not None
+    assert stored is not None and stored["wrapped_at"] is None
 
 
 def test_agent_can_discover_and_read_exact_imported_task_handoff(
