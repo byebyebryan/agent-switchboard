@@ -9,18 +9,22 @@ from pathlib import Path
 
 import pytest
 
-from agent_switchboard.domain import HostId, PresentationContext, SessionKey
+from agent_switchboard.domain import HostId, PresentationContext, SessionKey, TaskId
 from agent_switchboard.protocol import (
     FleetEnvelope,
     FleetHost,
     FleetReachability,
     FleetSource,
     PresentationPlanEnvelope,
+    RuntimeDisposition,
     SessionAction,
     SessionActionEnvelope,
     SessionActionStatus,
     SessionDetailEnvelope,
     SnapshotEnvelope,
+    TaskCloseAction,
+    TaskCloseActionEnvelope,
+    TaskCloseStatus,
 )
 from agent_switchboard.tui_gateway import (
     MAX_STDIN_BYTES,
@@ -55,6 +59,7 @@ def _record(
         | PresentationPlanEnvelope
         | SessionActionEnvelope
         | SessionDetailEnvelope
+        | TaskCloseActionEnvelope
     ),
 ) -> bytes:
     return envelope.to_json().encode("utf-8") + b"\n"
@@ -90,6 +95,16 @@ ACTION_RECORD = _record(
             SessionActionStatus.STOPPED,
             HostId(HOST_ID),
             SessionKey.parse(CLAUDE_SESSION_KEY),
+        )
+    )
+)
+CLOSE_RECORD = _record(
+    TaskCloseActionEnvelope(
+        TaskCloseAction(
+            TaskCloseStatus.CLOSED,
+            HostId(HOST_ID),
+            TaskId(TASK_ID),
+            RuntimeDisposition.NO_SESSION,
         )
     )
 )
@@ -224,7 +239,10 @@ class RecordingRunner:
             "stop-session": ACTION_RECORD,
             "select-surface": b"",
         }
-        return CommandOutput(records[command[1]], b"", 0)
+        record = (
+            CLOSE_RECORD if command[1:3] == ("task", "close") else records[command[1]]
+        )
+        return CommandOutput(record, b"", 0)
 
 
 def test_terminal_context_is_plain_or_exactly_inherited_tmux() -> None:
@@ -276,6 +294,13 @@ def test_gateway_uses_exact_public_argv_and_reuses_request_id(tmp_path: Path) ->
             request_id=REQUEST_ID,
             context=context,
         )
+        reopened = await gateway.prepare_task(
+            TASK_ID,
+            provider=None,
+            request_id=REQUEST_ID,
+            context=context,
+            reopen=True,
+        )
         history = await gateway.prepare_history(
             PROJECT_ID,
             checkout_id=LOCATION_ID,
@@ -289,7 +314,7 @@ def test_gateway_uses_exact_public_argv_and_reuses_request_id(tmp_path: Path) ->
         )
 
         assert snapshot.host.host_id == HostId(HOST_ID)
-        assert first == second == created == history
+        assert first == second == created == reopened == history
         assert stopped.action.status is SessionActionStatus.STOPPED
 
     asyncio.run(exercise())
@@ -339,6 +364,21 @@ def test_gateway_uses_exact_public_argv_and_reuses_request_id(tmp_path: Path) ->
                 LOCATION_ID,
                 "--provider",
                 "claude",
+                "--request-id",
+                REQUEST_ID,
+                "--has-current-terminal",
+                "--current-tmux-client",
+                TMUX_CLIENT,
+                "--json",
+            ),
+            3.0,
+        ),
+        (
+            (
+                prefix,
+                "prepare-task",
+                TASK_ID,
+                "--reopen",
                 "--request-id",
                 REQUEST_ID,
                 "--has-current-terminal",
@@ -659,7 +699,6 @@ def test_gateway_task_management_uses_exact_public_commands(tmp_path: Path) -> N
     executable.touch(mode=0o755)
     runner = RecordingRunner()
     gateway = SwbctlGateway(executable, timeout_seconds=3, runner=runner)
-    handoff_id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
 
     async def exercise() -> None:
         await gateway.adopt_session(CODEX_SESSION_KEY, task_id=TASK_ID)
@@ -668,12 +707,8 @@ def test_gateway_task_management_uses_exact_public_commands(tmp_path: Path) -> N
         await gateway.set_task_purpose(TASK_ID, None)
         await gateway.set_task_pinned(TASK_ID, pinned=True)
         await gateway.set_task_pinned(TASK_ID, pinned=False)
-        await gateway.close_task(
-            TASK_ID,
-            handoff_id=handoff_id,
-            summary="Phase 4D is complete.",
-            next_action="Review the DMS adapter.",
-        )
+        closed = await gateway.close_task(TASK_ID)
+        assert closed.action.status is TaskCloseStatus.CLOSED
         await gateway.reopen_task(TASK_ID)
 
     asyncio.run(exercise())
@@ -701,14 +736,10 @@ def test_gateway_task_management_uses_exact_public_commands(tmp_path: Path) -> N
         (prefix, "task", "purpose", TASK_ID, "--clear", "--json"),
         (prefix, "task", "pin", TASK_ID, "--json"),
         (prefix, "task", "pin", TASK_ID, "--off", "--json"),
-        (prefix, "task", "close", TASK_ID, "--json-stdin", "--json"),
+        (prefix, "task", "close", TASK_ID, "--json"),
         (prefix, "task", "reopen", TASK_ID, "--json"),
     ]
-    assert json.loads(runner.inputs[-2]) == {
-        "handoffId": handoff_id,
-        "summary": "Phase 4D is complete.",
-        "nextAction": "Review the DMS adapter.",
-    }
+    assert runner.inputs[-2] is None
 
 
 def test_gateway_curation_rejects_invalid_arguments_before_execution(

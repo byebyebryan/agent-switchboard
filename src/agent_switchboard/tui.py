@@ -37,8 +37,10 @@ from .domain import (
 from .protocol import (
     PresentationPlanEnvelope,
     PresentationPlanKind,
+    RuntimeDisposition,
     SessionActionStatus,
     SessionDetailEnvelope,
+    TaskCloseStatus,
 )
 from .tui_gateway import (
     FleetSnapshotSource,
@@ -1379,15 +1381,15 @@ class SwitchboardApp(App[tuple[str, ...] | None]):
             return
         task = self._selected_task()
         if task is not None:
-            if task.status == "closed":
-                self._publish_action_error(
-                    "task_closed",
-                    "Reopen the selected task before opening it.",
-                    retryable=False,
+            reopening = task.status == "closed"
+            label = "reopening" if reopening else "opening"
+            if self._begin_action(f"{label} {task.title}"):
+                self._prepare_task(
+                    task.task_id,
+                    task.host_id,
+                    self._new_request_id(),
+                    reopen=reopening,
                 )
-                return
-            if self._begin_action(f"opening {task.title}"):
-                self._prepare_task(task.task_id, task.host_id, self._new_request_id())
             return
         row = None if self.model is None else self.model.selected_row
         if row is None:
@@ -1406,6 +1408,8 @@ class SwitchboardApp(App[tuple[str, ...] | None]):
         task_id: str,
         host_id: str,
         request_id: str,
+        *,
+        reopen: bool = False,
     ) -> None:
         try:
             envelope = await self.gateway.prepare_task(
@@ -1414,6 +1418,7 @@ class SwitchboardApp(App[tuple[str, ...] | None]):
                 request_id=request_id,
                 context=self.terminal_context,
                 host_id=self._remote_host_option(host_id),
+                reopen=reopen,
             )
             await self._apply_plan(envelope, host_id=host_id)
         except GatewayError as error:
@@ -1569,35 +1574,44 @@ class SwitchboardApp(App[tuple[str, ...] | None]):
                 retryable=False,
             )
             return
-        if not self._local_action_allowed(task.host_id):
-            return
-        if task.current_session_key is None:
-            if self._begin_action(f"closing {task.title}"):
-                self._close_task(task.task_id, None)
-            return
-        self.push_screen(
-            HandoffEditor("Close task with handoff"),
-            lambda draft: self._on_close_draft(task, draft),
-        )
-
-    def _on_close_draft(self, task: TaskRow, draft: HandoffDraft | None) -> None:
-        if draft is None:
-            return
         if self._begin_action(f"closing {task.title}"):
-            self._close_task(task.task_id, draft)
+            self._close_task(task.task_id, task.host_id)
 
     @work(exclusive=False, group="action", exit_on_error=False)
-    async def _close_task(self, task_id: str, draft: HandoffDraft | None) -> None:
+    async def _close_task(self, task_id: str, host_id: str) -> None:
         try:
-            await self.gateway.close_task(
+            envelope = await self.gateway.close_task(
                 task_id,
-                handoff_id=(None if draft is None else str(self._handoff_id_factory())),
-                summary=None if draft is None else draft.summary,
-                next_action=None if draft is None else draft.next_action,
+                host_id=self._remote_host_option(host_id),
             )
-            self.action_message = "Task closed; runtime left unchanged"
+            action = envelope.action
+            if action.status is TaskCloseStatus.BLOCKED:
+                if action.error is None:
+                    raise GatewayError(
+                        "response_invalid",
+                        "The Switchboard command emitted an incompatible response.",
+                        retryable=False,
+                    )
+                self._publish_action_error(
+                    action.error.code,
+                    action.error.message,
+                    retryable=action.error.retryable,
+                )
+                return
+            messages = {
+                RuntimeDisposition.NO_SESSION: "Task closed; no runtime to stop",
+                RuntimeDisposition.ALREADY_STOPPED: (
+                    "Task closed; runtime already stopped"
+                ),
+                RuntimeDisposition.STOPPED: "Task closed; runtime stopped",
+                RuntimeDisposition.RETAINED: "Task closed; runtime retained",
+                RuntimeDisposition.UNKNOWN: "Task closed; runtime state unknown",
+            }
+            self.action_message = messages[action.runtime_disposition]
+            if action.warning is not None:
+                self.action_message += f" — {action.warning.message}"
             self._selected_task_id = None
-            self._request_snapshot(full=False)
+            self._request_snapshot(full=True)
         except GatewayError as error:
             self._publish_action_error(
                 error.code, error.message, retryable=error.retryable

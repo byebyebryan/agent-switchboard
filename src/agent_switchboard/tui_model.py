@@ -961,8 +961,7 @@ def _session_rows(
         surface_id = session.get("surfaceId")
         surface = surfaces.get(str(surface_id)) if surface_id is not None else None
         can_stop = (
-            provider is ProviderId.CLAUDE
-            and runtime_presence is RuntimePresence.LIVE
+            runtime_presence is RuntimePresence.LIVE
             and surface is not None
             and str(surface.get("transport")) == "tmux"
             and str(surface.get("role")) == "session"

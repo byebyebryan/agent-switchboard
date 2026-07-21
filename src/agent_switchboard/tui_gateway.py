@@ -32,6 +32,7 @@ from .protocol import (
     SessionActionEnvelope,
     SessionDetailEnvelope,
     SnapshotEnvelope,
+    TaskCloseActionEnvelope,
 )
 from .tmux import TmuxController
 
@@ -51,6 +52,7 @@ Envelope = TypeVar(
     SessionActionEnvelope,
     SessionDetailEnvelope,
     FleetEnvelope,
+    TaskCloseActionEnvelope,
 )
 EnvelopeParser = Callable[[str | bytes | bytearray], Envelope]
 
@@ -733,6 +735,7 @@ class SwbctlGateway:
         request_id: str,
         context: PresentationContext,
         host_id: str | None = None,
+        reopen: bool = False,
     ) -> PresentationPlanEnvelope:
         arguments = [
             "prepare-task",
@@ -740,6 +743,8 @@ class SwbctlGateway:
         ]
         if host_id is not None:
             arguments.extend(("--host", _host_argument(host_id)))
+        if reopen:
+            arguments.append("--reopen")
         if provider is not None:
             try:
                 provider_id = ProviderId(provider).value
@@ -904,45 +909,27 @@ class SwbctlGateway:
         self,
         task_id: str,
         *,
-        handoff_id: str | None,
-        summary: str | None,
-        next_action: str | None,
-    ) -> None:
+        host_id: str | None = None,
+    ) -> TaskCloseActionEnvelope:
         canonical_task_id = _uuid_argument(task_id, "task ID")
-        if handoff_id is None and summary is None and next_action is None:
-            payload = b"{}"
-        elif handoff_id is not None and summary is not None and next_action is not None:
-            try:
-                normalized_summary = normalize_handoff_text(summary, "summary")
-                normalized_next_action = normalize_handoff_text(
-                    next_action, "next action"
-                )
-            except ValidationError as error:
-                raise GatewayError(
-                    "argument_invalid", str(error), retryable=False
-                ) from error
-            payload = json.dumps(
-                {
-                    "handoffId": _uuid_argument(handoff_id, "handoff ID"),
-                    "summary": normalized_summary,
-                    "nextAction": normalized_next_action,
-                },
-                ensure_ascii=False,
-                allow_nan=False,
-                separators=(",", ":"),
-                sort_keys=True,
-            ).encode("utf-8")
-        else:
+        arguments = ["task", "close", canonical_task_id]
+        if host_id is not None:
+            arguments.extend(("--host", _host_argument(host_id)))
+        arguments.append("--json")
+        envelope = await self._json(arguments, TaskCloseActionEnvelope.from_json)
+        if str(envelope.action.task_id) != canonical_task_id:
             raise GatewayError(
-                "argument_invalid",
-                "Task close requires a complete handoff or no handoff fields.",
+                "response_invalid",
+                "The Switchboard command emitted an incompatible response.",
                 retryable=False,
             )
-        await self._task_action(
-            ("task", "close", canonical_task_id, "--json-stdin", "--json"),
-            task_id=canonical_task_id,
-            stdin=payload,
-        )
+        if host_id is not None and str(envelope.action.host_id) != host_id:
+            raise GatewayError(
+                "response_invalid",
+                "The Switchboard command emitted an incompatible response.",
+                retryable=False,
+            )
+        return envelope
 
     async def stop_session(
         self,

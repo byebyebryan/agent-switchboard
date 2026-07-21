@@ -110,6 +110,7 @@ jobs:
           import agent_switchboard.repository_discovery
           import agent_switchboard.snapshot
           import agent_switchboard.state
+          import agent_switchboard.task_actions
           import agent_switchboard.tui_gateway
           import agent_switchboard.tui_model
           from agent_switchboard.migrations import CURRENT_SCHEMA_VERSION
@@ -128,6 +129,7 @@ jobs:
               "migrations/v0007_repository_checkouts.py",
               "migrations/v0008_tasks.py",
               "migrations/v0009_imported_task_handoffs.py",
+              "migrations/v0010_runtime_worktree_claims.py",
           ):
               assert package.joinpath(migration).is_file()
           with TemporaryDirectory() as directory:

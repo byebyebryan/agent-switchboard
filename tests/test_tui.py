@@ -188,6 +188,14 @@ def _stoppable_snapshot() -> Any:
     return protocol_module.SnapshotEnvelope.from_dict(value)
 
 
+def _closed_task_snapshot() -> Any:
+    value = _value()
+    task = value["tasks"][0]
+    task["status"] = "closed"
+    task["closedAt"] = value["generatedAt"]
+    return protocol_module.SnapshotEnvelope.from_dict(value)
+
+
 def _plan(kind: str, *, client: str | None = None) -> Any:
     fields: dict[str, Any] = {
         "kind": kind,
@@ -383,6 +391,7 @@ class FakeGateway:
         full_release: asyncio.Event | None = None,
         plan: Any | None = None,
         action: Any | None = None,
+        close_action: Any | None = None,
         prepare_started: asyncio.Event | None = None,
         prepare_release: asyncio.Event | None = None,
         prepare_cancelled: asyncio.Event | None = None,
@@ -397,6 +406,18 @@ class FakeGateway:
         self.plan = _blocked_plan() if plan is None else plan
         self.stop_action = (
             _stop_action("blocked", blocked=True) if action is None else action
+        )
+        self.close_action = (
+            protocol_module.TaskCloseActionEnvelope(
+                protocol_module.TaskCloseAction(
+                    protocol_module.TaskCloseStatus.CLOSED,
+                    domain_module.HostId(HOST_ID),
+                    domain_module.TaskId(TASK_ID),
+                    protocol_module.RuntimeDisposition.NO_SESSION,
+                )
+            )
+            if close_action is None
+            else close_action
         )
         self.prepare_started = prepare_started
         self.prepare_release = prepare_release
@@ -535,10 +556,29 @@ class FakeGateway:
         request_id: str,
         context: Any,
         host_id: str | None = None,
+        reopen: bool = False,
     ) -> Any:
         assert host_id is None
-        self.action_calls.append(("continue", task_id, provider, request_id, context))
+        self.action_calls.append(
+            (
+                "reopen-open" if reopen else "continue",
+                task_id,
+                provider,
+                request_id,
+                context,
+            )
+        )
         return await self._prepare()
+
+    async def close_task(
+        self,
+        task_id: str,
+        *,
+        host_id: str | None = None,
+    ) -> Any:
+        assert host_id is None
+        self.action_calls.append(("close", task_id))
+        return self.close_action
 
     async def stop_session(
         self,
@@ -1803,6 +1843,66 @@ def test_task_continuation_uses_task_identity_and_terminal_plan_path() -> None:
                 "attach-surface",
                 SURFACE_ID,
             )
+
+    asyncio.run(exercise())
+
+
+def test_task_close_is_one_action_without_handoff_modal() -> None:
+    async def exercise() -> None:
+        snapshot = protocol_module.SnapshotEnvelope.from_dict(_value())
+        closed = _closed_task_snapshot()
+        gateway = FakeGateway(retained=snapshot, full=[closed])
+        app = _app(gateway, initial_view="open")
+        async with app.run_test(size=(100, 28)) as pilot:
+            await _wait_until(
+                pilot,
+                lambda: app._selected_task_id == f"{HOST_ID}:{TASK_ID}",
+                message="open task did not become selected",
+            )
+            await pilot.press("z")
+            await _wait_until(
+                pilot,
+                lambda: (
+                    ("close", TASK_ID) in gateway.action_calls and not app.action_busy
+                ),
+                message="task close did not complete",
+            )
+
+            assert not isinstance(app.screen, tui_module.HandoffEditor)
+            assert app.action_message == "Task closed; no runtime to stop"
+            assert gateway.calls == ["none", "full"]
+
+    asyncio.run(exercise())
+
+
+def test_closed_task_open_reopens_and_presents_in_one_action() -> None:
+    async def exercise() -> None:
+        context = domain_module.PresentationContext(True, None, False, False)
+        gateway = FakeGateway(retained=_closed_task_snapshot(), plan=_plan("attach"))
+        app = _app(gateway, initial_view="closed")
+        async with app.run_test(size=(100, 28)) as pilot:
+            await _wait_until(
+                pilot,
+                lambda: app._selected_task_id == f"{HOST_ID}:{TASK_ID}",
+                message="closed task did not become selected",
+            )
+            await pilot.press("o")
+            await _wait_until(
+                pilot,
+                lambda: not app.is_running,
+                message="reopen and open did not present the task",
+            )
+
+            assert gateway.action_calls == [
+                (
+                    "reopen-open",
+                    TASK_ID,
+                    None,
+                    str(REQUEST_IDS[0]),
+                    context,
+                ),
+                ("attach", SURFACE_ID),
+            ]
 
     asyncio.run(exercise())
 

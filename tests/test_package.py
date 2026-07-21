@@ -44,10 +44,10 @@ def test_static_pep_621_metadata_and_stdlib_runtime() -> None:
         "docs/phase-4b-plan.md",
         "docs/phase-4c-plan.md",
         "docs/phase-4d-plan.md",
-            "docs/phase-5-plan.md",
-            "docs/project-management-plan.md",
-            "docs/frictionless-task-close-plan.md",
-        ]
+        "docs/phase-5-plan.md",
+        "docs/project-management-plan.md",
+        "docs/frictionless-task-close-plan.md",
+    ]
     assert metadata["tool"]["pytest"]["ini_options"]["pythonpath"] == ["src"]
 
 
@@ -97,6 +97,7 @@ def test_ci_smokes_wheel_and_source_distribution_installations() -> None:
         "agent_switchboard.snapshot",
         "agent_switchboard.tui_gateway",
         "agent_switchboard.tui_model",
+        "agent_switchboard.task_actions",
     ):
         assert f"import {module}" in workflow
     assert "migrations/v0003_name_provenance_runtime_index.py" in workflow
@@ -105,6 +106,7 @@ def test_ci_smokes_wheel_and_source_distribution_installations() -> None:
     assert "migrations/v0007_repository_checkouts.py" in workflow
     assert "migrations/v0008_tasks.py" in workflow
     assert "migrations/v0009_imported_task_handoffs.py" in workflow
+    assert "migrations/v0010_runtime_worktree_claims.py" in workflow
     assert 'snapshot --help | grep -F -- "--reconcile {none,live,full}"' in workflow
     assert 'list --help | grep -F -- "--refresh"' in workflow
     assert 'show --help | grep -F -- "--handoff-limit"' in workflow
@@ -142,6 +144,7 @@ def test_ci_smokes_wheel_and_source_distribution_installations() -> None:
     assert '"docs/phase-4d-plan.md"' in verifier
     assert '"docs/phase-5-plan.md"' in verifier
     assert '"docs/project-management-plan.md"' in verifier
+    assert '"docs/frictionless-task-close-plan.md"' in verifier
     assert '"agent_switchboard/migrations/v0003_name_provenance_runtime_index.py"' in (
         verifier
     )
@@ -151,6 +154,9 @@ def test_ci_smokes_wheel_and_source_distribution_installations() -> None:
     assert '"agent_switchboard/migrations/v0007_repository_checkouts.py"' in verifier
     assert '"agent_switchboard/migrations/v0008_tasks.py"' in verifier
     assert '"agent_switchboard/migrations/v0009_imported_task_handoffs.py"' in (
+        verifier
+    )
+    assert '"agent_switchboard/migrations/v0010_runtime_worktree_claims.py"' in (
         verifier
     )
 

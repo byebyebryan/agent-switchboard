@@ -292,7 +292,7 @@ def test_snapshot_projects_rows_launch_targets_and_capabilities() -> None:
     assert row.checkout_path == "/work/example"
     assert row.status is DisplayStatus.WORKING
     assert row.attention_rank is AttentionRank.WORKING
-    assert row.can_stop is False
+    assert row.can_stop is True
     assert model.selected_row is row
     assert [target.provider for target in model.launch_targets] == [
         ProviderId.CODEX,
