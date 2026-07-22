@@ -307,7 +307,9 @@ The walkthrough supports this deliberately narrower first increment:
    exclusive task claim, so the child can claim a linked worktree normally.
 5. Store a bounded transition brief and prepare one leased inert surface during
    the agent tool call, then start the child with one fixed, visible bootstrap
-   instruction through the provider's tested initial-prompt contract.
+   instruction through the provider's tested initial-prompt contract. When the
+   child binds, use the task title as its curated Switchboard name and project
+   that title into provider metadata when the adapter supports it.
 6. Keep the parent live until child binding and presentation succeed, then park
    it for a resumable automatic return.
 7. Implement separate Back, Cancel push, and Complete and return operations;
@@ -469,7 +471,9 @@ phases:
    releasing the attach-before-start bootstrap.
 6. The provider's `SessionStart` hook binds the child provider UUID to the
    launch, task, frame, and surface.
-7. Switchboard projects the task title into provider metadata when supported.
+7. Switchboard stores the task title as the child's curated name and records a
+   bounded best-effort provider-title projection when supported. The provider
+   write does not gate the transition.
 8. Only after confirmed binding and presentation does the transition become
    `completed`, the cursor select the child, and the explicit parent runtime
    policy take effect.
@@ -484,6 +488,62 @@ If the child fails to start or bind, the parent remains foreground. Expired
 waiting surfaces and launch leases are reclaimed by existing reconciliation.
 Retry with the same request ID must reuse or repair the same transition rather
 than creating another child.
+
+## Automatic session naming lifecycle
+
+Yes, the automatic workflow names the workspace and child sessions. This is
+necessary because the child bootstrap instruction is deliberately fixed. If
+provider auto-naming used that instruction, every focused task could receive
+the same generic title instead of the semantic title already chosen by the
+workspace agent.
+
+Naming is a presentation operation, not a routing operation. It never changes
+the provider UUID, Switchboard session key, frame lineage, tmux session name,
+window, pane, or surface ID. Managed tmux sessions keep their opaque stable
+names so shell quoting, collisions, and later title edits cannot invalidate a
+runtime locator.
+
+The first-slice lifecycle is:
+
+1. `task_push` validates and stores one bounded task title with the task and
+   transition before any provider process starts.
+2. The child starts with the fixed bootstrap instruction. Until `SessionStart`
+   binds its provider UUID, there is nothing provider-specific to rename.
+3. The binding transaction gives the child session the current task title as a
+   curated Switchboard name with `name_actor=agent`. Switchboard can therefore
+   display the useful title immediately even if the provider write is
+   unsupported or fails.
+4. After binding, a transition-owned bounded action attempts to project that
+   same title into provider metadata. This stays off the post-turn
+   surface-switch hot path and cannot delay or roll back a successful push.
+5. Codex performs the projection with a transient stdio App Server call to
+   `thread/name/set(threadId, name)`, verifies it with `thread/read`, and reaps
+   the process. It does not type `/rename` into the TUI or enable the shared
+   default-socket daemon.
+6. A known not-yet-writable metadata result may receive one bounded retry after
+   the first completed turn. Unsupported providers and exhausted failures keep
+   the curated Switchboard name and report bounded diagnostic state; they do
+   not create another session or keep retrying in the background.
+
+A workspace root uses a bounded label derived from the project name, such as
+`Agent Switchboard workspace`; a task child uses the exact current task title.
+If a workspace or task rolls over to a new provider thread, the new UUID is a
+new one-shot projection target. Resuming the same UUID does not rename it
+again. Provider names do not need to be unique.
+
+The projection is an initial default, not a permanent synchronization loop.
+Later task-title edits, Switchboard session-name edits, and provider-native
+`/rename` operations remain distinct explicit user intent. Reconciliation may
+update `provider_name`, but it must preserve a curated Switchboard name and
+must not reapply the automatic projection merely because the two values differ.
+This prevents an oscillation between Switchboard and a provider TUI. A future
+explicit **Rename current session** action may deliberately update both stores
+under the same bounded adapter contract.
+
+Claude Code keeps the curated Switchboard name in the first slice until a
+provider-native metadata write is separately proven and version-gated. The
+workflow must never simulate support by injecting a slash command or terminal
+keystrokes.
 
 ## Return lifecycle
 
@@ -802,8 +862,8 @@ intentionally stops at one workspace child until checkout ownership is revised.
    and bounded transition status surface.
 8. Version-gate Codex fork/resume/initial-prompt/name contracts and Claude
    fork/resume/initial-prompt semantics with isolated no-model probes.
-9. Decide whether provider-native title projection happens at binding, after
-   the first completed turn, or through a bounded retry queue.
+9. Define the durable diagnostic/idempotency representation for the accepted
+   one-shot provider-name projection and its single bounded retry.
 10. Decide how a directly or manually resumed historical session joins a
     workspace path or remains a parentless recovery flow.
 11. Define workspace provider-thread rollover without changing durable
