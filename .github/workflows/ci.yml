@@ -88,6 +88,12 @@ jobs:
           from tempfile import TemporaryDirectory
 
           import agent_switchboard
+          import agent_switchboard._v3.agent_mcp
+          import agent_switchboard._v3.cli
+          import agent_switchboard._v3.navigator
+          import agent_switchboard._v3.provider_runtime
+          import agent_switchboard._v3.trusted_hook
+          import agent_switchboard._v3.workflow
           import agent_switchboard.agent_tools
           import agent_switchboard.cli
           import agent_switchboard.config

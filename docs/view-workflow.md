@@ -330,7 +330,8 @@ Retained evidence establishes feasibility, not production acceptance:
 
 The retained topology/control proof is
 [`spikes/tmux_sidebar_swap_spike.py`](../spikes/tmux_sidebar_swap_spike.py).
-Real Codex/Claude live-input and parent synthesis remain Phase 6D acceptance.
+Phase 6D implementation and guarded installed-provider evidence are recorded in
+[Phase 6D Acceptance](phase-6d-acceptance.md).
 
 ## Acceptance Scenarios
 

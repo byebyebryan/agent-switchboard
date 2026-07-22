@@ -2,8 +2,8 @@
 
 Date: 2026-07-22
 
-Status: Phase 6A.1, 6B.1, 6B.2, and 6C complete behind the private replacement
-boundary; Phase 6D is next
+Status: Phase 6A.1 through 6D complete behind the private replacement boundary;
+Phase 6E coordinated activation is next
 
 Target core release: `0.3.0`
 
@@ -265,6 +265,9 @@ provider launch/resume authority introduced by that slice; 6C must not invent
 that authority merely to make a shell repair look complete.
 
 ### Phase 6D: workspace and one-child automation
+
+Status: complete in the private replacement. Evidence is recorded in
+[Phase 6D Acceptance](phase-6d-acceptance.md).
 
 - Create one lazy workspace frame per host/project/default checkout.
 - Add exact frame-scoped agent capabilities and replacement MCP tools.

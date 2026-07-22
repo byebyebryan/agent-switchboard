@@ -124,6 +124,7 @@ def audit_contents(wheel: Path, sdist: Path) -> dict[str, object]:
             "docs/phase-6-plan.md",
             "docs/cutover-bundle-v1.md",
             "docs/phase-6c-acceptance.md",
+            "docs/phase-6d-acceptance.md",
             "pyproject.toml",
         )
     }

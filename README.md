@@ -16,18 +16,20 @@ projects/repositories/checkouts, explicit tasks, Snapshot v2/Fleet v1,
 pull-based SSH federation, the full-screen Textual manager, and the separate
 DMS model-v5 picker all have deterministic and guarded live acceptance.
 
-Phase 6A.1 through 6C are implemented and validated behind the private `_v3`
+Phase 6A.1 through 6D are implemented and validated behind the private `_v3`
 boundary for `0.3.0`. The replacement now has Config v3, its fresh registry,
 HostState v1/NavigatorState v1/PresentationDirective v1, exact offline
 CutoverBundle conversion, generation-safe staged activation, durable host-local
-views, direct/navigator tmux composition, and the compact resident navigator.
-The [6C acceptance record](docs/phase-6c-acceptance.md) captures the isolated
-CLI, tmux, Textual, Codex, and Claude evidence.
+views, direct/navigator tmux composition, the compact resident navigator,
+guarded native-provider launch/resume/fork, exact frame capabilities and MCP
+tools, trusted transition hooks, and the conservative workspace/one-child
+workflow. The [6D acceptance record](docs/phase-6d-acceptance.md) captures the
+exact lifecycle and installed-provider gates.
 
 The public executable remains `0.2.0`; private Phase 6 modules do not register
-a second `swbctl` entrypoint. Phase 6D workspace/one-child automation and the
-paired DMS replacement still precede coordinated activation. Do not run the
-registry/config cutover against live user state before Phase 6E.
+a second `swbctl` entrypoint. The paired DMS replacement and coordinated
+activation remain Phase 6E. Do not run the registry/config cutover against live
+user state before that phase.
 
 Current design sources:
 
@@ -37,6 +39,7 @@ Current design sources:
 - [Phase 6 Clean-Break Plan](docs/phase-6-plan.md)
 - [CutoverBundle v1 and Activation](docs/cutover-bundle-v1.md)
 - [Phase 6C Acceptance](docs/phase-6c-acceptance.md)
+- [Phase 6D Acceptance](docs/phase-6d-acceptance.md)
 
 The implemented `0.2` phase records are retained as non-packaged historical
 evidence under [`docs/archive/0.2`](docs/archive/0.2/README.md).

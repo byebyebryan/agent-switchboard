@@ -542,9 +542,9 @@ def run_probe() -> int:
             # Durable intent exists, but location and metadata still block exec.
             authorization.write_text("authorized\n", encoding="ascii")
             time.sleep(0.25)
-            checks["authorization_without_main_placement_still_blocked"] = (
-                not child_marker.exists()
-            )
+            checks[
+                "authorization_without_main_placement_still_blocked"
+            ] = not child_marker.exists()
             run(
                 socket,
                 "set-option",
@@ -578,8 +578,7 @@ def run_probe() -> int:
             )
             checks["swap_before_locator_commit_is_observable"] = (
                 pane_location(socket, child_pane)[:2] == ("view", "main")
-                and pane_location(socket, project_pane)[:2]
-                == ("hold", "staged-child")
+                and pane_location(socket, project_pane)[:2] == ("hold", "staged-child")
                 and pane_option(socket, child_pane, PANE_IDENTITY) == "child-surface"
                 and pane_option(socket, project_pane, PANE_IDENTITY)
                 == "project-surface"
@@ -637,8 +636,11 @@ def run_probe() -> int:
                 )
             )
             checks["control_prompt_delivered_exactly_once"] = wait_for(
-                lambda: project_input.exists()
-                and project_input.read_text(encoding="utf-8") == CONTROL_PROMPT + "\n"
+                lambda: (
+                    project_input.exists()
+                    and project_input.read_text(encoding="utf-8")
+                    == CONTROL_PROMPT + "\n"
+                )
             )
             checks["parent_input_remained_fenced_after_submit"] = (
                 pane_value(socket, project_pane, "#{pane_input_off}") == "1"
@@ -650,10 +652,9 @@ def run_probe() -> int:
 
             # Safe Human-close ordering can now remove only the parked child.
             run(socket, "kill-pane", "-t", child_pane)
-            checks["parked_child_cleanup_preserved_main"] = (
-                pane_alive(socket, project_pane)
-                and pane_location(socket, project_pane)[:2] == ("view", "main")
-            )
+            checks["parked_child_cleanup_preserved_main"] = pane_alive(
+                socket, project_pane
+            ) and pane_location(socket, project_pane)[:2] == ("view", "main")
 
             # A mode change requested while zoomed restores that display choice.
             run(socket, "resize-pane", "-Z", "-t", project_pane)
@@ -720,9 +721,7 @@ def run_probe() -> int:
             for client in reversed(clients):
                 client.close()
             clients.clear()
-            checks["all_clients_detached"] = wait_for(
-                lambda: not client_names(socket)
-            )
+            checks["all_clients_detached"] = wait_for(lambda: not client_names(socket))
             checks["view_survived_global_destroy_unattached"] = (
                 run(socket, "has-session", "-t", "=view", check=False).returncode == 0
             )
@@ -741,9 +740,7 @@ def run_probe() -> int:
             # Same named socket after server loss must have a different generation.
             run(socket, "kill-server")
             server_killed = True
-            if not wait_for(
-                lambda: not Path(f"/proc/{generation_before[1]}").exists()
-            ):
+            if not wait_for(lambda: not Path(f"/proc/{generation_before[1]}").exists()):
                 raise RuntimeError("isolated tmux server survived kill-server")
             run(
                 socket,
