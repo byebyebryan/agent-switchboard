@@ -968,7 +968,13 @@ def test_projects_startup_add_flag_opens_path_first_form() -> None:
         async with app.run_test(size=(110, 32)) as pilot:
             await _wait_until(
                 pilot,
-                lambda: isinstance(app.screen, tui_module.CatalogFormScreen),
+                lambda: (
+                    isinstance(app.screen, tui_module.CatalogFormScreen)
+                    and len(app.screen.query("#catalog-field-path")) == 1
+                    and app.screen.query_one(
+                        "#catalog-field-path", widgets_module.Input
+                    ).has_focus
+                ),
                 message="path-first add form did not open",
             )
             app.screen.query_one(

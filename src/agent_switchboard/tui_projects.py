@@ -89,7 +89,10 @@ class CatalogFormScreen(ModalScreen[dict[str, str] | None]):
 
     def on_mount(self) -> None:
         if self.fields:
-            self.query_one(f"#catalog-field-{self.fields[0].key}", Input).focus()
+            self.call_after_refresh(self._focus_first_field)
+
+    def _focus_first_field(self) -> None:
+        self.query_one(f"#catalog-field-{self.fields[0].key}", Input).focus()
 
     def action_submit(self) -> None:
         values = {
