@@ -55,6 +55,7 @@ Design and operations:
 - [View and Frame Workflow](docs/view-workflow.md)
 - [Phase 6 Clean-Break Plan](docs/phase-6-plan.md)
 - [CutoverBundle v1 and Activation](docs/cutover-bundle-v1.md)
+- [Phase 6E Coordinated Activation](docs/phase-6e-activation.md)
 
 Historical `0.2` records remain outside the installed package under
 [`docs/archive/0.2`](docs/archive/0.2/README.md).
