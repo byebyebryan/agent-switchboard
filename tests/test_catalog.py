@@ -110,7 +110,9 @@ def test_editor_canonicalizes_with_exact_backup_and_secure_modes(
 ) -> None:
     source = tmp_path / "config" / "config.toml"
     source.parent.mkdir(mode=0o700)
-    original = b"# retained in backup\nconfig_version = 2\n"
+    original = (
+        b'# retained in backup\nconfig_version = 2\n\n[host]\ndisplay_name = "before"\n'
+    )
     source.write_bytes(original)
     source.chmod(0o600)
     backups = tmp_path / "state" / "backups"
