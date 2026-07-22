@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 import json
 import shutil
 import subprocess
@@ -21,9 +22,53 @@ from test_v3_cutover import (
 from agent_switchboard._v3.cli import main as v3_main
 from agent_switchboard._v3.domain import ProviderId, ViewId, ViewMode
 from agent_switchboard._v3.provider_runtime import ProviderContract
-from agent_switchboard._v3.tmux_view import TmuxExecutor
+from agent_switchboard._v3.tmux_view import ROLE_SURFACE, TmuxExecutor
 
 pytestmark = pytest.mark.skipif(shutil.which("tmux") is None, reason="tmux required")
+
+
+def test_global_hook_noops_only_outside_managed_authority(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.delenv("AGENT_SWITCHBOARD_CAPABILITY", raising=False)
+    monkeypatch.delenv("SWB_V3_SESSION_KEY", raising=False)
+
+    assert v3_main(["hook", "--provider", "codex"]) == 0
+    assert capsys.readouterr() == ("", "")
+
+    monkeypatch.setenv("AGENT_SWITCHBOARD_CAPABILITY", "opaque")
+    assert v3_main(["hook", "--provider", "codex"]) == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == "swbctl: incomplete managed hook authority\n"
+
+    monkeypatch.delenv("AGENT_SWITCHBOARD_CAPABILITY")
+    monkeypatch.setenv(
+        "SWB_V3_SESSION_KEY",
+        "040f6a81-67b6-42ce-b7ca-2068bb190e88:codex:"
+        "019f6a67-a897-7661-97c5-41ca255d1284",
+    )
+    assert v3_main(["hook", "--provider", "codex"]) == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == "swbctl: incomplete managed hook authority\n"
+
+
+def test_managed_hook_rejection_writes_safe_feedback(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setenv("AGENT_SWITCHBOARD_CAPABILITY", "opaque")
+    monkeypatch.setenv(
+        "SWB_V3_SESSION_KEY",
+        "040f6a81-67b6-42ce-b7ca-2068bb190e88:codex:"
+        "019f6a67-a897-7661-97c5-41ca255d1284",
+    )
+    monkeypatch.setattr("sys.stdin", io.TextIOWrapper(io.BytesIO(b"not-json")))
+
+    assert v3_main(["hook", "--provider", "codex"]) == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == "swbctl: managed hook event rejected\n"
 
 
 def test_private_cli_runs_staged_reads_then_committed_view_workflow(
@@ -185,6 +230,16 @@ def test_private_cli_runs_staged_reads_then_committed_view_workflow(
             "runtimePresence": "live",
             "sessionKey": SESSION_KEY,
         }
+        surface_panes = [
+            pane
+            for pane in tmux.panes()
+            if pane.role == ROLE_SURFACE and pane.frame_id == frame_id
+        ]
+        assert len(surface_panes) == 1
+        assert (
+            surface_panes[0].session_name == tmux.names("agent", view_id).view_session
+        )
+        assert not surface_panes[0].dead
 
         assert (
             v3_main(
@@ -237,6 +292,20 @@ def test_private_cli_runs_staged_reads_then_committed_view_workflow(
                     str(view_id),
                     "--request-id",
                     "aaaaaaaa-1111-4111-8111-111111111111",
+                    "--at",
+                    "106",
+                ]
+            )
+        assert captured[-1].endswith(":main")
+        captured.clear()
+        with pytest.raises(ExecCalled):
+            v3_main(
+                [
+                    *base,
+                    "view",
+                    "attach",
+                    "--view",
+                    str(view_id),
                     "--at",
                     "106",
                 ]

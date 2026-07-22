@@ -2199,6 +2199,13 @@ class WorkflowRuntime:
                 None,
             )
         )
+        executor.present_surface(
+            prefix=self.opened.config.tmux.naming_prefix,
+            generation_id=self.generation_id,
+            view_id=view.view_id,
+            mode=view.mode,
+            surface_id=str(surface.surface_id),
+        )
         executor.set_pane_input(
             generation_id=self.generation_id,
             view_id=view.view_id,

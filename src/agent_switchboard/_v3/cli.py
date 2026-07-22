@@ -400,19 +400,37 @@ def _view(arguments: argparse.Namespace) -> int:
             print(directive.to_json())
             return 0
         if arguments.view_command == "attach":
-            host_id = HostId(arguments.host)
+            request_id = _request(arguments.request_id)
+            host_id = (
+                opened.config.host.host_id
+                if arguments.host is None
+                else HostId(arguments.host)
+            )
             if host_id != opened.config.host.host_id:
                 attach_argv = RemoteRuntime(
                     opened.config, opened.registry
                 ).attach_command(
                     host_id,
                     view_id=arguments.view,
-                    request_id=arguments.request_id,
+                    request_id=str(request_id),
                 )
                 os.execvp(attach_argv[0], attach_argv)
+            opened_view = runtime.open_view(ViewId(arguments.view), now=timestamp)
+            directive = runtime.presentation_directive(
+                opened_view.view,
+                request_id=request_id,
+                can_focus_desktop=False,
+                can_launch_terminal=True,
+                now=timestamp,
+            )
+            if directive.kind is not DirectiveKind.ATTACH:
+                raise ViewRuntimeError(
+                    "ssh_attach_unavailable",
+                    "view did not offer an SSH attachment lease",
+                )
             result = runtime.attach_view(
                 ViewId(arguments.view),
-                request_id=RequestId(arguments.request_id),
+                request_id=request_id,
                 now=timestamp,
             )
             os.execvp(result.attach_argv[0], result.attach_argv)
@@ -442,7 +460,14 @@ def _agent_mcp(arguments: argparse.Namespace) -> int:
 
 def _hook(arguments: argparse.Namespace) -> int:
     raw_capability = os.environ.get("AGENT_SWITCHBOARD_CAPABILITY")
-    if not raw_capability:
+    raw_session_key = os.environ.get("SWB_V3_SESSION_KEY")
+    if not raw_capability and not raw_session_key:
+        # Provider hook configuration is global, while Switchboard authority is
+        # intentionally pane-local. Unmanaged provider sessions are outside
+        # our ownership boundary and must not be disrupted by the hook.
+        return 0
+    if not raw_capability or not raw_session_key:
+        print("swbctl: incomplete managed hook authority", file=sys.stderr)
         return 2
     try:
         payload = read_hook_json(sys.stdin.buffer)
@@ -458,6 +483,7 @@ def _hook(arguments: argparse.Namespace) -> int:
         finally:
             opened.close()
     except (HookInputError, WorkflowError, ConflictError, ValueError):
+        print("swbctl: managed hook event rejected", file=sys.stderr)
         return 2
     return 0
 
@@ -783,9 +809,9 @@ def _parser() -> argparse.ArgumentParser:
     recover.add_argument("--json", action="store_true")
     recover.add_argument("--at", type=int)
     attach = view_sub.add_parser("attach")
-    attach.add_argument("--host", required=True)
+    attach.add_argument("--host")
     attach.add_argument("--view", required=True)
-    attach.add_argument("--request-id", required=True)
+    attach.add_argument("--request-id")
     attach.add_argument("--at", type=int)
     retire = view_sub.add_parser("retire")
     retire.add_argument("--view", required=True)
