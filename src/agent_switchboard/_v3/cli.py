@@ -8,6 +8,7 @@ path without exposing two public product generations at once.
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 import os
 import sys
@@ -21,10 +22,15 @@ from agent_switchboard.hooks import HookInputError, read_hook_json
 from .agent_mcp import AgentToolService, run_mcp_server
 from .cutover import CutoverBundle, CutoverError, export_artifacts
 from .domain import (
+    FailureRecord,
     FrameId,
     GenerationId,
+    HostId,
     ProjectId,
     ProviderId,
+    RecoveryActionability,
+    RecoveryId,
+    RecoveryState,
     RequestId,
     TransitionId,
     ViewId,
@@ -40,7 +46,13 @@ from .generation import (
     rollback,
     status,
 )
-from .protocol import build_host_state, build_navigator_from_registry
+from .protocol import (
+    DirectiveKind,
+    PresentationDirective,
+    build_host_state,
+    build_navigator_from_registry,
+)
+from .remote import RemoteError, RemoteRuntime
 from .storage import ConflictError
 from .tmux_view import TmuxExecutor, TmuxViewError
 from .trusted_hook import handle_trusted_event
@@ -194,9 +206,17 @@ def _state(arguments: argparse.Namespace) -> int:
         if arguments.state_command == "host":
             print(build_host_state(opened.registry, generated_at=timestamp).to_json())
         else:
+            if arguments.refresh:
+                asyncio.run(
+                    RemoteRuntime(opened.config, opened.registry).refresh(now=timestamp)
+                )
             print(
                 build_navigator_from_registry(
-                    opened.registry, generated_at=timestamp
+                    opened.registry,
+                    generated_at=timestamp,
+                    staleness_interval_seconds=(
+                        opened.config.defaults.staleness_interval_seconds
+                    ),
                 ).to_json()
             )
     return 0
@@ -213,21 +233,51 @@ def _view(arguments: argparse.Namespace) -> int:
             _print(_view_dict(opened.registry.get_view(ViewId(arguments.view))))
             return 0
         if arguments.view_command == "open":
-            result = runtime.open_project(
-                ProjectId(arguments.project),
-                request_id=_request(arguments.request_id),
-                view_id=None if arguments.view is None else ViewId(arguments.view),
-                mode=None if arguments.mode is None else ViewMode(arguments.mode),
-                now=timestamp,
-            )
-            payload = {
-                "created": result.created,
-                "view": _view_dict(result.view),
-                "attachArgv": list(result.attach_argv),
-            }
-            if arguments.attach:
-                os.execvp(result.attach_argv[0], result.attach_argv)
-            _print(payload)
+            host_id = HostId(arguments.host)
+            if host_id != opened.config.host.host_id:
+                remote_arguments = [
+                    "view",
+                    "open",
+                    "--host",
+                    str(host_id),
+                    "--view" if arguments.view is not None else "--project",
+                    arguments.view if arguments.view is not None else arguments.project,
+                    "--request-id",
+                    arguments.request_id,
+                    (
+                        "--can-focus-desktop"
+                        if arguments.can_focus_desktop
+                        else "--no-focus-desktop"
+                    ),
+                ]
+                if arguments.can_launch_terminal:
+                    remote_arguments.append("--can-launch-terminal")
+                remote_arguments.append("--json")
+                directive = asyncio.run(
+                    RemoteRuntime(opened.config, opened.registry).directive(
+                        host_id, remote_arguments
+                    )
+                )
+            else:
+                request_id = RequestId(arguments.request_id)
+                result = (
+                    runtime.open_view(ViewId(arguments.view), now=timestamp)
+                    if arguments.view is not None
+                    else runtime.open_project(
+                        ProjectId(arguments.project),
+                        request_id=request_id,
+                        mode=opened.config.views.desktop_default_mode,
+                        now=timestamp,
+                    )
+                )
+                directive = runtime.presentation_directive(
+                    result.view,
+                    request_id=request_id,
+                    can_focus_desktop=arguments.can_focus_desktop,
+                    can_launch_terminal=arguments.can_launch_terminal,
+                    now=timestamp,
+                )
+            print(directive.to_json())
             return 0
         if arguments.view_command == "focus":
             view = runtime.focus_frame(
@@ -266,19 +316,93 @@ def _view(arguments: argparse.Namespace) -> int:
             _print(_transition_dict(transition))
             return 0
         if arguments.view_command == "recover":
-            result = runtime.recover_view(ViewId(arguments.view), now=timestamp)
-            _print({"repaired": result.repaired, "view": _view_dict(result.view)})
+            host_id = HostId(arguments.host)
+            if host_id != opened.config.host.host_id:
+                remote_arguments = [
+                    "view",
+                    "recover",
+                    "--host",
+                    str(host_id),
+                    "--recovery",
+                    arguments.recovery,
+                    "--request-id",
+                    arguments.request_id,
+                    (
+                        "--can-focus-desktop"
+                        if arguments.can_focus_desktop
+                        else "--no-focus-desktop"
+                    ),
+                ]
+                if arguments.can_launch_terminal:
+                    remote_arguments.append("--can-launch-terminal")
+                remote_arguments.append("--json")
+                directive = asyncio.run(
+                    RemoteRuntime(opened.config, opened.registry).directive(
+                        host_id, remote_arguments
+                    )
+                )
+            else:
+                recovery = opened.registry.get_recovery(RecoveryId(arguments.recovery))
+                request_id = RequestId(arguments.request_id)
+                if recovery.actionability is RecoveryActionability.MANUAL:
+                    directive = PresentationDirective(
+                        str(request_id),
+                        str(host_id),
+                        DirectiveKind.BLOCKED,
+                        error=FailureRecord(
+                            "manual_recovery_required",
+                            recovery.bounded_explanation,
+                            False,
+                        ),
+                    )
+                elif recovery.subject_type != "view":
+                    directive = PresentationDirective(
+                        str(request_id),
+                        str(host_id),
+                        DirectiveKind.BLOCKED,
+                        error=FailureRecord(
+                            "recovery_route_unavailable",
+                            "Recovery does not own a presentable view.",
+                            False,
+                        ),
+                    )
+                else:
+                    view_id = ViewId(recovery.subject_id)
+                    if recovery.actionability is RecoveryActionability.SAFE_AUTO:
+                        result = runtime.recover_view(view_id, now=timestamp)
+                        opened.registry.settle_recovery(
+                            recovery.recovery_id,
+                            RecoveryState.RESOLVED,
+                            now=timestamp,
+                        )
+                        view = result.view
+                    else:
+                        view = runtime.open_view(view_id, now=timestamp).view
+                    directive = runtime.presentation_directive(
+                        view,
+                        request_id=request_id,
+                        can_focus_desktop=arguments.can_focus_desktop,
+                        can_launch_terminal=arguments.can_launch_terminal,
+                        now=timestamp,
+                    )
+            print(directive.to_json())
             return 0
         if arguments.view_command == "attach":
-            result = runtime.attach_view(ViewId(arguments.view), now=timestamp)
-            if arguments.print_argv:
-                _print(
-                    {
-                        "attachArgv": list(result.attach_argv),
-                        "view": _view_dict(result.view),
-                    }
+            host_id = HostId(arguments.host)
+            if host_id != opened.config.host.host_id:
+                attach_argv = RemoteRuntime(
+                    opened.config, opened.registry
+                ).attach_command(
+                    host_id,
+                    view_id=arguments.view,
+                    request_id=arguments.request_id,
                 )
-                return 0
+                os.execvp(attach_argv[0], attach_argv)
+            result = runtime.attach_view(
+                ViewId(arguments.view),
+                request_id=RequestId(arguments.request_id),
+                now=timestamp,
+            )
             os.execvp(result.attach_argv[0], result.attach_argv)
         if arguments.view_command == "retire":
             _print(
@@ -374,6 +498,9 @@ def _parser() -> argparse.ArgumentParser:
     for name in ("host", "navigator"):
         command = state_sub.add_parser(name)
         command.add_argument("--at", type=int)
+        command.add_argument("--json", action="store_true")
+        if name == "navigator":
+            command.add_argument("--refresh", action="store_true")
 
     view = root.add_parser("view")
     view_sub = view.add_subparsers(dest="view_command", required=True)
@@ -382,11 +509,20 @@ def _parser() -> argparse.ArgumentParser:
     show.add_argument("--view", required=True)
     show.add_argument("--at", type=int)
     open_command = view_sub.add_parser("open")
-    open_command.add_argument("--project", required=True)
-    open_command.add_argument("--view")
-    open_command.add_argument("--mode", choices=[mode.value for mode in ViewMode])
-    open_command.add_argument("--request-id")
-    open_command.add_argument("--attach", action="store_true")
+    open_command.add_argument("--host", required=True)
+    open_target = open_command.add_mutually_exclusive_group(required=True)
+    open_target.add_argument("--project")
+    open_target.add_argument("--view")
+    open_command.add_argument("--request-id", required=True)
+    focus_capability = open_command.add_mutually_exclusive_group()
+    focus_capability.add_argument(
+        "--can-focus-desktop", action="store_true", default=False
+    )
+    focus_capability.add_argument(
+        "--no-focus-desktop", dest="can_focus_desktop", action="store_false"
+    )
+    open_command.add_argument("--can-launch-terminal", action="store_true")
+    open_command.add_argument("--json", action="store_true")
     open_command.add_argument("--at", type=int)
     focus = view_sub.add_parser("focus")
     focus.add_argument("--view", required=True)
@@ -406,11 +542,23 @@ def _parser() -> argparse.ArgumentParser:
         action.add_argument("--request-id")
         action.add_argument("--at", type=int)
     recover = view_sub.add_parser("recover")
-    recover.add_argument("--view", required=True)
+    recover.add_argument("--host", required=True)
+    recover.add_argument("--recovery", required=True)
+    recover.add_argument("--request-id", required=True)
+    recover_focus = recover.add_mutually_exclusive_group()
+    recover_focus.add_argument(
+        "--can-focus-desktop", action="store_true", default=False
+    )
+    recover_focus.add_argument(
+        "--no-focus-desktop", dest="can_focus_desktop", action="store_false"
+    )
+    recover.add_argument("--can-launch-terminal", action="store_true")
+    recover.add_argument("--json", action="store_true")
     recover.add_argument("--at", type=int)
     attach = view_sub.add_parser("attach")
+    attach.add_argument("--host", required=True)
     attach.add_argument("--view", required=True)
-    attach.add_argument("--print-argv", action="store_true")
+    attach.add_argument("--request-id", required=True)
     attach.add_argument("--at", type=int)
     retire = view_sub.add_parser("retire")
     retire.add_argument("--view", required=True)
@@ -453,6 +601,7 @@ def main(argv: list[str] | None = None) -> int:
         TmuxViewError,
         ViewRuntimeError,
         WorkflowError,
+        RemoteError,
         ValueError,
     ) as error:
         code = getattr(error, "code", type(error).__name__)

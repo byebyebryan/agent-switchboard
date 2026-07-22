@@ -208,6 +208,24 @@ def test_host_projection_orders_records_and_excludes_authority_and_paths() -> No
         assert state.data["projects"][0]["projectId"] == str(PROJECT)  # type: ignore[index]
         assert state.data["views"][0]["activeFrameId"] == str(WORKSPACE)  # type: ignore[index]
         navigator = build_navigator_state([state], local_host_id=HOST, generated_at=31)
+        assert navigator.data["generationId"] == str(GENERATION)
+        view = navigator.data["views"][0]  # type: ignore[index]
+        assert view == {
+            "hostId": str(HOST),
+            "viewId": str(VIEW),
+            "mode": "navigator",
+            "state": "ready",
+            "revision": 0,
+            "activeFrameId": str(WORKSPACE),
+            "activeProjectId": str(PROJECT),
+            "title": "Switchboard",
+            "breadcrumb": ["Switchboard"],
+            "activity": "unknown",
+            "attention": "none",
+            "transitionState": None,
+            "controlState": None,
+            "lastActivityAt": 22,
+        }
         project = navigator.data["projects"][0]  # type: ignore[index]
         assert project["viewId"] == str(VIEW)
         assert project["entryFrameId"] == str(WORKSPACE)
@@ -329,6 +347,10 @@ def test_cached_remote_state_is_validated_and_projects_without_authority() -> No
             str(HOST),
         ]
         assert navigator.data["hosts"][0]["reachability"] == "online"  # type: ignore[index]
+        assert navigator.data["hosts"][0]["generationId"] == (  # type: ignore[index]
+            "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+        )
+        assert navigator.data["hosts"][0]["stale"] is False  # type: ignore[index]
         truncated = build_navigator_state(
             [local, remote],
             local_host_id=HOST,

@@ -237,7 +237,16 @@ def test_project_navigation_modes_attach_and_projection_share_one_view(
             ).revision
             == revision
         )
-        attached = app.attach_view(VIEW, now=25)
+        attach_request = RequestId("66666666-4444-4444-8444-444444444444")
+        offered = app.presentation_directive(
+            app.registry.get_view(VIEW),
+            request_id=attach_request,
+            can_focus_desktop=False,
+            can_launch_terminal=True,
+            now=24,
+        )
+        assert offered.kind is DirectiveKind.ATTACH
+        attached = app.attach_view(VIEW, request_id=attach_request, now=25)
         assert attached.view.last_attached_at == 25
         assert attached.attach_argv[-1].endswith(":main")
 

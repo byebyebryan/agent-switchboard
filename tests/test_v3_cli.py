@@ -7,7 +7,14 @@ import time
 from pathlib import Path
 
 import pytest
-from test_v3_cutover import GENERATION, PROJECT, export_legacy, roots, seeded_legacy
+from test_v3_cutover import (
+    GENERATION,
+    HOST,
+    PROJECT,
+    export_legacy,
+    roots,
+    seeded_legacy,
+)
 
 from agent_switchboard._v3.cli import main as v3_main
 from agent_switchboard._v3.domain import ViewId, ViewMode
@@ -58,8 +65,14 @@ def test_private_cli_runs_staged_reads_then_committed_view_workflow(
                     *base,
                     "view",
                     "open",
+                    "--host",
+                    HOST,
                     "--project",
                     PROJECT,
+                    "--request-id",
+                    "aaaaaaaa-0000-4000-8000-000000000001",
+                    "--can-launch-terminal",
+                    "--json",
                     "--at",
                     "102",
                 ]
@@ -89,12 +102,14 @@ def test_private_cli_runs_staged_reads_then_committed_view_workflow(
                     *base,
                     "view",
                     "open",
+                    "--host",
+                    HOST,
                     "--project",
                     PROJECT,
-                    "--mode",
-                    "direct",
                     "--request-id",
                     "aaaaaaaa-1111-4111-8111-111111111111",
+                    "--can-launch-terminal",
+                    "--json",
                     "--at",
                     "104",
                 ]
@@ -102,8 +117,8 @@ def test_private_cli_runs_staged_reads_then_committed_view_workflow(
             == 0
         )
         opened = json.loads(capsys.readouterr().out)
-        view_id = ViewId(opened["view"]["viewId"])
-        assert opened["created"] is True
+        view_id = ViewId(opened["viewId"])
+        assert opened["kind"] == "attach"
 
         assert (
             v3_main(
@@ -134,23 +149,33 @@ def test_private_cli_runs_staged_reads_then_committed_view_workflow(
         assert shell.sidebar is not None
         assert not shell.sidebar.dead
 
-        assert (
+        class ExecCalled(RuntimeError):
+            pass
+
+        captured: list[str] = []
+
+        def capture_exec(_executable: str, argv: tuple[str, ...]) -> None:
+            captured.extend(argv)
+            raise ExecCalled
+
+        monkeypatch.setattr("os.execvp", capture_exec)
+        with pytest.raises(ExecCalled):
             v3_main(
                 [
                     *base,
                     "view",
                     "attach",
+                    "--host",
+                    HOST,
                     "--view",
                     str(view_id),
-                    "--print-argv",
+                    "--request-id",
+                    "aaaaaaaa-1111-4111-8111-111111111111",
                     "--at",
                     "106",
                 ]
             )
-            == 0
-        )
-        attached = json.loads(capsys.readouterr().out)
-        assert attached["attachArgv"][-1].endswith(":main")
+        assert captured[-1].endswith(":main")
     finally:
         subprocess.run(
             ["tmux", "-S", str(socket), "kill-server"],

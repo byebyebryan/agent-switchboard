@@ -1431,12 +1431,27 @@ def build_host_state(
 
 _NAV_HOST_FIELDS: Final[dict[str, Validator]] = {
     "hostId": _uuid,
+    "generationId": _uuid,
     "displayName": _string_validator(256),
     "isLocal": _boolean,
     "reachability": _string_validator(32),
+    "stale": _boolean,
     "generatedAt": _integer,
     "activationState": _enum_validator(ActivationState),
 }
+
+
+def _nav_breadcrumb(value: object, path: str) -> list[JsonValue]:
+    if not isinstance(value, list):
+        raise ProtocolError(f"{path} must be an array")
+    if len(value) > 32:
+        raise ProtocolError(f"{path} exceeds the breadcrumb depth limit")
+    return [
+        _string(item, f"{path}[{index}]", maximum=256)
+        for index, item in enumerate(value)
+    ]
+
+
 _NAV_VIEW_FIELDS: Final[dict[str, Validator]] = {
     "hostId": _uuid,
     "viewId": _uuid,
@@ -1444,6 +1459,14 @@ _NAV_VIEW_FIELDS: Final[dict[str, Validator]] = {
     "state": _enum_validator(ViewState),
     "revision": _integer,
     "activeFrameId": _optional(_uuid),
+    "activeProjectId": _optional(_uuid),
+    "title": _string_validator(256),
+    "breadcrumb": _nav_breadcrumb,
+    "activity": _enum_validator(Activity),
+    "attention": _string_validator(32),
+    "transitionState": _optional(_enum_validator(TransitionState)),
+    "controlState": _optional(_enum_validator(ControlState)),
+    "lastActivityAt": _optional(_integer),
 }
 _NAV_FRAME_FIELDS: Final[dict[str, Validator]] = {
     "frameId": _uuid,
@@ -1477,6 +1500,9 @@ def _normalized_navigator_state(value: object) -> dict[str, JsonValue]:
         "schemaVersion": SCHEMA_VERSION,
         "protocolVersion": PROTOCOL_VERSION,
         "navigatorVersion": NAVIGATOR_VERSION,
+        "generationId": _uuid(
+            _required(table, "generationId", "envelope"), "envelope.generationId"
+        ),
         "generatedAt": _integer(
             _required(table, "generatedAt", "envelope"), "envelope.generatedAt"
         ),
@@ -1576,6 +1602,7 @@ def build_navigator_state(
     local_host_id: HostId,
     generated_at: int,
     reachability: Mapping[str, str] | None = None,
+    staleness: Mapping[str, bool] | None = None,
     collection_limit: int = DEFAULT_COLLECTION_LIMIT,
 ) -> NavigatorState:
     """Aggregate validated owner-host states into an authority-free navigator view."""
@@ -1593,6 +1620,7 @@ def build_navigator_state(
     if local_key not in by_host:
         raise ProtocolError("navigator local HostState is missing")
     reachability = {} if reachability is None else reachability
+    staleness = {} if staleness is None else staleness
     hosts: list[dict[str, JsonValue]] = []
     views: list[dict[str, JsonValue]] = []
     projects: list[dict[str, JsonValue]] = []
@@ -1612,9 +1640,11 @@ def build_navigator_state(
         hosts.append(
             {
                 "hostId": host_id,
+                "generationId": str(data["generationId"]),
                 "displayName": str(host["displayName"]),
                 "isLocal": is_local,
                 "reachability": host_reachability,
+                "stale": False if is_local else staleness.get(host_id, True),
                 "generatedAt": int(data["generatedAt"]),
                 "activationState": str(data["activationState"]),
             }
@@ -1623,7 +1653,79 @@ def build_navigator_state(
             str(view["viewId"]): view
             for view in data["views"]  # type: ignore[union-attr]
         }
+        frames_by_id = {
+            str(frame["frameId"]): frame
+            for frame in data["frames"]  # type: ignore[union-attr]
+        }
+        sessions = {
+            str(session["sessionKey"]): session
+            for session in data["sessions"]  # type: ignore[union-attr]
+        }
+        transitions_by_view: dict[str, dict[str, JsonValue]] = {}
+        active_transition_states = {
+            TransitionState.PREPARED.value,
+            TransitionState.EXECUTING.value,
+            TransitionState.PRESENTED.value,
+            TransitionState.AWAITING_CLAIM.value,
+            TransitionState.SETTLING.value,
+        }
+        for transition in data["transitions"]:  # type: ignore[union-attr]
+            if transition["state"] not in active_transition_states:
+                continue
+            key = str(transition["viewId"])
+            current = transitions_by_view.get(key)
+            if current is None or int(transition["updatedAt"]) > int(
+                current["updatedAt"]
+            ):
+                transitions_by_view[key] = transition
+        controls_by_transition = {
+            str(control["transitionId"]): control
+            for control in data["controlTurns"]  # type: ignore[union-attr]
+        }
+        open_recovery_subjects = {
+            str(recovery["subjectId"])
+            for recovery in data["recoveries"]  # type: ignore[union-attr]
+            if recovery["state"] == RecoveryState.OPEN.value
+        }
         for view in host_views.values():
+            frame = (
+                None
+                if view["activeFrameId"] is None
+                else frames_by_id.get(str(view["activeFrameId"]))
+            )
+            session = (
+                None
+                if frame is None or frame["currentSessionKey"] is None
+                else sessions.get(str(frame["currentSessionKey"]))
+            )
+            breadcrumb: list[str] = []
+            cursor = frame
+            seen: set[str] = set()
+            while cursor is not None and str(cursor["frameId"]) not in seen:
+                seen.add(str(cursor["frameId"]))
+                breadcrumb.append(str(cursor["title"]))
+                parent = cursor["parentFrameId"]
+                cursor = None if parent is None else frames_by_id.get(str(parent))
+            breadcrumb.reverse()
+            transition = transitions_by_view.get(str(view["viewId"]))
+            control = (
+                None
+                if transition is None
+                else controls_by_transition.get(str(transition["transitionId"]))
+            )
+            activity = (
+                Activity.UNKNOWN.value if session is None else str(session["activity"])
+            )
+            if str(view["viewId"]) in open_recovery_subjects or (
+                frame is not None and str(frame["frameId"]) in open_recovery_subjects
+            ):
+                attention = "recovery"
+            elif view["state"] == ViewState.DEGRADED.value:
+                attention = "degraded"
+            elif activity == Activity.NEEDS_INPUT.value:
+                attention = "needs_input"
+            else:
+                attention = "none"
             views.append(
                 {
                     "hostId": host_id,
@@ -1632,13 +1734,23 @@ def build_navigator_state(
                     "state": str(view["state"]),
                     "revision": int(view["revision"]),
                     "activeFrameId": view["activeFrameId"],
+                    "activeProjectId": None if frame is None else frame["projectId"],
+                    "title": "Empty view" if frame is None else str(frame["title"]),
+                    "breadcrumb": breadcrumb,
+                    "activity": activity,
+                    "attention": attention,
+                    "transitionState": (
+                        None if transition is None else str(transition["state"])
+                    ),
+                    "controlState": None if control is None else str(control["state"]),
+                    "lastActivityAt": (
+                        int(view["updatedAt"])
+                        if session is None
+                        else int(session["updatedAt"])
+                    ),
                 }
             )
         all_frames = list(data["frames"])  # type: ignore[arg-type]
-        sessions = {
-            str(session["sessionKey"]): session
-            for session in data["sessions"]  # type: ignore[union-attr]
-        }
         placements = list(data["placements"])  # type: ignore[arg-type]
         for project in data["projects"]:  # type: ignore[union-attr]
             if project["declared"] is not True:
@@ -1825,6 +1937,7 @@ def build_navigator_state(
             "schemaVersion": SCHEMA_VERSION,
             "protocolVersion": PROTOCOL_VERSION,
             "navigatorVersion": NAVIGATOR_VERSION,
+            "generationId": str(by_host[local_key].data["generationId"]),
             "generatedAt": generated_at,
             "localHostId": local_key,
             **projected,
@@ -1838,23 +1951,29 @@ def build_navigator_from_registry(
     *,
     generated_at: int,
     collection_limit: int = DEFAULT_COLLECTION_LIMIT,
+    staleness_interval_seconds: int = 120,
 ) -> NavigatorState:
     local = build_host_state(
         registry, generated_at=generated_at, collection_limit=collection_limit
     )
     remotes: list[HostState] = []
     reachability: dict[str, str] = {}
+    staleness: dict[str, bool] = {}
     for cached in registry.cached_host_states():
         state = HostState.from_json(cached.state_json)
         if state.host_id != cached.host_id:
             raise ProtocolError("cached HostState host identity differs from cache key")
         remotes.append(state)
         reachability[str(cached.host_id)] = cached.reachability.value
+        staleness[str(cached.host_id)] = (
+            generated_at - cached.received_at > staleness_interval_seconds * 1_000
+        )
     return build_navigator_state(
         [local, *remotes],
         local_host_id=local.host_id,
         generated_at=generated_at,
         reachability=reachability,
+        staleness=staleness,
         collection_limit=collection_limit,
     )
 

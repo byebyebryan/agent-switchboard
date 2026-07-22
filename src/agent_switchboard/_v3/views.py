@@ -234,6 +234,14 @@ class ViewRuntime:
             executor.attach_argv(self.config.tmux.naming_prefix, view.view_id),
         )
 
+    def open_view(self, view_id: ViewId, *, now: int) -> ViewOpenResult:
+        """Revalidate and present one view without changing its semantic cursor."""
+
+        self._require_mutation("view open")
+        return self._existing_view_result(
+            self.registry.get_view(ViewId(view_id)), now=now
+        )
+
     def create_project_view(
         self,
         project_id: ProjectId,
@@ -925,11 +933,14 @@ class ViewRuntime:
             None,
         )
 
-    def attach_view(self, view_id: ViewId, *, now: int) -> ViewAttachResult:
+    def attach_view(
+        self, view_id: ViewId, *, request_id: RequestId, now: int
+    ) -> ViewAttachResult:
         """Validate one exact shell and record a managed attach intent."""
 
         self._require_mutation("view attach")
         view = self.registry.get_view(ViewId(view_id))
+        self.registry.claim_desktop_lease(view.view_id, RequestId(request_id), now=now)
         executor = self._tmux_for_view(view)
         executor.inspect_shell(
             self.config.tmux.naming_prefix,
