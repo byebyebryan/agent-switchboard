@@ -32,6 +32,7 @@ def test_clean_break_metadata_maps_only_replacement_runtime() -> None:
     builder = (ROOT / "scripts" / "build_offline_bundle.py").read_text()
     assert "wheelhouse-manifest.json" in builder
     assert '"sha256": digest(path)' in builder
+    assert "venv.EnvBuilder(with_pip=True)" in builder
 
 
 def test_replacement_has_no_runtime_import_of_old_active_modules() -> None:

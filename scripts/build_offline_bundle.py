@@ -8,7 +8,8 @@ import hashlib
 import json
 import shutil
 import subprocess
-import sys
+import tempfile
+import venv
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -31,20 +32,23 @@ def main() -> int:
     if arguments.destination.exists():
         raise SystemExit("destination already exists")
     arguments.destination.mkdir(mode=0o700, parents=True)
-    subprocess.run(
-        (
-            sys.executable,
-            "-m",
-            "pip",
-            "download",
-            "--only-binary=:all:",
-            "--dest",
-            str(arguments.destination),
-            "--requirement",
-            str(ROOT / "requirements-offline.txt"),
-        ),
-        check=True,
-    )
+    with tempfile.TemporaryDirectory(prefix="switchboard-wheelhouse-") as temporary:
+        environment = Path(temporary) / "pip"
+        venv.EnvBuilder(with_pip=True).create(environment)
+        subprocess.run(
+            (
+                str(environment / "bin" / "python"),
+                "-m",
+                "pip",
+                "download",
+                "--only-binary=:all:",
+                "--dest",
+                str(arguments.destination),
+                "--requirement",
+                str(ROOT / "requirements-offline.txt"),
+            ),
+            check=True,
+        )
     shutil.copy2(
         arguments.core_wheel,
         arguments.destination / arguments.core_wheel.name,
