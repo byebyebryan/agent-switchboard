@@ -459,6 +459,26 @@ class ViewRuntime:
             f"view transition is {transition.state.value}",
         )
 
+    def _supersede_prepared(
+        self, view_id: ViewId, request_id: RequestId, *, now: int
+    ) -> None:
+        pending = self.registry.nonterminal_transition_for_view(view_id)
+        if pending is None or pending.request_id == request_id:
+            return
+        if pending.state is not TransitionState.PREPARED:
+            raise ViewRuntimeError(
+                "transition_busy",
+                "executing or later transition must settle or recover",
+            )
+        from .workflow import WorkflowError, WorkflowRuntime
+
+        try:
+            WorkflowRuntime(
+                self.opened, self.paths, tmux=self.tmux
+            ).supersede_for_manual(view_id, now=now)
+        except WorkflowError as error:
+            raise ViewRuntimeError(error.code, str(error)) from error
+
     def focus_frame(
         self,
         view_id: ViewId,
@@ -469,6 +489,8 @@ class ViewRuntime:
     ) -> UserView:
         self._require_mutation("view focus")
         view = self.registry.get_view(ViewId(view_id))
+        self._supersede_prepared(view.view_id, RequestId(request_id), now=now)
+        view = self.registry.get_view(view.view_id)
         target = next(
             (
                 placement
@@ -602,6 +624,8 @@ class ViewRuntime:
     ) -> UserView:
         self._require_mutation("view mode")
         view = self.registry.get_view(ViewId(view_id))
+        self._supersede_prepared(view.view_id, RequestId(request_id), now=now)
+        view = self.registry.get_view(view.view_id)
         fingerprint = request_fingerprint(
             "view.mode",
             {"viewId": str(view.view_id), "mode": target_mode.value},

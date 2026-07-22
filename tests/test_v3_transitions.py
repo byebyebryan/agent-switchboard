@@ -244,6 +244,50 @@ def build_runtime(
 
 
 def seed_two_frame_runtime(opened: Registry) -> None:
+    seed_parent_runtime(opened)
+    opened.create_task(
+        Frame(
+            TASK,
+            HOST,
+            PROJECT,
+            FrameRole.TASK,
+            WORKSPACE,
+            CONTEXT,
+            "Phase 6 storage",
+            "Implement the transition core",
+            ProviderId.CODEX,
+            FrameLifecycleState.OPEN,
+            None,
+            None,
+            CreatedBy.USER,
+            112,
+            112,
+        ),
+        FramePlacement(
+            TASK_PLACEMENT,
+            HOST,
+            VIEW,
+            TASK,
+            None,
+            PlacementState.STAGED,
+            0,
+            None,
+            112,
+        ),
+    )
+    build_runtime(
+        opened,
+        frame_id=TASK,
+        session_uuid=CHILD_SESSION_UUID,
+        launch_id=CHILD_LAUNCH,
+        surface_id=CHILD_SURFACE,
+        pane_id="%2",
+        base=120,
+    )
+    opened.attach_surface_to_placement(TASK_PLACEMENT, 0, CHILD_SURFACE, now=125)
+
+
+def seed_parent_runtime(opened: Registry) -> None:
     seed_catalog_workspace(opened)
     build_runtime(
         opened,
@@ -298,46 +342,6 @@ def seed_two_frame_runtime(opened: Registry) -> None:
             None,
         )
     )
-    opened.create_task(
-        Frame(
-            TASK,
-            HOST,
-            PROJECT,
-            FrameRole.TASK,
-            WORKSPACE,
-            CONTEXT,
-            "Phase 6 storage",
-            "Implement the transition core",
-            ProviderId.CODEX,
-            FrameLifecycleState.OPEN,
-            None,
-            None,
-            CreatedBy.USER,
-            112,
-            112,
-        ),
-        FramePlacement(
-            TASK_PLACEMENT,
-            HOST,
-            VIEW,
-            TASK,
-            None,
-            PlacementState.STAGED,
-            0,
-            None,
-            112,
-        ),
-    )
-    build_runtime(
-        opened,
-        frame_id=TASK,
-        session_uuid=CHILD_SESSION_UUID,
-        launch_id=CHILD_LAUNCH,
-        surface_id=CHILD_SURFACE,
-        pane_id="%2",
-        base=120,
-    )
-    opened.attach_surface_to_placement(TASK_PLACEMENT, 0, CHILD_SURFACE, now=125)
 
 
 def transition(
@@ -559,6 +563,169 @@ def test_push_transition_claim_is_exact_atomic_and_idempotent() -> None:
                 ControlState.SUBMITTED,
                 now=151,
             )
+
+
+def test_atomic_push_bundle_can_be_cancelled_only_before_binding() -> None:
+    with registry() as opened:
+        seed_parent_runtime(opened)
+        child_session = ProviderSession(
+            CHILD_SESSION,
+            HOST,
+            ProviderId.CODEX,
+            CHILD_SESSION_UUID,
+            PROJECT,
+            CHECKOUT,
+            "Child",
+            "Test atomic preparation",
+            False,
+            RuntimePresence.STOPPED,
+            Resumability.RESUMABLE,
+            Activity.READY,
+            ActivityReason.TURN_COMPLETE,
+            130,
+            130,
+            130,
+            130,
+        )
+        child = Frame(
+            TASK,
+            HOST,
+            PROJECT,
+            FrameRole.TASK,
+            WORKSPACE,
+            CONTEXT,
+            "Child",
+            "Test atomic preparation",
+            ProviderId.CODEX,
+            FrameLifecycleState.OPEN,
+            None,
+            CHILD_SESSION,
+            CreatedBy.AGENT,
+            130,
+            130,
+        )
+        placement = FramePlacement(
+            TASK_PLACEMENT,
+            HOST,
+            VIEW,
+            TASK,
+            CHILD_SURFACE,
+            PlacementState.STAGED,
+            0,
+            None,
+            130,
+        )
+        launch = LaunchIntent(
+            CHILD_LAUNCH,
+            PUSH_REQUEST,
+            HOST,
+            TASK,
+            ProviderId.CODEX,
+            LaunchAction.NEW,
+            None,
+            LaunchState.PLANNED,
+            None,
+            130,
+            130,
+        )
+        surface = Surface(
+            CHILD_SURFACE,
+            HOST,
+            ProviderId.CODEX,
+            None,
+            CHILD_LAUNCH,
+            SurfaceState.PLANNED,
+            None,
+            None,
+            None,
+            None,
+            0,
+            130,
+            130,
+            None,
+        )
+        push = transition(
+            transition_id=PUSH,
+            request_id=PUSH_REQUEST,
+            kind=TransitionKind.PUSH,
+            source=WORKSPACE,
+            target=TASK,
+            view_revision=0,
+            claim_generation=1,
+            now=130,
+        )
+        brief_text = "Perform the child task."
+        brief = TransitionBrief(
+            PUSH_BRIEF,
+            PUSH,
+            WORKSPACE,
+            PARENT_SESSION,
+            TASK,
+            brief_text,
+            content_hash(brief_text),
+            130,
+            None,
+        )
+        control = ControlTurn(
+            PUSH_CONTROL,
+            PUSH,
+            TASK,
+            CHILD_SESSION,
+            ControlKind.CLAIM_BRIEF,
+            "control.claim.v1",
+            ControlTransport.RESUME_INITIAL,
+            ControlState.PREPARED,
+            0,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        prepared = opened.prepare_task_push(
+            session=child_session,
+            membership=FrameSession(
+                ident(FrameSessionId, 200),
+                TASK,
+                CHILD_SESSION,
+                1,
+                MembershipReason.STARTED,
+                130,
+            ),
+            frame=child,
+            placement=placement,
+            launch=launch,
+            surface=surface,
+            transition=push,
+            brief=brief,
+            control=control,
+        )
+        assert prepared == push
+        assert (
+            opened.prepare_task_push(
+                session=child_session,
+                membership=FrameSession(
+                    ident(FrameSessionId, 200),
+                    TASK,
+                    CHILD_SESSION,
+                    1,
+                    MembershipReason.STARTED,
+                    130,
+                ),
+                frame=child,
+                placement=placement,
+                launch=launch,
+                surface=surface,
+                transition=push,
+                brief=brief,
+                control=control,
+            )
+            == push
+        )
+        opened.cancel_prepared_push(PUSH)
+        assert opened.find_transition_by_request(HOST, PUSH_REQUEST) is None
+        with pytest.raises(ConflictError):
+            opened.get_frame(TASK)
 
 
 def test_complete_return_refreshes_parent_authority_and_closes_child_on_claim() -> None:

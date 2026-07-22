@@ -649,6 +649,32 @@ class Registry:
             self._one("control_turns", "control_turn_id", control_turn_id)
         )
 
+    def control_turn_for_transition(
+        self, transition_id: TransitionId
+    ) -> ControlTurn | None:
+        row = self.connection.execute(
+            "SELECT * FROM control_turns WHERE transition_id = ?",
+            (str(transition_id),),
+        ).fetchone()
+        return None if row is None else _control_turn(row)
+
+    def nonterminal_transition_for_view(self, view_id: ViewId) -> ViewTransition | None:
+        row = self.connection.execute(
+            "SELECT * FROM view_transitions WHERE view_id = ? AND state IN "
+            "('prepared', 'executing', 'presented', 'awaiting_claim', 'settling')",
+            (str(view_id),),
+        ).fetchone()
+        return None if row is None else _transition(row)
+
+    def checkout_path(self, checkout_id: CheckoutId) -> Path:
+        row = self.connection.execute(
+            "SELECT path FROM checkouts WHERE checkout_id = ?",
+            (str(checkout_id),),
+        ).fetchone()
+        if row is None:
+            raise ConflictError("not_found", "checkout does not exist")
+        return Path(str(row["path"]))
+
     def get_recovery(self, recovery_id: RecoveryId) -> Recovery:
         return _recovery(self._one("recoveries", "recovery_id", recovery_id))
 
@@ -1232,7 +1258,8 @@ class Registry:
               ON source.frame_id = transition_record.source_frame_id
             WHERE (target.work_context_id = ? OR source.work_context_id = ?)
               AND transition_record.state IN (
-                  'prepared', 'executing', 'awaiting_claim'
+                  'prepared', 'executing', 'presented', 'awaiting_claim',
+                  'settling'
               )
             LIMIT 1
             """,
@@ -1386,6 +1413,412 @@ class Registry:
         return self.get_frame(frame.frame_id), self.get_placement(
             placement.placement_id
         )
+
+    def prepare_task_push(
+        self,
+        *,
+        session: ProviderSession,
+        membership: FrameSession,
+        frame: Frame,
+        placement: FramePlacement,
+        launch: LaunchIntent,
+        surface: Surface,
+        transition: ViewTransition,
+        brief: TransitionBrief,
+        control: ControlTurn,
+    ) -> ViewTransition:
+        """Atomically prepare the complete one-child push ownership bundle."""
+
+        self._require_local_host(frame.host_id)
+        if (
+            frame.role is not FrameRole.TASK
+            or frame.parent_frame_id != transition.source_frame_id
+            or frame.frame_id != transition.target_frame_id
+            or frame.current_session_key != session.session_key
+            or frame.lifecycle_state is not FrameLifecycleState.OPEN
+            or placement.frame_id != frame.frame_id
+            or placement.view_id != transition.view_id
+            or placement.state is not PlacementState.STAGED
+            or placement.surface_id != surface.surface_id
+            or membership.frame_id != frame.frame_id
+            or membership.session_key != session.session_key
+            or membership.ordinal != 1
+            or launch.frame_id != frame.frame_id
+            or launch.provider != session.provider
+            or launch.state is not LaunchState.PLANNED
+            or surface.launch_id != launch.launch_id
+            or surface.lifecycle_state is not SurfaceState.PLANNED
+            or brief.transition_id != transition.transition_id
+            or brief.source_frame_id != transition.source_frame_id
+            or brief.source_session_key is None
+            or brief.target_frame_id != frame.frame_id
+            or control.transition_id != transition.transition_id
+            or control.target_frame_id != frame.frame_id
+            or control.target_session_key != session.session_key
+            or control.kind is not ControlKind.CLAIM_BRIEF
+            or control.state is not ControlState.PREPARED
+            or transition.kind is not TransitionKind.PUSH
+            or transition.state is not TransitionState.PREPARED
+            or transition.transport_phase is not TransportPhase.INTENT
+        ):
+            raise ConflictError("push_bundle", "push bundle identities disagree")
+        try:
+            with self.transaction(immediate=True) as connection:
+                existing = connection.execute(
+                    "SELECT * FROM view_transitions WHERE host_id = ? "
+                    "AND request_id = ?",
+                    (str(transition.host_id), str(transition.request_id)),
+                ).fetchone()
+                if existing is not None:
+                    record = _transition(existing)
+                    if (
+                        record.transition_id != transition.transition_id
+                        or record.request_fingerprint != transition.request_fingerprint
+                        or record.kind is not TransitionKind.PUSH
+                    ):
+                        raise ConflictError(
+                            "request_result",
+                            "request already identifies another transition",
+                        )
+                    return record
+                view = connection.execute(
+                    "SELECT * FROM user_views WHERE view_id = ?",
+                    (str(transition.view_id),),
+                ).fetchone()
+                source = connection.execute(
+                    "SELECT * FROM frames WHERE frame_id = ?",
+                    (str(transition.source_frame_id),),
+                ).fetchone()
+                context = connection.execute(
+                    "SELECT * FROM work_contexts WHERE work_context_id = ?",
+                    (str(frame.work_context_id),),
+                ).fetchone()
+                source_placement = connection.execute(
+                    "SELECT state FROM frame_placements WHERE view_id = ? "
+                    "AND frame_id = ?",
+                    (str(transition.view_id), str(transition.source_frame_id)),
+                ).fetchone()
+                if (
+                    view is None
+                    or source is None
+                    or context is None
+                    or source_placement is None
+                    or view["state"] != ViewState.READY.value
+                    or view["revision"] != transition.expected_view_revision
+                    or view["active_frame_id"] != str(transition.source_frame_id)
+                    or source["role"] != FrameRole.WORKSPACE.value
+                    or source["lifecycle_state"] != FrameLifecycleState.OPEN.value
+                    or source["current_session_key"] != str(brief.source_session_key)
+                    or source_placement["state"] != PlacementState.ACTIVE.value
+                    or context["claim_state"] != ClaimState.HELD.value
+                    or context["claim_generation"]
+                    != transition.expected_claim_generation
+                    or context["foreground_frame_id"] != str(transition.source_frame_id)
+                    or context["background_state"] != BackgroundState.SAFE.value
+                ):
+                    raise ConflictError(
+                        "push_precondition", "push ownership precondition changed"
+                    )
+                self._begin_request_tx(
+                    connection,
+                    transition.host_id,
+                    transition.request_id,
+                    "transition.push",
+                    transition.request_fingerprint,
+                    transition.created_at,
+                )
+                connection.execute(
+                    "INSERT INTO provider_sessions VALUES "
+                    "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        str(session.session_key),
+                        str(session.host_id),
+                        session.provider.value,
+                        str(session.provider_session_id),
+                        str(session.project_id),
+                        str(session.checkout_id),
+                        session.name,
+                        session.purpose,
+                        session.pinned,
+                        session.runtime_presence.value,
+                        session.resumability.value,
+                        session.activity.value,
+                        session.activity_reason.value,
+                        session.created_at,
+                        session.provider_updated_at,
+                        session.last_observed_at,
+                        session.updated_at,
+                    ),
+                )
+                connection.execute(
+                    "INSERT INTO frames VALUES "
+                    "(?, ?, ?, 'task', ?, ?, ?, ?, ?, 'open', NULL, NULL, ?, ?, ?)",
+                    (
+                        str(frame.frame_id),
+                        str(frame.host_id),
+                        str(frame.project_id),
+                        str(frame.parent_frame_id),
+                        str(frame.work_context_id),
+                        frame.title,
+                        frame.purpose,
+                        None
+                        if frame.preferred_provider is None
+                        else frame.preferred_provider.value,
+                        frame.created_by.value,
+                        frame.created_at,
+                        frame.updated_at,
+                    ),
+                )
+                connection.execute(
+                    "INSERT INTO frame_sessions VALUES (?, ?, ?, ?, ?, ?)",
+                    (
+                        str(membership.frame_session_id),
+                        str(membership.frame_id),
+                        str(membership.session_key),
+                        membership.ordinal,
+                        membership.membership_reason.value,
+                        membership.joined_at,
+                    ),
+                )
+                connection.execute(
+                    "UPDATE frames SET current_session_key = ? WHERE frame_id = ?",
+                    (str(frame.current_session_key), str(frame.frame_id)),
+                )
+                connection.execute(
+                    "INSERT INTO launch_intents VALUES "
+                    "(?, ?, ?, ?, ?, ?, ?, 'planned', NULL, NULL, NULL, ?, ?)",
+                    (
+                        str(launch.launch_id),
+                        str(launch.request_id),
+                        str(launch.host_id),
+                        str(launch.frame_id),
+                        launch.provider.value,
+                        launch.action.value,
+                        None
+                        if launch.target_session_key is None
+                        else str(launch.target_session_key),
+                        launch.created_at,
+                        launch.updated_at,
+                    ),
+                )
+                connection.execute(
+                    "INSERT INTO surfaces VALUES "
+                    "(?, ?, ?, NULL, ?, 'planned', NULL, NULL, NULL, NULL, "
+                    "0, ?, ?, NULL)",
+                    (
+                        str(surface.surface_id),
+                        str(surface.host_id),
+                        surface.provider.value,
+                        str(surface.launch_id),
+                        surface.created_at,
+                        surface.updated_at,
+                    ),
+                )
+                self._insert_placement(connection, placement)
+                connection.execute(
+                    "INSERT INTO view_transitions VALUES "
+                    "(?, ?, ?, ?, ?, 'push', ?, ?, ?, ?, ?, 'prepared', "
+                    "NULL, NULL, 'intent', NULL, NULL, NULL, ?, ?)",
+                    (
+                        str(transition.transition_id),
+                        str(transition.request_id),
+                        transition.request_fingerprint,
+                        str(transition.host_id),
+                        str(transition.view_id),
+                        str(transition.source_frame_id),
+                        str(transition.target_frame_id),
+                        str(transition.work_context_id),
+                        transition.expected_view_revision,
+                        transition.expected_claim_generation,
+                        transition.created_at,
+                        transition.updated_at,
+                    ),
+                )
+                connection.execute(
+                    "INSERT INTO transition_briefs VALUES "
+                    "(?, ?, ?, ?, ?, ?, ?, ?, NULL)",
+                    (
+                        str(brief.brief_id),
+                        str(brief.transition_id),
+                        str(brief.source_frame_id),
+                        str(brief.source_session_key),
+                        str(brief.target_frame_id),
+                        brief.brief,
+                        brief.content_hash,
+                        brief.created_at,
+                    ),
+                )
+                connection.execute(
+                    "INSERT INTO control_turns VALUES "
+                    "(?, ?, ?, ?, 'claim_brief', 'control.claim.v1', ?, "
+                    "'prepared', 0, NULL, NULL, NULL, NULL, NULL, NULL, NULL)",
+                    (
+                        str(control.control_turn_id),
+                        str(control.transition_id),
+                        str(control.target_frame_id),
+                        str(control.target_session_key),
+                        control.transport.value,
+                    ),
+                )
+        except sqlite3.IntegrityError as error:
+            raise ConflictError("push_conflict", str(error)) from error
+        return self.get_transition(transition.transition_id)
+
+    def prepare_complete_return(
+        self,
+        transition: ViewTransition,
+        handoff: CompletionHandoff,
+        control: ControlTurn | None,
+    ) -> ViewTransition:
+        """Atomically prepare completion, immutable handoff, and control turn."""
+
+        self._require_local_host(transition.host_id)
+        if (
+            transition.kind is not TransitionKind.COMPLETE_RETURN
+            or transition.state is not TransitionState.PREPARED
+            or transition.source_frame_id != handoff.source_frame_id
+            or transition.target_frame_id != handoff.target_frame_id
+            or handoff.transition_id != transition.transition_id
+            or (
+                control is not None
+                and (
+                    control.transition_id != transition.transition_id
+                    or control.target_frame_id != transition.target_frame_id
+                    or control.kind is not ControlKind.CLAIM_HANDOFF
+                    or control.state is not ControlState.PREPARED
+                )
+            )
+        ):
+            raise ConflictError(
+                "complete_bundle", "complete-return bundle identities disagree"
+            )
+        try:
+            with self.transaction(immediate=True) as connection:
+                existing = connection.execute(
+                    "SELECT * FROM view_transitions WHERE host_id = ? "
+                    "AND request_id = ?",
+                    (str(transition.host_id), str(transition.request_id)),
+                ).fetchone()
+                if existing is not None:
+                    record = _transition(existing)
+                    if (
+                        record.transition_id != transition.transition_id
+                        or record.request_fingerprint != transition.request_fingerprint
+                        or record.kind is not TransitionKind.COMPLETE_RETURN
+                    ):
+                        raise ConflictError(
+                            "request_result",
+                            "request already identifies another transition",
+                        )
+                    return record
+                view = connection.execute(
+                    "SELECT * FROM user_views WHERE view_id = ?",
+                    (str(transition.view_id),),
+                ).fetchone()
+                source = connection.execute(
+                    "SELECT * FROM frames WHERE frame_id = ?",
+                    (str(transition.source_frame_id),),
+                ).fetchone()
+                target = connection.execute(
+                    "SELECT * FROM frames WHERE frame_id = ?",
+                    (str(transition.target_frame_id),),
+                ).fetchone()
+                context = connection.execute(
+                    "SELECT * FROM work_contexts WHERE work_context_id = ?",
+                    (str(transition.work_context_id),),
+                ).fetchone()
+                if (
+                    view is None
+                    or source is None
+                    or target is None
+                    or context is None
+                    or view["state"] != ViewState.READY.value
+                    or view["revision"] != transition.expected_view_revision
+                    or view["active_frame_id"] != str(transition.source_frame_id)
+                    or source["role"] != FrameRole.TASK.value
+                    or source["lifecycle_state"] != FrameLifecycleState.OPEN.value
+                    or source["current_session_key"] != str(handoff.source_session_key)
+                    or source["parent_frame_id"] != str(transition.target_frame_id)
+                    or target["lifecycle_state"] != FrameLifecycleState.OPEN.value
+                    or context["claim_state"] != ClaimState.HELD.value
+                    or context["claim_generation"]
+                    != transition.expected_claim_generation
+                    or context["foreground_frame_id"] != str(transition.source_frame_id)
+                    or context["background_state"] != BackgroundState.SAFE.value
+                ):
+                    raise ConflictError(
+                        "complete_precondition",
+                        "complete-return ownership precondition changed",
+                    )
+                if control is not None and target["current_session_key"] != str(
+                    control.target_session_key
+                ):
+                    raise ConflictError(
+                        "control_identity", "parent session is no longer current"
+                    )
+                self._begin_request_tx(
+                    connection,
+                    transition.host_id,
+                    transition.request_id,
+                    "transition.complete_return",
+                    transition.request_fingerprint,
+                    transition.created_at,
+                )
+                connection.execute(
+                    "INSERT INTO view_transitions VALUES "
+                    "(?, ?, ?, ?, ?, 'complete_return', ?, ?, ?, ?, ?, "
+                    "'prepared', NULL, NULL, 'intent', NULL, NULL, NULL, ?, ?)",
+                    (
+                        str(transition.transition_id),
+                        str(transition.request_id),
+                        transition.request_fingerprint,
+                        str(transition.host_id),
+                        str(transition.view_id),
+                        str(transition.source_frame_id),
+                        str(transition.target_frame_id),
+                        str(transition.work_context_id),
+                        transition.expected_view_revision,
+                        transition.expected_claim_generation,
+                        transition.created_at,
+                        transition.updated_at,
+                    ),
+                )
+                connection.execute(
+                    "INSERT INTO completion_handoffs VALUES "
+                    "(?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)",
+                    (
+                        str(handoff.handoff_id),
+                        str(handoff.transition_id),
+                        str(handoff.source_frame_id),
+                        str(handoff.source_session_key),
+                        str(handoff.target_frame_id),
+                        handoff.summary,
+                        handoff.next_action,
+                        handoff.content_hash,
+                        handoff.created_at,
+                    ),
+                )
+                connection.execute(
+                    "UPDATE frames SET lifecycle_state = 'closing', updated_at = ? "
+                    "WHERE frame_id = ?",
+                    (handoff.created_at, str(handoff.source_frame_id)),
+                )
+                if control is not None:
+                    connection.execute(
+                        "INSERT INTO control_turns VALUES "
+                        "(?, ?, ?, ?, 'claim_handoff', 'control.claim.v1', ?, "
+                        "'prepared', 0, NULL, NULL, NULL, NULL, NULL, NULL, NULL)",
+                        (
+                            str(control.control_turn_id),
+                            str(control.transition_id),
+                            str(control.target_frame_id),
+                            str(control.target_session_key),
+                            control.transport.value,
+                        ),
+                    )
+        except sqlite3.IntegrityError as error:
+            raise ConflictError("complete_conflict", str(error)) from error
+        return self.get_transition(transition.transition_id)
 
     def advance_frame_state(
         self,
@@ -2020,6 +2453,91 @@ class Registry:
             raise ConflictError("launch_conflict", str(error)) from error
         return self.get_launch(launch.launch_id), self.get_surface(surface.surface_id)
 
+    def prepare_resume_surface(
+        self,
+        launch: LaunchIntent,
+        surface: Surface,
+        placement_id: PlacementId,
+        expected_placement_generation: int,
+        *,
+        now: int | None = None,
+    ) -> tuple[LaunchIntent, Surface, FramePlacement]:
+        """Atomically replace stopped affinity with one exact resume intent."""
+
+        timestamp = _timestamp(now)
+        self._require_local_host(launch.host_id)
+        if (
+            launch.action is not LaunchAction.RESUME
+            or launch.target_session_key is None
+            or launch.state is not LaunchState.PLANNED
+            or surface.launch_id != launch.launch_id
+            or surface.lifecycle_state is not SurfaceState.PLANNED
+            or surface.session_key is not None
+        ):
+            raise ConflictError("resume_bundle", "resume bundle identities disagree")
+        try:
+            with self.transaction(immediate=True) as connection:
+                placement = connection.execute(
+                    "SELECT * FROM frame_placements WHERE placement_id = ?",
+                    (str(placement_id),),
+                ).fetchone()
+                frame = connection.execute(
+                    "SELECT current_session_key FROM frames WHERE frame_id = ?",
+                    (str(launch.frame_id),),
+                ).fetchone()
+                if (
+                    placement is None
+                    or frame is None
+                    or placement["host_id"] != str(launch.host_id)
+                    or placement["frame_id"] != str(launch.frame_id)
+                    or placement["state"] != PlacementState.STOPPED_AFFINITY.value
+                    or placement["generation"] != expected_placement_generation
+                    or frame["current_session_key"] != str(launch.target_session_key)
+                ):
+                    raise ConflictError(
+                        "resume_precondition", "stopped frame affinity changed"
+                    )
+                connection.execute(
+                    "INSERT INTO launch_intents VALUES "
+                    "(?, ?, ?, ?, ?, 'resume', ?, 'planned', NULL, NULL, NULL, ?, ?)",
+                    (
+                        str(launch.launch_id),
+                        str(launch.request_id),
+                        str(launch.host_id),
+                        str(launch.frame_id),
+                        launch.provider.value,
+                        str(launch.target_session_key),
+                        launch.created_at,
+                        launch.updated_at,
+                    ),
+                )
+                connection.execute(
+                    "INSERT INTO surfaces VALUES "
+                    "(?, ?, ?, NULL, ?, 'planned', NULL, NULL, NULL, NULL, "
+                    "0, ?, ?, NULL)",
+                    (
+                        str(surface.surface_id),
+                        str(surface.host_id),
+                        surface.provider.value,
+                        str(surface.launch_id),
+                        surface.created_at,
+                        surface.updated_at,
+                    ),
+                )
+                connection.execute(
+                    "UPDATE frame_placements SET surface_id = ?, state = 'staged', "
+                    "generation = generation + 1, updated_at = ? "
+                    "WHERE placement_id = ?",
+                    (str(surface.surface_id), timestamp, str(placement_id)),
+                )
+        except sqlite3.IntegrityError as error:
+            raise ConflictError("resume_conflict", str(error)) from error
+        return (
+            self.get_launch(launch.launch_id),
+            self.get_surface(surface.surface_id),
+            self.get_placement(placement_id),
+        )
+
     def advance_launch(
         self,
         launch_id: LaunchId,
@@ -2566,6 +3084,149 @@ class Registry:
         except sqlite3.IntegrityError as error:
             raise ConflictError("transition_conflict", str(error)) from error
         return self.get_transition(transition.transition_id)
+
+    def cancel_prepared_push(self, transition_id: TransitionId) -> None:
+        """Delete only an unbound, zero-turn push bundle after exact proof."""
+
+        try:
+            with self.transaction(immediate=True) as connection:
+                row = connection.execute(
+                    """
+                    SELECT transition_record.*, frame.current_session_key,
+                           placement.placement_id, placement.surface_id,
+                           placement.state AS placement_state,
+                           surface.launch_id, surface.lifecycle_state,
+                           surface.session_key AS surface_session_key,
+                           launch.state AS launch_state,
+                           control.state AS control_state,
+                           brief.first_claimed_at
+                    FROM view_transitions AS transition_record
+                    JOIN frames AS frame
+                      ON frame.frame_id = transition_record.target_frame_id
+                    JOIN frame_placements AS placement
+                      ON placement.view_id = transition_record.view_id
+                     AND placement.frame_id = transition_record.target_frame_id
+                    JOIN surfaces AS surface
+                      ON surface.surface_id = placement.surface_id
+                    JOIN launch_intents AS launch
+                      ON launch.launch_id = surface.launch_id
+                    JOIN control_turns AS control
+                      ON control.transition_id = transition_record.transition_id
+                    JOIN transition_briefs AS brief
+                      ON brief.transition_id = transition_record.transition_id
+                    WHERE transition_record.transition_id = ?
+                    """,
+                    (str(transition_id),),
+                ).fetchone()
+                if row is None:
+                    raise ConflictError("not_found", "prepared push does not exist")
+                if (
+                    row["kind"] != TransitionKind.PUSH.value
+                    or row["state"] != TransitionState.PREPARED.value
+                    or row["placement_state"] != PlacementState.STAGED.value
+                    or row["lifecycle_state"] != SurfaceState.PLANNED.value
+                    or row["surface_session_key"] is not None
+                    or row["launch_state"] != LaunchState.PLANNED.value
+                    or row["control_state"] != ControlState.PREPARED.value
+                    or row["first_claimed_at"] is not None
+                ):
+                    raise ConflictError(
+                        "cancel_unsafe", "push has crossed the cancellation boundary"
+                    )
+                target_frame_id = str(row["target_frame_id"])
+                session_key = str(row["current_session_key"])
+                request_id = str(row["request_id"])
+                host_id = str(row["host_id"])
+                connection.execute(
+                    "DELETE FROM control_turns WHERE transition_id = ?",
+                    (str(transition_id),),
+                )
+                connection.execute(
+                    "DELETE FROM transition_briefs WHERE transition_id = ?",
+                    (str(transition_id),),
+                )
+                connection.execute(
+                    "DELETE FROM view_transitions WHERE transition_id = ?",
+                    (str(transition_id),),
+                )
+                connection.execute(
+                    "DELETE FROM request_records WHERE host_id = ? AND request_id = ?",
+                    (host_id, request_id),
+                )
+                connection.execute(
+                    "DELETE FROM frame_placements WHERE placement_id = ?",
+                    (row["placement_id"],),
+                )
+                connection.execute(
+                    "DELETE FROM surfaces WHERE surface_id = ?",
+                    (row["surface_id"],),
+                )
+                connection.execute(
+                    "DELETE FROM launch_intents WHERE launch_id = ?",
+                    (row["launch_id"],),
+                )
+                connection.execute(
+                    "DELETE FROM frame_sessions WHERE frame_id = ?",
+                    (target_frame_id,),
+                )
+                connection.execute(
+                    "DELETE FROM frames WHERE frame_id = ?", (target_frame_id,)
+                )
+                connection.execute(
+                    "DELETE FROM provider_sessions WHERE session_key = ? "
+                    "AND NOT EXISTS (SELECT 1 FROM frame_sessions "
+                    "WHERE session_key = ?)",
+                    (session_key, session_key),
+                )
+        except sqlite3.IntegrityError as error:
+            raise ConflictError("cancel_conflict", str(error)) from error
+
+    def supersede_prepared_transition(
+        self, transition_id: TransitionId, *, now: int | None = None
+    ) -> ViewTransition:
+        """Supersede only a prepared transition; later ownership is immutable."""
+
+        timestamp = _timestamp(now)
+        with self.transaction(immediate=True) as connection:
+            row = connection.execute(
+                "SELECT * FROM view_transitions WHERE transition_id = ?",
+                (str(transition_id),),
+            ).fetchone()
+            if row is None:
+                raise ConflictError("not_found", "transition does not exist")
+            transition = _transition(row)
+            if transition.state is not TransitionState.PREPARED:
+                raise ConflictError(
+                    "supersede_unsafe", "only a prepared transition may be superseded"
+                )
+            connection.execute(
+                "UPDATE control_turns SET state = 'superseded' "
+                "WHERE transition_id = ? AND state = 'prepared'",
+                (str(transition_id),),
+            )
+            if transition.kind is TransitionKind.COMPLETE_RETURN:
+                connection.execute(
+                    "UPDATE frames SET lifecycle_state = 'open', updated_at = ? "
+                    "WHERE frame_id = ? AND lifecycle_state = 'closing'",
+                    (timestamp, str(transition.source_frame_id)),
+                )
+            connection.execute(
+                "UPDATE view_transitions SET state = 'superseded', updated_at = ? "
+                "WHERE transition_id = ?",
+                (timestamp, str(transition_id)),
+            )
+            connection.execute(
+                "UPDATE request_records SET state = 'failed', "
+                "result_type = 'transition', result_id = ?, completed_at = ? "
+                "WHERE host_id = ? AND request_id = ? AND state = 'prepared'",
+                (
+                    str(transition_id),
+                    timestamp,
+                    str(transition.host_id),
+                    str(transition.request_id),
+                ),
+            )
+        return self.get_transition(transition_id)
 
     def claim_transition_execution(
         self,
@@ -3295,6 +3956,7 @@ class Registry:
                    placement.generation AS current_placement_generation,
                    view.state AS current_view_state,
                    view.active_frame_id AS current_active_frame_id,
+                   view.tmux_server_id AS current_view_tmux_server_id,
                    frame.current_session_key AS frame_session_key,
                    surface.lifecycle_state AS current_surface_state,
                    surface.session_key AS current_session_key,
@@ -3324,6 +3986,7 @@ class Registry:
             or row["current_placement_generation"] != row["placement_generation"]
             or row["current_view_state"] != ViewState.READY.value
             or row["current_active_frame_id"] != row["frame_id"]
+            or row["current_view_tmux_server_id"] != row["tmux_server_id"]
             or row["frame_session_key"] != row["session_key"]
             or row["current_surface_state"] != SurfaceState.LIVE.value
             or row["current_session_key"] != row["session_key"]
@@ -3342,6 +4005,65 @@ class Registry:
     ) -> AgentCapability:
         timestamp = _timestamp(now)
         row = self._validate_capability_tx(self.connection, raw_capability, timestamp)
+        return AgentCapability(
+            CapabilityId(row["capability_id"]),
+            str(row["capability_digest"]),
+            HostId(row["host_id"]),
+            ViewId(row["view_id"]),
+            FrameId(row["frame_id"]),
+            None
+            if row["session_key"] is None
+            else SessionKey.parse(row["session_key"]),
+            SurfaceId(row["surface_id"]),
+            LaunchId(row["launch_id"]),
+            None
+            if row["tmux_server_id"] is None
+            else TmuxServerId(row["tmux_server_id"]),
+            None if row["pane_id"] is None else str(row["pane_id"]),
+            int(row["placement_generation"]),
+            int(row["issued_at"]),
+            int(row["expires_at"]),
+            None if row["revoked_at"] is None else int(row["revoked_at"]),
+        )
+
+    def active_capability(
+        self, view_id: ViewId, *, now: int | None = None
+    ) -> AgentCapability:
+        """Return exact active authority metadata without exposing its raw token."""
+
+        timestamp = _timestamp(now)
+        rows = self.connection.execute(
+            """
+            SELECT capability.* FROM agent_capabilities AS capability
+            JOIN frame_placements AS placement
+              ON placement.view_id = capability.view_id
+             AND placement.frame_id = capability.frame_id
+             AND placement.surface_id = capability.surface_id
+            JOIN user_views AS view ON view.view_id = capability.view_id
+            JOIN frames AS frame ON frame.frame_id = capability.frame_id
+            JOIN surfaces AS surface ON surface.surface_id = capability.surface_id
+            JOIN launch_intents AS launch ON launch.launch_id = capability.launch_id
+            WHERE capability.view_id = ? AND capability.revoked_at IS NULL
+              AND capability.expires_at > ? AND placement.state = 'active'
+              AND placement.generation = capability.placement_generation
+              AND view.state = 'ready'
+              AND view.active_frame_id = capability.frame_id
+              AND view.tmux_server_id = capability.tmux_server_id
+              AND frame.current_session_key = capability.session_key
+              AND surface.lifecycle_state = 'live'
+              AND surface.session_key = capability.session_key
+              AND surface.launch_id = capability.launch_id
+              AND surface.tmux_server_id = capability.tmux_server_id
+              AND surface.pane_id = capability.pane_id
+              AND launch.state = 'bound'
+            """,
+            (str(view_id), timestamp),
+        ).fetchall()
+        if len(rows) != 1:
+            raise ConflictError(
+                "active_capability_missing", "active frame authority is not exact"
+            )
+        row = rows[0]
         return AgentCapability(
             CapabilityId(row["capability_id"]),
             str(row["capability_digest"]),
