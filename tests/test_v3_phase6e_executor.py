@@ -207,6 +207,45 @@ def test_atomic_symlink_replacement(tmp_path: Path) -> None:
     assert os.readlink(destination) == "/opt/swbctl-next/bin/swbctl"
 
 
+@pytest.mark.parametrize(
+    ("active", "sub", "main", "control"),
+    (("inactive", "dead", "0", "0"), ("failed", "failed", "0", "0")),
+)
+def test_dms_stopped_accepts_quiescent_systemd_states(
+    active: str, sub: str, main: str, control: str
+) -> None:
+    assert phase6e.dms_service_stopped(
+        {
+            "ActiveState": active,
+            "SubState": sub,
+            "MainPID": main,
+            "ControlPID": control,
+        }
+    )
+
+
+@pytest.mark.parametrize(
+    ("active", "sub", "main", "control"),
+    (
+        ("active", "running", "123", "0"),
+        ("deactivating", "stop-sigterm", "123", "0"),
+        ("failed", "failed", "123", "0"),
+        ("inactive", "dead", "0", "123"),
+    ),
+)
+def test_dms_stopped_rejects_live_or_transitioning_processes(
+    active: str, sub: str, main: str, control: str
+) -> None:
+    assert not phase6e.dms_service_stopped(
+        {
+            "ActiveState": active,
+            "SubState": sub,
+            "MainPID": main,
+            "ControlPID": control,
+        }
+    )
+
+
 def test_rehome_console_script_repairs_relocated_venv_entrypoint(
     tmp_path: Path,
 ) -> None:

@@ -1206,9 +1206,15 @@ def service_properties(service: str) -> dict[str, str]:
             "-p",
             "ActiveState",
             "-p",
+            "SubState",
+            "-p",
             "InvocationID",
             "-p",
             "MainPID",
+            "-p",
+            "ControlPID",
+            "-p",
+            "Result",
             "-p",
             "ExecMainStartTimestampMonotonic",
             "--no-pager",
@@ -1220,6 +1226,23 @@ def service_properties(service: str) -> dict[str, str]:
         if separator:
             values[key] = value
     return values
+
+
+def dms_service_stopped(properties: dict[str, str]) -> bool:
+    return (
+        properties.get("ActiveState") in {"inactive", "failed"}
+        and properties.get("SubState") in {"dead", "failed"}
+        and properties.get("MainPID") == "0"
+        and properties.get("ControlPID") == "0"
+    )
+
+
+def stop_dms(service: str, *, operation: str) -> dict[str, str]:
+    run(["systemctl", "--user", "stop", service], timeout=60)
+    stopped = service_properties(service)
+    if not dms_service_stopped(stopped):
+        raise CutoverFailure(f"DMS did not stop {operation}")
+    return stopped
 
 
 def dms_state_value(path: Path) -> tuple[bytes, dict[str, Any]]:
@@ -1343,7 +1366,7 @@ def dms_restore(spec: Spec) -> dict[str, Any]:
     inventory = dms_backup(spec)
     run(["dms", "ipc", "call", "launcher", "close"], check=False)
     run(["dms", "ipc", "call", "plugins", "disable", "switchboard"], check=False)
-    run(["systemctl", "--user", "stop", desktop.service], timeout=60)
+    stop_dms(desktop.service, operation="during rollback")
     active = desktop.plugin_dir / "switchboard"
     if active.is_symlink():
         active.unlink()
@@ -1405,10 +1428,7 @@ def dms_cold_start(spec: Spec, prepared: dict[str, Any]) -> dict[str, Any]:
     active = desktop.plugin_dir / "switchboard"
     run(["dms", "ipc", "call", "launcher", "close"], check=False)
     run(["dms", "ipc", "call", "plugins", "disable", "switchboard"], check=False)
-    run(["systemctl", "--user", "stop", desktop.service], timeout=60)
-    before = service_properties(desktop.service)
-    if before.get("ActiveState") != "inactive":
-        raise CutoverFailure("DMS did not stop before plugin replacement")
+    stop_dms(desktop.service, operation="before plugin replacement")
     if active.is_symlink():
         active.unlink()
     installer = desktop.dms_repo / "scripts" / "install-plugin"
@@ -1499,7 +1519,7 @@ def dms_cold_start(spec: Spec, prepared: dict[str, Any]) -> dict[str, Any]:
     ):
         raise CutoverFailure("DMS cold start did not establish a fresh process")
     run(["dms", "ipc", "call", "plugins", "disable", "switchboard"], check=False)
-    run(["systemctl", "--user", "stop", desktop.service], timeout=60)
+    stop_dms(desktop.service, operation="after cold-start evidence")
     return {
         "hostId": local.host_id,
         "processStartId": process_id,
