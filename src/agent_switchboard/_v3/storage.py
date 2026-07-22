@@ -635,6 +635,15 @@ class Registry:
             self._one("view_transitions", "transition_id", transition_id)
         )
 
+    def find_transition_by_request(
+        self, host_id: HostId, request_id: RequestId
+    ) -> ViewTransition | None:
+        row = self.connection.execute(
+            "SELECT * FROM view_transitions WHERE host_id = ? AND request_id = ?",
+            (str(host_id), str(request_id)),
+        ).fetchone()
+        return None if row is None else _transition(row)
+
     def get_control_turn(self, control_turn_id: ControlTurnId) -> ControlTurn:
         return _control_turn(
             self._one("control_turns", "control_turn_id", control_turn_id)
@@ -645,6 +654,48 @@ class Registry:
 
     def get_lease(self, lease_id: LeaseId) -> DesktopAttachmentLease:
         return _lease(self._one("desktop_attachment_leases", "lease_id", lease_id))
+
+    def get_tmux_server(self, tmux_server_id: TmuxServerId) -> TmuxServer:
+        row = self._one("tmux_servers", "tmux_server_id", tmux_server_id)
+        return TmuxServer(
+            TmuxServerId(row["tmux_server_id"]),
+            HostId(row["host_id"]),
+            row["socket_path"],
+            int(row["server_pid"]),
+            int(row["server_start_time"]),
+            int(row["observed_at"]),
+        )
+
+    def list_views(self, *, include_retired: bool = False) -> tuple[UserView, ...]:
+        rows = self.connection.execute(
+            "SELECT * FROM user_views "
+            + ("" if include_retired else "WHERE state != 'retired' ")
+            + "ORDER BY updated_at DESC, view_id"
+        ).fetchall()
+        return tuple(_view(row) for row in rows)
+
+    def list_placements(
+        self, *, view_id: ViewId | None = None
+    ) -> tuple[FramePlacement, ...]:
+        if view_id is None:
+            rows = self.connection.execute(
+                "SELECT * FROM frame_placements ORDER BY view_id, placement_id"
+            ).fetchall()
+        else:
+            rows = self.connection.execute(
+                "SELECT * FROM frame_placements WHERE view_id = ? "
+                "ORDER BY placement_id",
+                (str(view_id),),
+            ).fetchall()
+        return tuple(_placement(row) for row in rows)
+
+    def list_surfaces(self, *, live_only: bool = False) -> tuple[Surface, ...]:
+        rows = self.connection.execute(
+            "SELECT * FROM surfaces "
+            + ("WHERE lifecycle_state = 'live' " if live_only else "")
+            + "ORDER BY surface_id"
+        ).fetchall()
+        return tuple(_surface(row) for row in rows)
 
     def get_request(self, host_id: HostId, request_id: RequestId) -> RequestRecord:
         row = self.connection.execute(
@@ -1396,6 +1447,124 @@ class Registry:
             raise ConflictError("tmux_conflict", str(error)) from error
         return server
 
+    def rebind_view_tmux_server(
+        self,
+        view_id: ViewId,
+        expected_revision: int,
+        tmux_server_id: TmuxServerId,
+        target_state: ViewState,
+        *,
+        now: int | None = None,
+    ) -> UserView:
+        """Fence a repaired view to newly observed exact tmux generation evidence."""
+
+        timestamp = _timestamp(now)
+        with self.transaction(immediate=True) as connection:
+            row = connection.execute(
+                "SELECT * FROM user_views WHERE view_id = ?", (str(view_id),)
+            ).fetchone()
+            server = connection.execute(
+                "SELECT host_id FROM tmux_servers WHERE tmux_server_id = ?",
+                (str(tmux_server_id),),
+            ).fetchone()
+            if row is None or server is None:
+                raise ConflictError("not_found", "view or tmux server does not exist")
+            current = _view(row)
+            if current.revision != expected_revision:
+                raise ConflictError("stale_revision", "view revision changed")
+            if server["host_id"] != str(current.host_id):
+                raise ConflictError("tmux_identity", "tmux server host differs")
+            if current.state is not target_state:
+                require_state_edge(
+                    current.state, target_state, VIEW_EDGES, "view state"
+                )
+            connection.execute(
+                "UPDATE user_views SET tmux_server_id = ?, state = ?, "
+                "revision = revision + 1, updated_at = ? WHERE view_id = ?",
+                (
+                    str(tmux_server_id),
+                    target_state.value,
+                    timestamp,
+                    str(view_id),
+                ),
+            )
+        return self.get_view(view_id)
+
+    def mark_view_attached(
+        self,
+        view_id: ViewId,
+        expected_revision: int,
+        *,
+        now: int | None = None,
+    ) -> UserView:
+        timestamp = _timestamp(now)
+        with self.transaction(immediate=True) as connection:
+            changed = connection.execute(
+                "UPDATE user_views SET last_attached_at = ?, "
+                "revision = revision + 1, updated_at = ? "
+                "WHERE view_id = ? AND revision = ? AND state != 'retired'",
+                (timestamp, timestamp, str(view_id), expected_revision),
+            ).rowcount
+            if changed != 1:
+                raise ConflictError("stale_revision", "view revision or state changed")
+        return self.get_view(view_id)
+
+    def invalidate_view_server_surfaces(
+        self,
+        view_id: ViewId,
+        tmux_server_id: TmuxServerId,
+        *,
+        now: int | None = None,
+    ) -> int:
+        """Revoke locators and capabilities after exact server-generation loss."""
+
+        timestamp = _timestamp(now)
+        with self.transaction(immediate=True) as connection:
+            view = connection.execute(
+                "SELECT host_id FROM user_views WHERE view_id = ?",
+                (str(view_id),),
+            ).fetchone()
+            server = connection.execute(
+                "SELECT host_id FROM tmux_servers WHERE tmux_server_id = ?",
+                (str(tmux_server_id),),
+            ).fetchone()
+            if view is None or server is None:
+                raise ConflictError("not_found", "view or tmux server does not exist")
+            if view["host_id"] != server["host_id"]:
+                raise ConflictError("tmux_identity", "tmux server host differs")
+            rows = connection.execute(
+                "SELECT surface.surface_id FROM surfaces AS surface "
+                "JOIN frame_placements AS placement "
+                "ON placement.surface_id = surface.surface_id "
+                "WHERE placement.view_id = ? AND surface.tmux_server_id = ?",
+                (str(view_id), str(tmux_server_id)),
+            ).fetchall()
+            surface_ids = tuple(row["surface_id"] for row in rows)
+            if not surface_ids:
+                return 0
+            placeholders = ",".join("?" for _ in surface_ids)
+            connection.execute(
+                "UPDATE agent_capabilities SET revoked_at = ? "
+                f"WHERE surface_id IN ({placeholders}) AND revoked_at IS NULL",
+                (timestamp, *surface_ids),
+            )
+            connection.execute(
+                "UPDATE frame_placements SET surface_id = NULL, "
+                "generation = generation + 1, updated_at = ? "
+                f"WHERE surface_id IN ({placeholders})",
+                (timestamp, *surface_ids),
+            )
+            connection.execute(
+                "UPDATE surfaces SET lifecycle_state = CASE "
+                "WHEN lifecycle_state = 'live' THEN 'orphaned' "
+                "ELSE lifecycle_state END, tmux_server_id = NULL, pane_id = NULL, "
+                "process_id = NULL, process_birth_id = NULL, "
+                "metadata_generation = metadata_generation + 1, updated_at = ? "
+                f"WHERE surface_id IN ({placeholders})",
+                (timestamp, *surface_ids),
+            )
+        return len(surface_ids)
+
     def create_view(
         self, view: UserView, placement: FramePlacement
     ) -> tuple[UserView, FramePlacement]:
@@ -1739,7 +1908,9 @@ class Registry:
             if (
                 connection.execute(
                     "SELECT 1 FROM view_transitions WHERE view_id = ? "
-                    "AND state IN ('prepared', 'executing', 'awaiting_claim')",
+                    "AND state IN ("
+                    "'prepared', 'executing', 'presented', 'awaiting_claim', 'settling'"
+                    ")",
                     (str(view_id),),
                 ).fetchone()
                 is not None
@@ -1773,6 +1944,12 @@ class Registry:
             connection.execute(
                 "UPDATE user_views SET state = 'retired', active_frame_id = NULL, "
                 "revision = revision + 1, updated_at = ? WHERE view_id = ?",
+                (timestamp, str(view_id)),
+            )
+            connection.execute(
+                "UPDATE frame_placements SET state = 'orphaned', "
+                "generation = generation + 1, updated_at = ? "
+                "WHERE view_id = ? AND state != 'orphaned'",
                 (timestamp, str(view_id)),
             )
         return self.get_view(view_id)
@@ -2233,8 +2410,17 @@ class Registry:
             )
         return self.get_request(host_id, request_id)
 
-    def prepare_transition(self, transition: ViewTransition) -> ViewTransition:
+    def prepare_transition(
+        self,
+        transition: ViewTransition,
+        *,
+        desired_mode: ViewMode | None = None,
+    ) -> ViewTransition:
         self._require_local_host(transition.host_id)
+        if (transition.kind is TransitionKind.MODE) != (desired_mode is not None):
+            raise ConflictError(
+                "transition_mode", "only a mode transition accepts desired mode"
+            )
         if (
             transition.state is not TransitionState.PREPARED
             or transition.transport_phase is not TransportPhase.INTENT
@@ -2285,9 +2471,12 @@ class Registry:
                     raise ConflictError(
                         "not_found", "view or target frame does not exist"
                     )
+                expected_current_revision = transition.expected_view_revision
+                if desired_mode is not None:
+                    expected_current_revision -= 1
                 if (
                     view["host_id"] != str(transition.host_id)
-                    or view["revision"] != transition.expected_view_revision
+                    or view["revision"] != expected_current_revision
                     or view["state"]
                     not in {ViewState.READY.value, ViewState.DEGRADED.value}
                     or target["host_id"] != str(transition.host_id)
@@ -2295,6 +2484,25 @@ class Registry:
                 ):
                     raise ConflictError(
                         "transition_precondition", "view revision or host changed"
+                    )
+                if desired_mode is not None:
+                    if (
+                        transition.source_frame_id != transition.target_frame_id
+                        or transition.source_frame_id
+                        != FrameId(view["active_frame_id"])
+                        or view["mode"] == desired_mode.value
+                    ):
+                        raise ConflictError(
+                            "transition_mode", "mode intent does not change this view"
+                        )
+                    connection.execute(
+                        "UPDATE user_views SET mode = ?, revision = revision + 1, "
+                        "updated_at = ? WHERE view_id = ?",
+                        (
+                            desired_mode.value,
+                            transition.created_at,
+                            str(transition.view_id),
+                        ),
                     )
                 if transition.source_frame_id is not None:
                     source = connection.execute(

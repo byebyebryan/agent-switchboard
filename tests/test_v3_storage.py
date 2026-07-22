@@ -419,6 +419,18 @@ def test_launch_surface_binding_and_capability_match_exact_runtime() -> None:
                 now=51,
             )
         assert caught.value.code == "live_surface"
+        assert opened.invalidate_view_server_surfaces(VIEW, TMUX, now=52) == 1
+        invalidated = opened.get_surface(SURFACE)
+        assert invalidated.lifecycle_state is SurfaceState.ORPHANED
+        assert invalidated.tmux_server_id is None
+        assert opened.get_placement(PLACEMENT).surface_id is None
+        assert (
+            opened.connection.execute(
+                "SELECT revoked_at FROM agent_capabilities WHERE capability_id = ?",
+                (str(CAPABILITY),),
+            ).fetchone()[0]
+            == 52
+        )
 
 
 def test_illegal_launch_and_surface_edges_fail_closed() -> None:
