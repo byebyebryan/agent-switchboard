@@ -206,6 +206,28 @@ def test_atomic_symlink_replacement(tmp_path: Path) -> None:
     assert os.readlink(destination) == "/opt/swbctl-next/bin/swbctl"
 
 
+def test_rehome_console_script_repairs_relocated_venv_entrypoint(
+    tmp_path: Path,
+) -> None:
+    release = tmp_path / "release"
+    binary = release / "bin"
+    binary.mkdir(parents=True)
+    interpreter = binary / "python"
+    interpreter.write_bytes(b"python")
+    interpreter.chmod(0o755)
+    script = binary / "swbctl"
+    body = b"from agent_switchboard.cli import main\nmain()\n"
+    script.write_bytes(b"#!/tmp/build/bin/python\n" + body)
+    script.chmod(0o755)
+
+    phase6e.rehome_console_script(script, interpreter)
+
+    assert script.read_bytes() == f"#!{interpreter}\n".encode() + body
+    assert script.stat().st_mode & 0o777 == 0o755
+    phase6e.rehome_console_script(script, interpreter)
+    assert script.read_bytes() == f"#!{interpreter}\n".encode() + body
+
+
 def legacy_database(
     tmp_path: Path, *, live: bool = False, active: bool = False
 ) -> Path:

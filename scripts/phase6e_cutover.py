@@ -434,6 +434,38 @@ def write_private(path: Path, value: object, *, mode: int = 0o400) -> None:
     os.replace(temporary, path)
 
 
+def rehome_console_script(path: Path, interpreter: Path) -> None:
+    """Atomically replace a relocated venv script's absolute shebang."""
+
+    if not path.is_file() or path.is_symlink():
+        raise CutoverFailure("release console script is missing or unsafe")
+    if not interpreter.is_file():
+        raise CutoverFailure("release interpreter is missing or unsafe")
+    payload = path.read_bytes()
+    newline = payload.find(b"\n")
+    if newline < 0 or not payload.startswith(b"#!"):
+        raise CutoverFailure("release console script has an invalid shebang")
+    shebang = b"#!" + os.fsencode(interpreter) + b"\n"
+    if payload[: newline + 1] == shebang:
+        return
+    temporary = path.with_name(f".{path.name}.{uuid4()}.tmp")
+    descriptor = os.open(
+        temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o700
+    )
+    try:
+        view = memoryview(shebang + payload[newline + 1 :])
+        while view:
+            written = os.write(descriptor, view)
+            if written <= 0:
+                raise CutoverFailure("release console script write was incomplete")
+            view = view[written:]
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+    os.chmod(temporary, 0o755)
+    os.replace(temporary, path)
+
+
 def prepare(spec: Spec) -> dict[str, Any]:
     git_exact(spec.core_repo, spec.core_commit)
     git_exact(spec.desktop.dms_repo, spec.dms_commit)
@@ -616,6 +648,7 @@ def worker_stage(spec: Spec, role: str) -> dict[str, Any]:
             if temporary.exists():
                 shutil.rmtree(temporary)
     swbctl = release / "bin" / "swbctl"
+    rehome_console_script(swbctl, release / "bin" / "python")
     version = run([str(swbctl), "--version"]).stdout.decode().strip()
     if version != f"swbctl {CORE_VERSION}":
         raise CutoverFailure("inactive core install has the wrong version")
