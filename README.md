@@ -16,12 +16,12 @@ projects/repositories/checkouts, explicit tasks, Snapshot v2/Fleet v1,
 pull-based SSH federation, the full-screen Textual manager, and the separate
 DMS model-v5 picker all have deterministic and guarded live acceptance.
 
-Phase 6 is now the accepted clean-break direction for `0.3.0`. It replaces,
+Phase 6A.1 is now the accepted clean-break direction for `0.3.0`. It replaces,
 rather than extends, that product shape with durable host-local user views,
-unified workspace/task Frames, navigator and direct modes, automatic bounded
-task transitions, HostState v1/NavigatorState v1/ViewAction v1, Config v3, a
-fresh registry baseline, a replacement Textual navigator, and a views/projects/
-recovery-only DMS entry picker.
+unified workspace/task Frames, navigator and direct modes, strategic fixed
+control turns, HostState v1/NavigatorState v1/PresentationDirective v1, Config
+v3, a fresh registry baseline, a replacement Textual navigator, and a
+views/projects/recovery-only DMS entry picker.
 
 Phase 6 production code has not landed. The old runtime remains usable only
 until the coordinated activation slice; it is not a compatibility contract.
@@ -31,11 +31,13 @@ paired core/DMS acceptance are complete.
 Current design sources:
 
 - [Agent Switchboard Design](docs/design.md)
+- [State and Control-Turn Contract](docs/state-contract.md)
 - [View and Frame Workflow](docs/view-workflow.md)
 - [Phase 6 Clean-Break Plan](docs/phase-6-plan.md)
 
 The implemented `0.2` phase records are retained as non-packaged historical
 evidence under [`docs/archive/0.2`](docs/archive/0.2/README.md).
+
 ## Local commands
 
 The implemented command surface emits one versioned snapshot envelope:

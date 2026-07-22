@@ -2,33 +2,34 @@
 
 Date: 2026-07-21
 
-Status: accepted Phase 6 replacement design; implementation pending
+Status: accepted Phase 6A.1 replacement design; implementation pending
 
 Target release: `0.3.0`
 
 The implemented `0.2.0` task-first product is historical input, not a
 compatibility boundary. Phase 6 replaces its registry, protocols, command
-surface, terminal UI, and DMS model in one coordinated cutover. The detailed
-interaction contract is in [View and Frame Workflow](view-workflow.md), and the
-delivery/cutover sequence is in [Phase 6 Plan](phase-6-plan.md).
+surface, terminal UI, and DMS model in one coordinated cutover. Normative
+storage/state rules are in [State and Control-Turn Contract](state-contract.md),
+user behavior is in [View and Frame Workflow](view-workflow.md), and delivery is
+in [Phase 6 Plan](phase-6-plan.md).
 
 ## Summary
 
 Switchboard owns durable user views around unmodified Codex and Claude Code
 terminal UIs. A view is a host-local navigation cursor backed by tmux. It may
-show a compact Switchboard navigator beside the active provider pane or operate
-as one direct provider pane with no Switchboard UI process.
+show a compact navigator beside the active provider pane or operate as one
+direct provider pane with no Switchboard UI process.
 
 The durable unit of user work is a `Frame`. Each project has one workspace root
 frame per host. Focused tasks are child frames. A frame may roll through several
 provider sessions without changing its identity, title, lineage, work context,
-or place in a view. Provider UUIDs and provider-owned history remain the routing
+or place in a view. Provider UUIDs and provider-owned history remain routing
 authority for each conversation.
 
 Switchboard does not proxy terminal I/O, re-render conversations, parse private
 transcripts, run a provider-wide supervisor, or keep a host daemon alive. It
-coordinates identities, tmux pane placement, bounded transition briefs,
-immutable handoffs, and trusted post-turn transitions.
+coordinates identities, pane placement, bounded semantic briefs, immutable
+handoffs, visible fixed control turns, and trusted post-turn transitions.
 
 ## Product Goals
 
@@ -36,20 +37,21 @@ immutable handoffs, and trusted post-turn transitions.
 - Move transparently from workspace to focused task and back again.
 - Preserve native provider UI state while switching projects and tasks.
 - Offer a persistent navigator without requiring it in direct mode.
-- Keep task creation and completion lightweight enough to become automatic.
-- Keep provider sessions, terminal panes, views, frames, and checkouts as
-  separate identities.
-- Support local and configured remote hosts through the same bounded state and
-  action interfaces.
-- Recover explicitly from missed hooks, broken view containers, checkout
-  conflicts, and orphaned managed panes.
+- Use agents at semantic task boundaries without adding model latency to plain
+  navigation or lifecycle operations.
+- Keep provider sessions, panes, views, frames, and checkouts as separate
+  identities.
+- Support local and configured remote hosts through bounded state/action
+  interfaces.
+- Recover explicitly from missed hooks, broken containers, checkout conflicts,
+  uncertain control submission, and orphaned managed panes.
 
 ## Non-goals
 
 - Backlogs, dependencies, assignments, milestones, or project planning.
 - Provider transcript ownership, synchronization, or rendering.
 - A terminal emulator embedded inside Switchboard.
-- Arbitrary hidden prompt injection or terminal `send-keys` automation.
+- Arbitrary, hidden, content-bearing, or shell-oriented terminal input.
 - Provider subagent, background-command, or schedule orchestration.
 - Cross-host pane movement inside one view.
 - Automatic Git branching, worktree creation, commit, merge, or cleanup.
@@ -66,101 +68,80 @@ immutable handoffs, and trusted post-turn transitions.
 | `Checkout` | Host-local filesystem view of one repository |
 | `Frame` | Durable workspace or task context with lineage and session history |
 | `FrameSession` | Ordered membership of an exact provider session in a frame |
-| `WorkContext` | Checkout claim and foreground mutation lease for a frame stack |
+| `WorkContext` | Durable stack identity plus temporary checkout/foreground claims |
 | `UserView` | Durable host-local cursor, mode, revision, and active frame |
-| `Surface` | Physical native-provider pane with a mutable tmux placement |
+| `FramePlacement` | Owning view affinity and physical/semantic placement of a frame |
+| `Surface` | Physical native-provider pane with exact runtime evidence |
 | `ViewTransition` | Durable, idempotent state change between exact frames |
 | `Handoff` | Immutable bounded result and next action tied to an exact session |
+| `ControlTurn` | One visible fixed prompt submitted at a verified boundary |
+| `Recovery` | Durable structural uncertainty with explicit actionability |
 
-### Frame
+### Frames and sessions
 
-`Frame` replaces the separate workspace, task, and session-frame identities
-proposed during the task-first design:
+`Frame` replaces separate workspace, task, and session-frame identities. Exactly
+one workspace root exists for `(HostId, ProjectId)`. A child is on the same host,
+project, and WorkContext as its parent. Closing a task never closes the
+workspace. Reopen retains frame identity and lineage.
 
-```text
-Frame
-  frame_id
-  host_id
-  project_id
-  role                    workspace | task
-  parent_frame_id         null only for workspace roots
-  work_context_id
-  title
-  purpose                 optional
-  preferred_provider      optional
-  lifecycle_state         open | closing | closed
-  close_reason            completed | dismissed | null
-  current_session_key     optional
-  created_by              user | agent | cutover
-  created_at
-  updated_at
-```
-
-Exactly one open-or-closed workspace frame exists for `(HostId, ProjectId)`.
-Closing a task never closes the workspace. A reopened task reuses its frame
-identity and lineage. Provider rollover appends a new `FrameSession` and
-changes `current_session_key`; it does not create another user-facing task.
+Provider rollover appends a `FrameSession`; it never creates another user-facing
+task. One provider session belongs to at most one frame. A stopped/resumed UUID
+remains the same membership even when its native TUI process changes.
 
 Sessions discovered without a frame remain provider history. They do not form
-an `Inbox` product category. A focused recovery action may attach one to a new
-or existing frame, but reconciliation never invents that semantic relationship.
+an `Inbox`. A focused recovery action may attach one to a new or existing frame,
+but reconciliation never invents the semantic relationship.
 
 ### Work context
 
-A `WorkContext` owns one concrete checkout claim and identifies the frame that
-currently has the foreground mutation lease. Workspace-to-child flow reuses
-the same work context so uncommitted state remains visible. Parked ancestors
-retain lineage but not mutation authority.
+A WorkContext is durable, but its checkout claim can be released and reacquired.
+It identifies the one foreground frame allowed to mutate the checkout while its
+claim is held. Workspace-to-child flow keeps the context and transfers only the
+foreground lease, preserving uncommitted state.
 
-Manual navigation may keep a source runtime live. If source and target share a
-work context and background mutation cannot be ruled out, core requires an
-explicit human override before moving the logical lease. Automatic transitions
-never use that override: they require a park-safe claim and reject known or
-uncertain background work.
+An automatic transition first proves the source foreground turn complete and
+park-safe, moves input authority away from it, transfers the lease, and only
+then releases the target's brief. Known or uncertain background mutation blocks
+automation. Manual transfer may use an explicit human override after warning
+that an already-running process cannot be prevented from writing.
 
-Existing task-to-worktree uniqueness does not survive as a separate task claim.
-The unique mutable-checkout claim belongs to `WorkContext`.
+The unique mutable-checkout claim belongs to the WorkContext, not a task. It
+releases only when no member has a live mutation-capable surface, pending
+transition, or known/uncertain background work. Durable workspace history does
+not monopolize a checkout.
 
-### User view
+### Views, placements, and projects
 
-```text
-UserView
-  view_id
-  host_id
-  mode                    navigator | direct
-  active_frame_id         optional while recovering
-  state                   ready | transitioning | degraded | retired
-  revision
-  desktop_token
-  created_at
-  last_attached_at
-  updated_at
-```
+A view can navigate every configured project/frame owned by one host. It is not
+permanently attached to a project. Multiple independent views may exist. Multiple
+managed clients attached to one view normally share one cursor; a client using
+tmux's independent `active-pane` mode is rejected/degraded rather than silently
+violating that contract.
 
-A view can navigate every configured project and frame owned by one host. It is
-not permanently attached to a project. Multiple independent views may exist on
-one host. Multiple tmux clients attached to the same view intentionally mirror
-one cursor and active pane; a user needing independent navigation creates a
-different view.
+A live provider pane has one owning placement and view. Opening that frame from
+another view focuses its owner rather than stealing the pane. Stopped affinity
+also has one owner and can move only after duplicate-runtime reconciliation.
 
-A live provider pane has exactly one owning view. Opening that frame from
-another view focuses the owner rather than stealing the pane. A stopped
-provider session may be resumed into a new view after duplicate-runtime
-revalidation.
+`Views` entry means focus as-is. `Projects` entry is explicit navigation: core
+routes the workspace's owning view to the project's most recently focused open
+descendant, or the workspace itself. Concurrent project opens single-flight on
+the workspace frame. Selecting Project A can never focus a view still showing
+unrelated Project B.
 
 Closing a terminal client only detaches it. A view remains until explicit
-retirement. Retirement is allowed only when no transition is pending and no
-live provider pane remains; frame and provider history survive it.
+retirement. Retirement requires no transition, desktop lease, or live provider
+pane. Frame/provider history survives.
 
-### Transition
+### Transitions and global fencing
 
-Every view mutation carries the expected view revision. One transition lease
-may be active per view. The durable record contains exact source/target frames,
-work-context policy, bootstrap state, request ID, and failure information.
+Every exact view mutation carries an expected view revision. One nonterminal
+transition exists per view. Only `prepared` may be cancelled/superseded;
+executing transport must settle or recover.
 
-Manual navigation or a mode change supersedes a prepared automatic transition.
-A delayed hook may mark that transition failed or ready for retry, but it may
-not retarget the now-changed view.
+View revision is not enough for cross-view resources. Storage also fences exact
+provider-session launches, live surfaces, WorkContext claims/foreground frames,
+workspace project routes, completion handoffs, and desktop attachment leases.
+Request UUIDs are idempotent only for one normalized semantic fingerprint.
 
 ## Native Provider Runtime
 
@@ -171,89 +152,105 @@ one native Codex or Claude Code TUI process
 + one provider UUID
 + one managed tmux pane
 + one Surface record
-+ optional placement in one UserView
++ one owning FramePlacement
 ```
 
 Codex runs its normal embedded App Server and must not reuse a persistent
 default-socket daemon. Claude Agent View remains disabled. Short-lived bounded
-Codex App Server stdio clients may discover sessions, precreate a zero-turn
-thread, or project an initial title; they never become the provider runtime.
+Codex App Server stdio clients may discover/precreate/name a session; they never
+become the provider runtime.
 
-Provider commands execute directly in tmux. Switchboard leaves no wrapper
-around them and never proxies stdin/stdout. A compact navigator may remain in
-an adjacent pane, but provider input and rendering remain native.
+Provider commands execute directly in tmux. Switchboard leaves no wrapper after
+the bootstrap exec and never proxies stdin/stdout. A compact navigator may
+remain adjacent, but provider input/rendering are native.
+
+## Controlled Agent Turns
+
+The prohibition is against arbitrary terminal automation, not deliberate agent
+use. Switchboard may submit exactly one visible, versioned control prompt to an
+exact managed session at a verified turn boundary:
+
+```text
+Call transition_claim() and follow the returned transition instructions.
+```
+
+No user text, brief, handoff, title, path, token, or command is interpolated.
+The capability-bound no-argument tool returns the semantic content only to the
+exact target provider UUID.
+
+Transport is live-first. A live parent must be parked, input-disabled, ready
+after a trusted `Stop`, free of permission/background ambiguity, and covered by
+the executing transition. Otherwise Switchboard resumes the exact UUID with the
+same fixed initial prompt. An uncertain live submission is never automatically
+retried.
+
+Complete-and-return uses one parent synthesis turn by default. Back, manual
+focus, mode change, Human close, and structural recovery remain model-free.
+Hooks submit/present within their budget and never wait for model completion.
 
 ## tmux View Shell
 
-Each view uses one opaque tmux session:
+Switchboard uses the selected/shared user tmux server so an existing client does
+not nest another server. Each view records the exact socket path, server PID,
+and tmux `start_time`; a generation mismatch invalidates retained locators.
+Switchboard sets `destroy-unattached=off` only on sessions it owns.
 
 ```text
 as-view-<opaque-id>
-  anchor        hidden dead remain-on-exit pane
-  main          [optional sidebar] [active provider pane]
-  parked-*      hidden provider panes
-  staged-*      attach-gated provider bootstraps
+  main              [optional sidebar] [active provider or dead placeholder]
+
+as-hold-<opaque-id>  unattached holding session
+  placeholder       dead remain-on-exit pane
+  parked-*          input-disabled live provider panes
+  staged-*          attach/transition-gated bootstraps
 ```
 
-The dead anchor retains the tmux session without a resident process. Navigator
-mode runs a compact sidebar in the left pane. Direct mode removes that pane
-and process completely. Toggling back recreates it from registry state without
-changing the active provider pane or process. tmux zoom is a temporary display
-choice and does not change the durable view mode.
+There is no separate anchor window in the attached view. Normal next/previous
+window navigation cannot expose parked/staged panes. Explicitly attaching the
+holding session still cannot start a staged provider because visibility alone
+is never the gate.
 
-Provider frames move with `swap-pane`. Pane-scoped surface metadata follows the
-process. A move is coordinated as:
+Navigator mode runs a compact sidebar on the left. Direct mode removes its pane
+and process. A short-lived executor outside the sidebar performs removal and
+registry settlement. Toggling back recreates the sidebar without changing the
+provider pane/process. Zoom is display state, not durable view mode.
 
-1. record durable intent with source/target pane IDs and expected view revision;
-2. execute the exact tmux pane swap;
-3. re-read pane IDs, metadata, windows, and geometry;
-4. update both surface locators, active frame, revision, and transition in one
-   SQLite transaction;
-5. reverse the swap when immediate validation fails, or let reconciliation
-   finish a crash-interrupted intent from pane metadata.
+Pane movement follows a durable saga:
 
-Production code kills only a specifically owned pane/window/session after
-revalidation. It never invokes `tmux kill-server` or restarts the user's server.
+1. commit transition/placement intent and claim its execution lease;
+2. revalidate server generation, pane metadata, source/target placement, view
+   revision, and WorkContext generation;
+3. execute a compound exact tmux command queue;
+4. re-read pane IDs, metadata, windows, geometry, and input state;
+5. commit locators/placements/view revision/transport phase together; and
+6. repair from observed metadata or reverse a validated immediate failure.
 
-An attach-gated bootstrap starts a provider only after its exact pane owns
-input in a viewed window. `session_attached` alone is insufficient because a
-staged pane may share the same attached view session while remaining hidden.
+Reconciliation never blindly repeats `swap-pane`. Production kills only an
+exact revalidated pane/window and never invokes `kill-server`.
 
-## Public State and Actions
+Live control input is fenced in the same queue: move/select target, enable
+input, send the literal template and Enter, then disable input. Exact
+`UserPromptSubmit` or a bounded watchdog re-enables it. The system clipboard and
+tmux paste buffers are not involved.
 
-Phase 6 introduces a new public generation. Old protocol types and parsers are
-deleted rather than retained as aliases.
+## Public State and Commands
 
-### HostState v1
+Phase 6 introduces a new public generation. Old protocol types/parsers are
+deleted, not aliased.
 
-`HostState v1` is emitted by one owning host. It contains bounded host,
-project, repository, checkout, view, frame, work-context, transition, provider
-session summary, surface-placement, and recovery records. It never contains
-prompts, transcripts, provider argv, SSH targets, credentials, or unrestricted
-filesystem data.
+`HostState v1` is emitted by one owner host and includes bounded host, catalog,
+view, frame, placement, WorkContext, transition, control-turn, provider session,
+surface, and recovery records. It never contains prompts, transcripts, provider
+argv, credentials, or unrestricted filesystem data.
 
-### NavigatorState v1
+`NavigatorState v1` aggregates individually validated HostState records and
+projects only views, project entry routes, navigable frame summaries, recovery,
+reachability/staleness, warnings, and truncation.
 
-`NavigatorState v1` is the local core's bounded aggregation of owner-host
-states. It preserves host authority, reachability, last-good staleness, and
-host-qualified identities. It projects only what navigator/DMS frontends need:
-
-- views and their active frame summary;
-- project entry routes;
-- navigable frame summaries;
-- structural recovery records; and
-- bounded warnings/truncation.
-
-It replaces both Fleet and the frontend-specific task/Inbox model.
-
-### ViewAction v1
-
-`ViewAction v1` represents a host-qualified `focus`, `switch`, `attach`, or
-`blocked` result. It carries opaque view and desktop identities, never tmux
-targets or provider commands. Request IDs make prepare/open retries idempotent.
-Cursor mutations additionally require `expectedViewRevision`.
-
-### Command surface
+`PresentationDirective v1` replaces the proposed `ViewAction v1`. Core commits
+or revalidates semantic navigation, then returns `focus`, `attach`, or `blocked`
+desktop work. It contains opaque view/desktop identities but no tmux target or
+provider command. `attach` grants one expiring desktop lease.
 
 The replacement public command tree is:
 
@@ -266,20 +263,20 @@ swbctl frame list|show|push|back|complete|close|reopen
 swbctl project ...
 swbctl session show|stop ...
 swbctl hooks ...
+swbctl cutover export|import|status|commit|rollback
 swbctl doctor
 swbctl reconcile
 swbctl agent-mcp
 ```
 
-There are no `snapshot`, `fleet`, `prepare-open`, `prepare-task`,
-`prepare-history`, `select-surface`, `attach-surface`, task-first CRUD, or
-compatibility alias commands in `0.3`.
+There are no Snapshot/Fleet, prepare/select/attach-surface, task-first CRUD, or
+compatibility aliases in `0.3`.
 
 ## Agent Authority and Trusted Hooks
 
 Managed provider sessions receive a random capability bound to exact host,
-view, frame, session, surface, pane, launch, and expiry evidence. Agent tools
-accept no source frame, source session, tmux target, launch ID, or arbitrary
+view, frame, provider session, surface, pane, launch, and generation evidence.
+Agent tools accept no source identity, tmux target, launch ID, or arbitrary
 command from the model.
 
 Canonical tools are:
@@ -296,125 +293,94 @@ transition_status()
 transition_cancel()
 ```
 
-Skills and provider commands may explain or alias these tools, but they are
-optional and disabled independently. No ambient skill is required for routing,
-memory, or transition correctness.
+Skills/commands may explain or alias tools, but are optional and independently
+disabled. No ambient skill is required for routing, memory, or correctness.
 
-An agent tool records and prepares a transition while the source turn is still
-active. It does not start a provider, move the visible pane, or stop its own
-runtime. A trusted post-turn hook claims the exact prepared transition,
-revalidates the view revision and pane, performs the bounded presentation hot
-path, and returns within the configured hook budget. Short-lived settlement or
-later hooks finish binding/parking; no controller daemon remains.
-
-Child and returned-parent sessions receive one fixed visible bootstrap
-instruction to call `transition_claim()`. That no-argument tool returns the
-bounded brief or exact handoff only to the bound session. It is idempotent for
-that session and cannot be claimed by another provider UUID. Raw user prompts
-and transcript excerpts are never persisted or replayed.
+An agent tool records/prepares while the source turn is active. It does not move
+the pane or stop its own runtime. A trusted post-turn hook claims the prepared
+transition, performs the bounded presentation/control-submission hot path, and
+returns. Short-lived settlement and later exact hooks finish binding, claim,
+parking, closing, and recovery; no daemon remains.
 
 ## Frontends
 
-### Navigator
+The Textual frontend is replaced by a resident compact sidebar showing current
+breadcrumb, projects, open frames, attention, transition/control status, and
+recovery. Focused settings/history/recovery may use a popup or temporary
+full-window view. There is no Open/Inbox/Closed administrative application.
 
-The Textual frontend is replaced rather than extended. Its primary mode is a
-resident compact sidebar showing the current breadcrumb, projects, open task
-frames, attention, transition status, and recovery. Selecting a local frame
-swaps the right pane and leaves the sidebar resident.
+DMS is entry/recovery only:
 
-Focused project/catalog, settings, provider-history, and recovery panels may
-use a tmux popup or temporary full-window view. They consume the new state and
-actions and return to the same view. There is no Open/Inbox/Closed application
-or retained task-first administrative mode.
+- `Views`: focus/attach the exact current view;
+- `Projects`: explicitly navigate the owning view or create one; and
+- `Recovery`: run safe idempotent repairs or open the core recovery panel.
 
-### DMS
-
-DMS is an entry and recovery picker only. Its new model contains:
-
-- `Views`: focus or attach a durable view without changing its current frame;
-- `Projects`: focus the owning view as-is or create a navigator-mode view when
-  no owner exists; and
-- `Recovery`: blocked transitions, orphaned live surfaces, checkout conflicts,
-  and broken view containers.
-
-Needs-input and offline state remain badges on ordinary view rows. DMS exposes
-no task, Inbox, Closed, create, close, reopen, history, or stop rows. Core owns
-all semantics and emits `NavigatorState v1`; the adapter validates, caches, and
-renders a small entry-model v1.
-
-Desktop application identity is derived from `(HostId, ViewId)`, not a surface.
-DMS focuses an existing matching window or launches the configured terminal
-with a fixed `swbctl view attach` command.
+One canonical DMS desktop client exists per `(HostId, ViewId)`. Other ordinary
+tmux clients remain supported but do not share that desktop identity. Ambiguous
+matching desktop windows block rather than launch another.
 
 ## Remote Hosts
 
-Views are host-local. `state navigator` obtains bounded `HostState v1` records
-over fixed SSH argv and retains last-good state with explicit offline/stale
-markers. Every mutation routes to the owning host and revalidates live state;
-cached data never authorizes mutation.
-
-Selecting a remote project or view opens/focuses a separate SSH-backed terminal
-view. A local view never swaps a remote provider pane into its tmux session.
+Views are host-local. `state navigator` obtains bounded HostState records over
+fixed SSH argv and retains last-good state with explicit stale/offline markers.
+Every mutation routes to the owner and revalidates live state. Selecting a
+remote project/view opens or focuses a separate SSH-backed host-local view; a
+local view never swaps a remote pane.
 
 ## Registry and Configuration Baseline
 
-`0.3` starts with a fresh registry schema rather than schema v11. Normal runtime
-code refuses the old v10 file with a cutover-required diagnostic. A separate
-offline exporter and one-time importer preserve aligned identities and evidence
-without teaching the new registry old task semantics.
+`0.3` starts from a fresh registry baseline. Config v3 and the database share a
+generation ID and are activated through one state-home pointer. Runtime fails
+closed on missing/mismatched generations and on the old fixed schema-v10 file.
 
-Config v3 preserves host, provider, remote, project, repository, and checkout
-definitions while adding view defaults and conservative automation policy. The
-normal parser accepts only v3; the offline cutover converter is the only v2
-reader in the new source tree.
-
-The exact backup, quiescence, import, rollback, and activation gates are in the
-Phase 6 plan.
+The offline exporter/importer preserves aligned catalog/session/handoff evidence
+without importing old task semantics. New settings make task push conservative,
+Complete-and-return synthesized by default, and control transport live-first.
+The exact staged activation/rollback sequence is in the Phase 6 plan.
 
 ## Failure and Recovery
 
-- A failed child preparation leaves the source frame and view unchanged.
-- A child that binds before presentation failure remains one recoverable
-  runtime; retry never starts a duplicate.
-- A missed post-turn hook leaves a durable prepared transition but may not move
-  a view after its revision changes.
-- A sidebar crash does not affect the provider pane; navigator mode may restart
-  the sidebar from view state.
-- A missing tmux view container becomes a structural recovery item. Core may
-  rebuild it only after checking for an already-live owning pane.
-- A pane found under another view focuses its owner rather than relocating it.
-- A failed locator commit is repaired from durable intent and pane-scoped
-  surface metadata.
-- An unavailable parent keeps the child usable with its handoff retained.
-- An offline remote host remains visible but cannot accept mutations.
-- Checkout/background conflicts block automatic transition and require an
-  explicit human decision for manual navigation.
+- Preparation failure leaves source/view unchanged.
+- A missed hook leaves durable prepared/uncertain state and cannot move a
+  changed view.
+- A submitted control turn is never submitted again automatically.
+- A child cannot receive its brief before WorkContext foreground transfer.
+- A parent claim closes the completed child; parent synthesis can retry from the
+  immutable handoff.
+- Human close never removes the active pane before a parent/placeholder exists.
+- Sidebar failure preserves provider pane; navigator may restart from state.
+- Locator crashes reconcile from intent, server generation, and pane metadata.
+- Missing tmux server marks containers broken and resumes exact provider UUIDs;
+  it never pretends old processes survived.
+- Checkout/background ambiguity blocks automation and requires core-owned human
+  decision.
+- Offline remote/cutover-staged hosts remain visible but reject mutation.
 
 ## Security and Privacy
 
-- All external subprocesses use fixed argv, bounded time/output, and no shell.
-- Agent mutation authority is current-frame and exact-pane scoped.
-- Hook payloads contain identity/status evidence, not transcript content.
-- State protocols exclude paths from DMS-facing projections and exclude
-  credentials, SSH targets, prompts, transcripts, and provider argv entirely.
-- View IDs, frame IDs, session keys, and surface IDs are opaque UUIDs.
-- Provider metadata writes are presentation-only and never routing authority.
-- Offline conversion reads the old registry/config only after secure backup and
-  writes a new destination; it never mutates the source in place.
+- External subprocesses use fixed argv, bounded time/output, and no shell.
+- Agent mutation authority is exact-frame/session/pane/generation scoped.
+- The only terminal control prompt is fixed, visible, literal, and versioned.
+- Hook payloads retain identity/status evidence, never prompt/response content.
+- DMS projections exclude paths, credentials, SSH/tmux targets, prompts,
+  transcripts, provider argv, and agent capability material.
+- Provider metadata writes are presentation-only, never routing authority.
+- Offline conversion never mutates its source and activation fails closed on a
+  torn generation.
 
 ## Accepted Commitments
 
-- Phase 6 is a clean replacement of the `0.2` product shape.
-- Frames unify workspace and task identity; provider sessions remain separate.
+- Phase 6 is a clean replacement of `0.2`.
+- Frames unify workspace/task identity; provider sessions remain separate.
 - Views are durable, host-local, and independent from terminal clients.
-- Navigator and direct modes share the same view/runtime machinery.
-- Native provider panes move; provider processes are never attached to a new
-  conversation dynamically.
-- Automatic workflow uses bounded briefs, fixed visible bootstrap turns, and
-  trusted hooks.
-- No compatibility protocols, aliases, task-first frontend, or in-place v10
-  migration ships in `0.3`.
-- DMS is a dumb entry/recovery picker, not the task navigator.
+- Navigator/direct modes share one view/runtime machinery.
+- A view session exposes only `main`; holding panes are separate and gated.
+- Controlled fixed agent turns are allowed at exact semantic boundaries;
+  arbitrary prompt/terminal injection remains forbidden.
+- Complete-and-return synthesizes through the parent by default and closes the
+  child on exact handoff claim.
+- Projects navigate; Views focus as-is.
+- WorkContext claims are temporary, generation-fenced, and host-global.
+- DMS is a dumb entry/recovery picker with one canonical desktop client.
 - Snapshot v2 and Fleet v1 end at the `0.2` boundary.
-- Recursive task-to-task flow is designed now but enabled only after one-child
-  workspace flow and work-context ownership pass acceptance.
+- Recursive task flow is enabled only after one-child ownership acceptance.

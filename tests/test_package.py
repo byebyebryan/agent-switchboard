@@ -34,6 +34,7 @@ def test_static_pep_621_metadata_and_stdlib_runtime() -> None:
     assert build["targets"]["sdist"]["only-include"] == [
         "src/agent_switchboard",
         "docs/design.md",
+        "docs/state-contract.md",
         "docs/view-workflow.md",
         "docs/phase-6-plan.md",
     ]
@@ -43,8 +44,9 @@ def test_static_pep_621_metadata_and_stdlib_runtime() -> None:
 def test_readme_states_phase_and_license() -> None:
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
     assert "implemented `0.2.0` task-first system" in readme
-    assert "Phase 6 is now the accepted clean-break direction" in readme
+    assert "Phase 6A.1 is now the accepted clean-break direction" in readme
     assert "docs/design.md" in readme
+    assert "docs/state-contract.md" in readme
     assert "docs/view-workflow.md" in readme
     assert "docs/phase-6-plan.md" in readme
     assert "docs/archive/0.2/README.md" in readme
@@ -121,6 +123,7 @@ def test_ci_smokes_wheel_and_source_distribution_installations() -> None:
     assert "Path(sys.argv[1]).read_bytes()" in workflow
     assert "SnapshotEnvelope.from_json" in workflow
     assert '"docs/design.md"' in verifier
+    assert '"docs/state-contract.md"' in verifier
     assert '"docs/view-workflow.md"' in verifier
     assert '"docs/phase-6-plan.md"' in verifier
     assert '"agent_switchboard/migrations/v0003_name_provenance_runtime_index.py"' in (

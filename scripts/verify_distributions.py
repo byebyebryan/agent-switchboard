@@ -119,6 +119,7 @@ def audit_contents(wheel: Path, sdist: Path) -> dict[str, object]:
             "LICENSE",
             "README.md",
             "docs/design.md",
+            "docs/state-contract.md",
             "docs/view-workflow.md",
             "docs/phase-6-plan.md",
             "pyproject.toml",
