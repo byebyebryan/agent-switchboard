@@ -49,3 +49,5 @@ select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
 [tool.ruff.lint.per-file-ignores]
 # Phase 0 probes are retained evidence; do not churn them as package style evolves.
 "spikes/*.py" = ["E501", "I001"]
+# SQL constraints are kept as readable source-aligned migration literals.
+"src/agent_switchboard/_v3/migrations/*.py" = ["E501"]
