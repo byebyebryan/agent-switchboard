@@ -9,6 +9,7 @@ timings, but not prompts or transcript content.
 ```sh
 python3 spikes/sqlite_reservation_spike.py
 python3 spikes/tmux_gate_spike.py
+python3 spikes/tmux_sidebar_swap_spike.py
 python3 spikes/codex_app_server_probe.py \
   --schema spikes/fixtures/codex/0.144.4/codex_app_server_protocol.v2.schemas.json
 python3 -m py_compile spikes/*.py
@@ -35,6 +36,45 @@ and canonical fingerprint
 `5d8251e1e2f713a3c567c927386f84f2f94692d4721b90d8ff36d0ff92877621`.
 Raw file hashes and canonical semantic fingerprints are different evidence and
 must not be substituted for one another.
+
+## Persistent sidebar pane-swap probe
+
+`tmux_sidebar_swap_spike.py` tests the proposed persistent Switchboard view
+without starting Codex, Claude, or a model turn. It creates a private tmux
+server with one fixed sidebar pane, one visible dummy project runtime, and one
+dummy child runtime staged in a hidden window. It attaches real PTY-backed tmux
+clients and swaps the complete project and child panes through the right-hand
+slot.
+
+```sh
+.venv/bin/python spikes/tmux_sidebar_swap_spike.py
+```
+
+The recorded tmux `3.7b` result on 2026-07-21 passed these feasibility checks:
+
+- a hidden dead `remain-on-exit` anchor kept the view session durable without a
+  resident Switchboard process;
+- the hidden child remained inert even though its tmux session had an attached
+  client, then started only when an exact client viewed its pane;
+- `swap-pane` preserved the sidebar, both dummy agent processes, their pane
+  IDs, pane-scoped metadata, and the right-slot geometry;
+- removing the sidebar produced a true single-pane direct mode, and recreating
+  it restored navigator geometry without changing the active agent pane or
+  process;
+- a reverse swap restored the project while keeping the child alive for retry
+  or rollback;
+- native pane zoom hid and restored the sidebar without changing the split;
+  and
+- two clients attached to one view followed the same active right-hand slot,
+  confirming that one view session is one shared navigation cursor rather than
+  two independent foreground selections.
+
+The probe uses a unique tmux socket, loads no user tmux configuration, emits no
+paths or process IDs, and kills only its isolated server. It proves the tmux
+composition, exact-pane visibility gate, rollback, and layout mechanics. It
+does not yet prove the compact Textual sidebar, provider behavior after a live
+pane move and resize, trusted-hook timing, durable locator updates, automatic
+provider parking/resume, or remote-host views.
 
 ## Codex thread-name mutation probe
 
