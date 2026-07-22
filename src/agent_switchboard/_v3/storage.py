@@ -9,13 +9,21 @@ import time
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
+from hashlib import sha256
 from pathlib import Path
 from typing import Final
 
 from .domain import (
+    CONTROL_EDGES,
+    FRAME_EDGES,
     LAUNCH_EDGES,
+    LEASE_EDGES,
     PLACEMENT_EDGES,
+    RECOVERY_EDGES,
+    REQUEST_EDGES,
     SURFACE_EDGES,
+    TRANSITION_EDGES,
+    TRANSPORT_EDGES,
     VIEW_EDGES,
     WORK_CONTEXT_EDGES,
     ActivationState,
@@ -23,11 +31,20 @@ from .domain import (
     ActivityReason,
     AgentCapability,
     BackgroundState,
+    BriefId,
+    CapabilityId,
     Checkout,
     CheckoutId,
     ClaimState,
     CloseReason,
+    CompletionHandoff,
+    ControlKind,
+    ControlState,
+    ControlTransport,
+    ControlTurn,
+    ControlTurnId,
     CreatedBy,
+    DesktopAttachmentLease,
     FailureRecord,
     Frame,
     FrameId,
@@ -36,11 +53,14 @@ from .domain import (
     FrameRole,
     FrameSession,
     GenerationId,
+    HandoffId,
     HostId,
     LaunchAction,
     LaunchId,
     LaunchIntent,
     LaunchState,
+    LeaseId,
+    LeaseState,
     PlacementId,
     PlacementState,
     Project,
@@ -48,9 +68,15 @@ from .domain import (
     ProjectRepository,
     ProviderId,
     ProviderSession,
+    Recovery,
+    RecoveryActionability,
+    RecoveryId,
+    RecoveryState,
     Repository,
     RepositoryId,
     RequestId,
+    RequestRecord,
+    RequestState,
     Resumability,
     RuntimePresence,
     SessionHandoff,
@@ -60,10 +86,16 @@ from .domain import (
     SurfaceState,
     TmuxServer,
     TmuxServerId,
+    TransitionBrief,
+    TransitionId,
+    TransitionKind,
+    TransitionState,
+    TransportPhase,
     UserView,
     ViewId,
     ViewMode,
     ViewState,
+    ViewTransition,
     WorkContext,
     WorkContextId,
     bounded_text,
@@ -96,6 +128,16 @@ class WorkspaceResult:
     kind: str
     work_context: WorkContext
     frame: Frame
+
+
+@dataclass(frozen=True, slots=True)
+class TransitionClaim:
+    kind: str
+    transition_id: TransitionId
+    target_frame_id: FrameId
+    brief: str | None = None
+    summary: str | None = None
+    next_action: str | None = None
 
 
 def now_ms() -> int:
@@ -248,6 +290,120 @@ def _surface(row: sqlite3.Row) -> Surface:
         int(row["created_at"]),
         int(row["updated_at"]),
         None if row["retired_at"] is None else int(row["retired_at"]),
+    )
+
+
+def _transition(row: sqlite3.Row) -> ViewTransition:
+    return ViewTransition(
+        TransitionId(row["transition_id"]),
+        RequestId(row["request_id"]),
+        str(row["request_fingerprint"]),
+        HostId(row["host_id"]),
+        ViewId(row["view_id"]),
+        TransitionKind(row["kind"]),
+        None if row["source_frame_id"] is None else FrameId(row["source_frame_id"]),
+        FrameId(row["target_frame_id"]),
+        None
+        if row["work_context_id"] is None
+        else WorkContextId(row["work_context_id"]),
+        int(row["expected_view_revision"]),
+        None
+        if row["expected_claim_generation"] is None
+        else int(row["expected_claim_generation"]),
+        TransitionState(row["state"]),
+        None if row["execution_owner"] is None else str(row["execution_owner"]),
+        None if row["lease_expires_at"] is None else int(row["lease_expires_at"]),
+        TransportPhase(row["transport_phase"]),
+        _failure_from_row(row),
+        int(row["created_at"]),
+        int(row["updated_at"]),
+    )
+
+
+def _brief(row: sqlite3.Row) -> TransitionBrief:
+    return TransitionBrief(
+        BriefId(row["brief_id"]),
+        TransitionId(row["transition_id"]),
+        FrameId(row["source_frame_id"]),
+        SessionKey.parse(row["source_session_key"]),
+        FrameId(row["target_frame_id"]),
+        str(row["brief"]),
+        str(row["content_hash"]),
+        int(row["created_at"]),
+        None if row["first_claimed_at"] is None else int(row["first_claimed_at"]),
+    )
+
+
+def _completion_handoff(row: sqlite3.Row) -> CompletionHandoff:
+    return CompletionHandoff(
+        HandoffId(row["handoff_id"]),
+        TransitionId(row["transition_id"]),
+        FrameId(row["source_frame_id"]),
+        SessionKey.parse(row["source_session_key"]),
+        FrameId(row["target_frame_id"]),
+        str(row["summary"]),
+        str(row["next_action"]),
+        str(row["content_hash"]),
+        int(row["created_at"]),
+        None if row["first_claimed_at"] is None else int(row["first_claimed_at"]),
+    )
+
+
+def _control_turn(row: sqlite3.Row) -> ControlTurn:
+    return ControlTurn(
+        ControlTurnId(row["control_turn_id"]),
+        TransitionId(row["transition_id"]),
+        FrameId(row["target_frame_id"]),
+        SessionKey.parse(row["target_session_key"]),
+        ControlKind(row["kind"]),
+        str(row["template_version"]),
+        ControlTransport(row["transport"]),
+        ControlState(row["state"]),
+        int(row["submission_count"]),
+        None if row["submitted_at"] is None else int(row["submitted_at"]),
+        None if row["observed_prompt_id"] is None else str(row["observed_prompt_id"]),
+        None if row["claimed_at"] is None else int(row["claimed_at"]),
+        None if row["settled_at"] is None else int(row["settled_at"]),
+        _failure_from_row(row),
+    )
+
+
+def _recovery(row: sqlite3.Row) -> Recovery:
+    return Recovery(
+        RecoveryId(row["recovery_id"]),
+        HostId(row["host_id"]),
+        str(row["kind"]),
+        str(row["subject_type"]),
+        str(row["subject_id"]),
+        RecoveryActionability(row["actionability"]),
+        RecoveryState(row["state"]),
+        str(row["bounded_explanation"]),
+        int(row["created_at"]),
+        int(row["updated_at"]),
+    )
+
+
+def _lease(row: sqlite3.Row) -> DesktopAttachmentLease:
+    return DesktopAttachmentLease(
+        LeaseId(row["lease_id"]),
+        ViewId(row["view_id"]),
+        RequestId(row["request_id"]),
+        LeaseState(row["state"]),
+        int(row["expires_at"]),
+    )
+
+
+def _request(row: sqlite3.Row) -> RequestRecord:
+    return RequestRecord(
+        HostId(row["host_id"]),
+        RequestId(row["request_id"]),
+        str(row["operation"]),
+        str(row["semantic_fingerprint"]),
+        RequestState(row["state"]),
+        None if row["result_type"] is None else str(row["result_type"]),
+        None if row["result_id"] is None else str(row["result_id"]),
+        int(row["created_at"]),
+        None if row["completed_at"] is None else int(row["completed_at"]),
     )
 
 
@@ -437,6 +593,31 @@ class Registry:
 
     def get_surface(self, surface_id: SurfaceId) -> Surface:
         return _surface(self._one("surfaces", "surface_id", surface_id))
+
+    def get_transition(self, transition_id: TransitionId) -> ViewTransition:
+        return _transition(
+            self._one("view_transitions", "transition_id", transition_id)
+        )
+
+    def get_control_turn(self, control_turn_id: ControlTurnId) -> ControlTurn:
+        return _control_turn(
+            self._one("control_turns", "control_turn_id", control_turn_id)
+        )
+
+    def get_recovery(self, recovery_id: RecoveryId) -> Recovery:
+        return _recovery(self._one("recoveries", "recovery_id", recovery_id))
+
+    def get_lease(self, lease_id: LeaseId) -> DesktopAttachmentLease:
+        return _lease(self._one("desktop_attachment_leases", "lease_id", lease_id))
+
+    def get_request(self, host_id: HostId, request_id: RequestId) -> RequestRecord:
+        row = self.connection.execute(
+            "SELECT * FROM request_records WHERE host_id = ? AND request_id = ?",
+            (str(host_id), str(request_id)),
+        ).fetchone()
+        if row is None:
+            raise ConflictError("not_found", "request record does not exist")
+        return _request(row)
 
     def materialize_catalog(
         self,
@@ -1070,6 +1251,86 @@ class Registry:
             )
         return self.get_work_context(work_context_id)
 
+    def create_task(
+        self, frame: Frame, placement: FramePlacement
+    ) -> tuple[Frame, FramePlacement]:
+        self._require_local_host(frame.host_id)
+        if (
+            frame.role is not FrameRole.TASK
+            or frame.lifecycle_state is not FrameLifecycleState.OPEN
+            or placement.host_id != frame.host_id
+            or placement.frame_id != frame.frame_id
+            or placement.state is not PlacementState.STAGED
+        ):
+            raise ConflictError("task_identity", "task and staged placement disagree")
+        try:
+            with self.transaction(immediate=True) as connection:
+                connection.execute(
+                    """
+                    INSERT INTO frames VALUES (
+                        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                    )
+                    """,
+                    (
+                        str(frame.frame_id),
+                        str(frame.host_id),
+                        str(frame.project_id),
+                        frame.role.value,
+                        None
+                        if frame.parent_frame_id is None
+                        else str(frame.parent_frame_id),
+                        str(frame.work_context_id),
+                        frame.title,
+                        frame.purpose,
+                        None
+                        if frame.preferred_provider is None
+                        else frame.preferred_provider.value,
+                        frame.lifecycle_state.value,
+                        None,
+                        None,
+                        frame.created_by.value,
+                        frame.created_at,
+                        frame.updated_at,
+                    ),
+                )
+                self._insert_placement(connection, placement)
+        except sqlite3.IntegrityError as error:
+            raise ConflictError("task_conflict", str(error)) from error
+        return self.get_frame(frame.frame_id), self.get_placement(
+            placement.placement_id
+        )
+
+    def advance_frame_state(
+        self,
+        frame_id: FrameId,
+        expected_state: FrameLifecycleState,
+        target: FrameLifecycleState,
+        *,
+        close_reason: CloseReason | None = None,
+        now: int | None = None,
+    ) -> Frame:
+        timestamp = _timestamp(now)
+        require_state_edge(expected_state, target, FRAME_EDGES, "frame state")
+        if (target is FrameLifecycleState.CLOSED) != (close_reason is not None):
+            raise ValueError(
+                "closed frame requires and only closed frame accepts reason"
+            )
+        with self.transaction(immediate=True) as connection:
+            changed = connection.execute(
+                "UPDATE frames SET lifecycle_state = ?, close_reason = ?, "
+                "updated_at = ? WHERE frame_id = ? AND lifecycle_state = ?",
+                (
+                    target.value,
+                    None if close_reason is None else close_reason.value,
+                    timestamp,
+                    str(frame_id),
+                    expected_state.value,
+                ),
+            ).rowcount
+            if changed != 1:
+                raise ConflictError("stale_state", "frame state changed")
+        return self.get_frame(frame_id)
+
     def record_tmux_server(self, server: TmuxServer) -> TmuxServer:
         self._require_local_host(server.host_id)
         try:
@@ -1267,6 +1528,66 @@ class Registry:
                         expected_generation + 1,
                         target.value,
                         timestamp,
+                        timestamp,
+                        str(placement_id),
+                    ),
+                )
+        except sqlite3.IntegrityError as error:
+            raise ConflictError("placement_conflict", str(error)) from error
+        return self.get_placement(placement_id)
+
+    def attach_surface_to_placement(
+        self,
+        placement_id: PlacementId,
+        expected_generation: int,
+        surface_id: SurfaceId,
+        *,
+        now: int | None = None,
+    ) -> FramePlacement:
+        """Bind a launched surface without changing staged/parked ownership state."""
+
+        timestamp = _timestamp(now)
+        try:
+            with self.transaction(immediate=True) as connection:
+                placement = connection.execute(
+                    "SELECT * FROM frame_placements WHERE placement_id = ?",
+                    (str(placement_id),),
+                ).fetchone()
+                surface = connection.execute(
+                    """
+                    SELECT surface.host_id, launch.frame_id
+                    FROM surfaces AS surface
+                    JOIN launch_intents AS launch
+                      ON launch.launch_id = surface.launch_id
+                    WHERE surface.surface_id = ?
+                    """,
+                    (str(surface_id),),
+                ).fetchone()
+                if placement is None or surface is None:
+                    raise ConflictError(
+                        "not_found", "placement or surface does not exist"
+                    )
+                record = _placement(placement)
+                if record.generation != expected_generation:
+                    raise ConflictError(
+                        "stale_generation", "placement generation changed"
+                    )
+                if record.surface_id is not None:
+                    raise ConflictError(
+                        "surface_bound", "placement already owns a surface"
+                    )
+                if surface["host_id"] != str(record.host_id) or surface[
+                    "frame_id"
+                ] != str(record.frame_id):
+                    raise ConflictError(
+                        "surface_identity", "surface launch does not match placement"
+                    )
+                connection.execute(
+                    "UPDATE frame_placements SET surface_id = ?, generation = ?, "
+                    "updated_at = ? WHERE placement_id = ?",
+                    (
+                        str(surface_id),
+                        expected_generation + 1,
                         timestamp,
                         str(placement_id),
                     ),
@@ -1688,12 +2009,17 @@ class Registry:
                     """
                     SELECT 1 FROM frame_placements AS placement
                     JOIN user_views AS view ON view.view_id = placement.view_id
+                    JOIN frames AS frame ON frame.frame_id = placement.frame_id
                     JOIN surfaces AS surface
                       ON surface.surface_id = placement.surface_id
+                    JOIN launch_intents AS launch
+                      ON launch.launch_id = surface.launch_id
                     WHERE placement.view_id = ? AND placement.frame_id = ?
                       AND placement.surface_id = ? AND placement.state = 'active'
                       AND placement.generation = ? AND view.host_id = ?
-                      AND view.state != 'retired' AND surface.launch_id = ?
+                      AND view.state = 'ready' AND view.active_frame_id = ?
+                      AND frame.current_session_key IS ?
+                      AND surface.launch_id = ? AND launch.state = 'bound'
                       AND surface.lifecycle_state = 'live'
                       AND surface.session_key IS ?
                       AND surface.tmux_server_id IS ? AND surface.pane_id IS ?
@@ -1704,6 +2030,10 @@ class Registry:
                         str(capability.surface_id),
                         capability.placement_generation,
                         str(capability.host_id),
+                        str(capability.frame_id),
+                        None
+                        if capability.session_key is None
+                        else str(capability.session_key),
                         str(capability.launch_id),
                         None
                         if capability.session_key is None
@@ -1747,6 +2077,1421 @@ class Registry:
             raise ConflictError("capability_conflict", str(error)) from error
         return capability
 
+    def revoke_capability(
+        self, capability_id: CapabilityId, *, now: int | None = None
+    ) -> None:
+        timestamp = _timestamp(now)
+        with self.transaction(immediate=True) as connection:
+            changed = connection.execute(
+                "UPDATE agent_capabilities SET revoked_at = COALESCE(revoked_at, ?) "
+                "WHERE capability_id = ?",
+                (timestamp, str(capability_id)),
+            ).rowcount
+            if changed != 1:
+                raise ConflictError("not_found", "capability does not exist")
+
+    @staticmethod
+    def _begin_request_tx(
+        connection: sqlite3.Connection,
+        host_id: HostId,
+        request_id: RequestId,
+        operation: str,
+        semantic_fingerprint: str,
+        timestamp: int,
+    ) -> RequestRecord:
+        operation = bounded_text(operation, "request.operation", maximum=64)
+        existing = connection.execute(
+            "SELECT * FROM request_records WHERE host_id = ? AND request_id = ?",
+            (str(host_id), str(request_id)),
+        ).fetchone()
+        if existing is not None:
+            record = _request(existing)
+            if (
+                record.operation != operation
+                or record.semantic_fingerprint != semantic_fingerprint
+            ):
+                raise ConflictError(
+                    "request_reuse",
+                    "request UUID was reused for different semantic input",
+                )
+            return record
+        connection.execute(
+            "INSERT INTO request_records VALUES "
+            "(?, ?, ?, ?, 'prepared', NULL, NULL, ?, NULL)",
+            (
+                str(host_id),
+                str(request_id),
+                operation,
+                semantic_fingerprint,
+                timestamp,
+            ),
+        )
+        row = connection.execute(
+            "SELECT * FROM request_records WHERE host_id = ? AND request_id = ?",
+            (str(host_id), str(request_id)),
+        ).fetchone()
+        assert row is not None
+        return _request(row)
+
+    def begin_request(
+        self,
+        host_id: HostId,
+        request_id: RequestId,
+        operation: str,
+        semantic_fingerprint: str,
+        *,
+        now: int | None = None,
+    ) -> RequestRecord:
+        self._require_local_host(host_id)
+        timestamp = _timestamp(now)
+        with self.transaction(immediate=True) as connection:
+            return self._begin_request_tx(
+                connection,
+                host_id,
+                request_id,
+                operation,
+                semantic_fingerprint,
+                timestamp,
+            )
+
+    def settle_request(
+        self,
+        host_id: HostId,
+        request_id: RequestId,
+        target: RequestState,
+        *,
+        result_type: str | None = None,
+        result_id: str | None = None,
+        now: int | None = None,
+    ) -> RequestRecord:
+        self._require_local_host(host_id)
+        if target not in {RequestState.COMPLETED, RequestState.FAILED}:
+            raise ValueError("request may settle only as completed or failed")
+        timestamp = _timestamp(now)
+        with self.transaction(immediate=True) as connection:
+            row = connection.execute(
+                "SELECT * FROM request_records WHERE host_id = ? AND request_id = ?",
+                (str(host_id), str(request_id)),
+            ).fetchone()
+            if row is None:
+                raise ConflictError("not_found", "request does not exist")
+            current = _request(row)
+            if current.state is target:
+                if current.result_type != result_type or current.result_id != result_id:
+                    raise ConflictError(
+                        "request_result", "settled request result is immutable"
+                    )
+                return current
+            require_state_edge(current.state, target, REQUEST_EDGES, "request state")
+            connection.execute(
+                "UPDATE request_records SET state = ?, result_type = ?, "
+                "result_id = ?, completed_at = ? WHERE host_id = ? AND request_id = ?",
+                (
+                    target.value,
+                    result_type,
+                    result_id,
+                    timestamp,
+                    str(host_id),
+                    str(request_id),
+                ),
+            )
+        return self.get_request(host_id, request_id)
+
+    def prepare_transition(self, transition: ViewTransition) -> ViewTransition:
+        self._require_local_host(transition.host_id)
+        if (
+            transition.state is not TransitionState.PREPARED
+            or transition.transport_phase is not TransportPhase.INTENT
+            or transition.execution_owner is not None
+            or transition.lease_expires_at is not None
+            or transition.failure is not None
+        ):
+            raise ConflictError(
+                "transition_initial", "transition is not a clean prepared intent"
+            )
+        try:
+            with self.transaction(immediate=True) as connection:
+                existing = connection.execute(
+                    "SELECT * FROM view_transitions "
+                    "WHERE host_id = ? AND request_id = ?",
+                    (str(transition.host_id), str(transition.request_id)),
+                ).fetchone()
+                request = self._begin_request_tx(
+                    connection,
+                    transition.host_id,
+                    transition.request_id,
+                    f"transition.{transition.kind.value}",
+                    transition.request_fingerprint,
+                    transition.created_at,
+                )
+                if existing is not None:
+                    record = _transition(existing)
+                    if record.transition_id != transition.transition_id:
+                        raise ConflictError(
+                            "request_result",
+                            "request already identifies another transition",
+                        )
+                    return record
+                if request.state is not RequestState.PREPARED:
+                    raise ConflictError(
+                        "request_settled", "settled request has no matching transition"
+                    )
+                view = connection.execute(
+                    "SELECT * FROM user_views WHERE view_id = ?",
+                    (str(transition.view_id),),
+                ).fetchone()
+                target = connection.execute(
+                    "SELECT host_id, work_context_id, lifecycle_state "
+                    "FROM frames WHERE frame_id = ?",
+                    (str(transition.target_frame_id),),
+                ).fetchone()
+                if view is None or target is None:
+                    raise ConflictError(
+                        "not_found", "view or target frame does not exist"
+                    )
+                if (
+                    view["host_id"] != str(transition.host_id)
+                    or view["revision"] != transition.expected_view_revision
+                    or view["state"]
+                    not in {ViewState.READY.value, ViewState.DEGRADED.value}
+                    or target["host_id"] != str(transition.host_id)
+                    or target["lifecycle_state"] != FrameLifecycleState.OPEN.value
+                ):
+                    raise ConflictError(
+                        "transition_precondition", "view revision or host changed"
+                    )
+                if transition.source_frame_id is not None:
+                    source = connection.execute(
+                        "SELECT host_id FROM frames WHERE frame_id = ?",
+                        (str(transition.source_frame_id),),
+                    ).fetchone()
+                    if source is None or source["host_id"] != str(transition.host_id):
+                        raise ConflictError(
+                            "transition_source", "source frame does not match host"
+                        )
+                if transition.work_context_id is not None:
+                    context = connection.execute(
+                        "SELECT claim_generation FROM work_contexts "
+                        "WHERE work_context_id = ?",
+                        (str(transition.work_context_id),),
+                    ).fetchone()
+                    if (
+                        context is None
+                        or transition.expected_claim_generation is None
+                        or context["claim_generation"]
+                        != transition.expected_claim_generation
+                        or target["work_context_id"] != str(transition.work_context_id)
+                    ):
+                        raise ConflictError(
+                            "transition_claim", "WorkContext generation changed"
+                        )
+                connection.execute(
+                    """
+                    INSERT INTO view_transitions VALUES (
+                        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                    )
+                    """,
+                    (
+                        str(transition.transition_id),
+                        str(transition.request_id),
+                        transition.request_fingerprint,
+                        str(transition.host_id),
+                        str(transition.view_id),
+                        transition.kind.value,
+                        None
+                        if transition.source_frame_id is None
+                        else str(transition.source_frame_id),
+                        str(transition.target_frame_id),
+                        None
+                        if transition.work_context_id is None
+                        else str(transition.work_context_id),
+                        transition.expected_view_revision,
+                        transition.expected_claim_generation,
+                        transition.state.value,
+                        None,
+                        None,
+                        transition.transport_phase.value,
+                        None,
+                        None,
+                        None,
+                        transition.created_at,
+                        transition.updated_at,
+                    ),
+                )
+        except sqlite3.IntegrityError as error:
+            raise ConflictError("transition_conflict", str(error)) from error
+        return self.get_transition(transition.transition_id)
+
+    def claim_transition_execution(
+        self,
+        transition_id: TransitionId,
+        execution_owner: str,
+        lease_expires_at: int,
+        *,
+        now: int | None = None,
+    ) -> ViewTransition:
+        timestamp = _timestamp(now)
+        execution_owner = bounded_text(execution_owner, "execution_owner", maximum=128)
+        if lease_expires_at <= timestamp:
+            raise ValueError("transition execution lease must be in the future")
+        with self.transaction(immediate=True) as connection:
+            row = connection.execute(
+                "SELECT * FROM view_transitions WHERE transition_id = ?",
+                (str(transition_id),),
+            ).fetchone()
+            if row is None:
+                raise ConflictError("not_found", "transition does not exist")
+            transition = _transition(row)
+            require_state_edge(
+                transition.state,
+                TransitionState.EXECUTING,
+                TRANSITION_EDGES,
+                "transition state",
+            )
+            view = connection.execute(
+                "SELECT * FROM user_views WHERE view_id = ?",
+                (str(transition.view_id),),
+            ).fetchone()
+            assert view is not None
+            if view["revision"] != transition.expected_view_revision or view[
+                "state"
+            ] not in {ViewState.READY.value, ViewState.DEGRADED.value}:
+                raise ConflictError("stale_revision", "view revision or state changed")
+            if transition.source_frame_id is not None:
+                source = connection.execute(
+                    "SELECT state FROM frame_placements WHERE view_id = ? "
+                    "AND frame_id = ?",
+                    (str(transition.view_id), str(transition.source_frame_id)),
+                ).fetchone()
+                if source is None or source["state"] != PlacementState.ACTIVE.value:
+                    raise ConflictError(
+                        "source_placement", "source is not the active placement"
+                    )
+            target = connection.execute(
+                "SELECT state FROM frame_placements WHERE view_id = ? AND frame_id = ?",
+                (str(transition.view_id), str(transition.target_frame_id)),
+            ).fetchone()
+            if target is None or target["state"] not in {
+                PlacementState.ACTIVE.value,
+                PlacementState.PARKED.value,
+                PlacementState.STAGED.value,
+            }:
+                raise ConflictError(
+                    "target_placement", "target placement is unavailable"
+                )
+            if transition.work_context_id is not None:
+                context = connection.execute(
+                    "SELECT claim_generation FROM work_contexts "
+                    "WHERE work_context_id = ?",
+                    (str(transition.work_context_id),),
+                ).fetchone()
+                if (
+                    context is None
+                    or context["claim_generation"]
+                    != transition.expected_claim_generation
+                ):
+                    raise ConflictError(
+                        "stale_generation", "WorkContext generation changed"
+                    )
+            connection.execute(
+                "UPDATE view_transitions SET state = 'executing', "
+                "execution_owner = ?, lease_expires_at = ?, updated_at = ? "
+                "WHERE transition_id = ?",
+                (execution_owner, lease_expires_at, timestamp, str(transition_id)),
+            )
+            connection.execute(
+                "UPDATE user_views SET state = 'transitioning', "
+                "revision = revision + 1, updated_at = ? WHERE view_id = ?",
+                (timestamp, str(transition.view_id)),
+            )
+        return self.get_transition(transition_id)
+
+    def reclaim_transition_execution(
+        self,
+        transition_id: TransitionId,
+        execution_owner: str,
+        lease_expires_at: int,
+        *,
+        now: int | None = None,
+    ) -> ViewTransition:
+        timestamp = _timestamp(now)
+        execution_owner = bounded_text(execution_owner, "execution_owner", maximum=128)
+        if lease_expires_at <= timestamp:
+            raise ValueError("transition execution lease must be in the future")
+        with self.transaction(immediate=True) as connection:
+            row = connection.execute(
+                "SELECT * FROM view_transitions WHERE transition_id = ?",
+                (str(transition_id),),
+            ).fetchone()
+            if row is None:
+                raise ConflictError("not_found", "transition does not exist")
+            transition = _transition(row)
+            if transition.state is not TransitionState.EXECUTING:
+                raise ConflictError("transition_state", "transition is not executing")
+            if (
+                transition.lease_expires_at is None
+                or transition.lease_expires_at > timestamp
+            ):
+                raise ConflictError("lease_active", "transition lease is still active")
+            connection.execute(
+                "UPDATE view_transitions SET execution_owner = ?, "
+                "lease_expires_at = ?, updated_at = ? WHERE transition_id = ?",
+                (execution_owner, lease_expires_at, timestamp, str(transition_id)),
+            )
+        return self.get_transition(transition_id)
+
+    @staticmethod
+    def _require_execution_owner(
+        transition: ViewTransition, execution_owner: str, timestamp: int
+    ) -> None:
+        if transition.execution_owner != execution_owner:
+            raise ConflictError("execution_owner", "transition execution owner changed")
+        if (
+            transition.lease_expires_at is None
+            or transition.lease_expires_at <= timestamp
+        ):
+            raise ConflictError("lease_expired", "transition execution lease expired")
+
+    def advance_transport_phase(
+        self,
+        transition_id: TransitionId,
+        execution_owner: str,
+        expected_phase: TransportPhase,
+        target: TransportPhase,
+        *,
+        now: int | None = None,
+    ) -> ViewTransition:
+        timestamp = _timestamp(now)
+        require_state_edge(expected_phase, target, TRANSPORT_EDGES, "transport phase")
+        with self.transaction(immediate=True) as connection:
+            row = connection.execute(
+                "SELECT * FROM view_transitions WHERE transition_id = ?",
+                (str(transition_id),),
+            ).fetchone()
+            if row is None:
+                raise ConflictError("not_found", "transition does not exist")
+            transition = _transition(row)
+            self._require_execution_owner(transition, execution_owner, timestamp)
+            if (
+                transition.state is not TransitionState.EXECUTING
+                or transition.transport_phase is not expected_phase
+            ):
+                raise ConflictError(
+                    "stale_state", "transition or transport state changed"
+                )
+            connection.execute(
+                "UPDATE view_transitions SET transport_phase = ?, updated_at = ? "
+                "WHERE transition_id = ?",
+                (target.value, timestamp, str(transition_id)),
+            )
+        return self.get_transition(transition_id)
+
+    def commit_transition_presentation(
+        self,
+        transition_id: TransitionId,
+        execution_owner: str,
+        *,
+        now: int | None = None,
+    ) -> ViewTransition:
+        """Commit inspected presentation, placement, view, and foreground atomically."""
+
+        timestamp = _timestamp(now)
+        try:
+            with self.transaction(immediate=True) as connection:
+                row = connection.execute(
+                    "SELECT * FROM view_transitions WHERE transition_id = ?",
+                    (str(transition_id),),
+                ).fetchone()
+                if row is None:
+                    raise ConflictError("not_found", "transition does not exist")
+                transition = _transition(row)
+                self._require_execution_owner(transition, execution_owner, timestamp)
+                if (
+                    transition.state is not TransitionState.EXECUTING
+                    or transition.transport_phase is not TransportPhase.INSPECTED
+                ):
+                    raise ConflictError(
+                        "transition_state", "presentation has not been inspected"
+                    )
+                view = connection.execute(
+                    "SELECT * FROM user_views WHERE view_id = ?",
+                    (str(transition.view_id),),
+                ).fetchone()
+                assert view is not None
+                if (
+                    view["state"] != ViewState.TRANSITIONING.value
+                    or view["revision"] != transition.expected_view_revision + 1
+                ):
+                    raise ConflictError(
+                        "stale_revision", "transitioning view revision changed"
+                    )
+                target = connection.execute(
+                    "SELECT * FROM frame_placements WHERE view_id = ? AND frame_id = ?",
+                    (str(transition.view_id), str(transition.target_frame_id)),
+                ).fetchone()
+                if target is None:
+                    raise ConflictError(
+                        "target_placement", "target placement is missing"
+                    )
+                target_placement = _placement(target)
+                same_frame = transition.source_frame_id == transition.target_frame_id
+                if same_frame:
+                    if target_placement.state is not PlacementState.ACTIVE:
+                        raise ConflictError(
+                            "target_placement", "same-frame target is not active"
+                        )
+                else:
+                    source = connection.execute(
+                        "SELECT * FROM frame_placements WHERE view_id = ? "
+                        "AND frame_id = ?",
+                        (
+                            str(transition.view_id),
+                            None
+                            if transition.source_frame_id is None
+                            else str(transition.source_frame_id),
+                        ),
+                    ).fetchone()
+                    if source is None or source["state"] != PlacementState.ACTIVE.value:
+                        raise ConflictError(
+                            "source_placement", "source placement is not active"
+                        )
+                    require_state_edge(
+                        PlacementState(source["state"]),
+                        PlacementState.PARKED,
+                        PLACEMENT_EDGES,
+                        "placement state",
+                    )
+                    require_state_edge(
+                        target_placement.state,
+                        PlacementState.ACTIVE,
+                        PLACEMENT_EDGES,
+                        "placement state",
+                    )
+                    connection.execute(
+                        "UPDATE frame_placements SET state = 'parked', "
+                        "generation = generation + 1, updated_at = ? "
+                        "WHERE placement_id = ?",
+                        (timestamp, source["placement_id"]),
+                    )
+                    connection.execute(
+                        "UPDATE frame_placements SET state = 'active', "
+                        "generation = generation + 1, last_focused_at = ?, "
+                        "updated_at = ? WHERE placement_id = ?",
+                        (
+                            timestamp,
+                            timestamp,
+                            str(target_placement.placement_id),
+                        ),
+                    )
+                    if target_placement.surface_id is not None:
+                        connection.execute(
+                            "UPDATE agent_capabilities SET placement_generation = ? "
+                            "WHERE surface_id = ? AND revoked_at IS NULL",
+                            (
+                                target_placement.generation + 1,
+                                str(target_placement.surface_id),
+                            ),
+                        )
+                if transition.work_context_id is not None:
+                    context = connection.execute(
+                        "SELECT * FROM work_contexts WHERE work_context_id = ?",
+                        (str(transition.work_context_id),),
+                    ).fetchone()
+                    if (
+                        context is None
+                        or context["claim_state"] != ClaimState.HELD.value
+                        or context["claim_generation"]
+                        != transition.expected_claim_generation
+                    ):
+                        raise ConflictError(
+                            "stale_generation", "WorkContext claim changed"
+                        )
+                    connection.execute(
+                        "UPDATE work_contexts SET foreground_frame_id = ?, "
+                        "claim_generation = claim_generation + 1, updated_at = ? "
+                        "WHERE work_context_id = ?",
+                        (
+                            str(transition.target_frame_id),
+                            timestamp,
+                            str(transition.work_context_id),
+                        ),
+                    )
+                connection.execute(
+                    "UPDATE user_views SET state = 'ready', active_frame_id = ?, "
+                    "revision = revision + 1, updated_at = ? WHERE view_id = ?",
+                    (
+                        str(transition.target_frame_id),
+                        timestamp,
+                        str(transition.view_id),
+                    ),
+                )
+                connection.execute(
+                    "UPDATE view_transitions SET state = 'presented', "
+                    "transport_phase = 'committed', updated_at = ? "
+                    "WHERE transition_id = ?",
+                    (timestamp, str(transition_id)),
+                )
+        except sqlite3.IntegrityError as error:
+            raise ConflictError("presentation_conflict", str(error)) from error
+        return self.get_transition(transition_id)
+
+    def advance_transition_state(
+        self,
+        transition_id: TransitionId,
+        expected_state: TransitionState,
+        target: TransitionState,
+        *,
+        execution_owner: str | None = None,
+        failure: FailureRecord | None = None,
+        now: int | None = None,
+    ) -> ViewTransition:
+        if target is TransitionState.PRESENTED:
+            raise ValueError("use commit_transition_presentation for presentation")
+        if (target is TransitionState.FAILED) != (failure is not None):
+            raise ValueError(
+                "failed transition requires and only failed transition accepts failure"
+            )
+        timestamp = _timestamp(now)
+        require_state_edge(expected_state, target, TRANSITION_EDGES, "transition state")
+        with self.transaction(immediate=True) as connection:
+            row = connection.execute(
+                "SELECT * FROM view_transitions WHERE transition_id = ?",
+                (str(transition_id),),
+            ).fetchone()
+            if row is None:
+                raise ConflictError("not_found", "transition does not exist")
+            transition = _transition(row)
+            if transition.state is not expected_state:
+                raise ConflictError("stale_state", "transition state changed")
+            if (
+                transition.execution_owner is not None
+                and execution_owner != transition.execution_owner
+            ):
+                raise ConflictError(
+                    "execution_owner", "transition execution owner changed"
+                )
+            if target is TransitionState.COMPLETED and (
+                transition.transport_phase is not TransportPhase.COMMITTED
+            ):
+                raise ConflictError(
+                    "transport_uncommitted", "transition transport is not committed"
+                )
+            connection.execute(
+                "UPDATE view_transitions SET state = ?, failure_code = ?, "
+                "failure_message = ?, failure_retryable = ?, updated_at = ? "
+                "WHERE transition_id = ?",
+                (
+                    target.value,
+                    None if failure is None else failure.code,
+                    None if failure is None else failure.message,
+                    None if failure is None else failure.retryable,
+                    timestamp,
+                    str(transition_id),
+                ),
+            )
+            if target in {
+                TransitionState.COMPLETED,
+                TransitionState.CANCELLED,
+                TransitionState.SUPERSEDED,
+                TransitionState.FAILED,
+            }:
+                request_target = (
+                    RequestState.COMPLETED
+                    if target is TransitionState.COMPLETED
+                    else RequestState.FAILED
+                )
+                connection.execute(
+                    "UPDATE request_records SET state = ?, result_type = 'transition', "
+                    "result_id = ?, completed_at = ? WHERE host_id = ? "
+                    "AND request_id = ? AND state = 'prepared'",
+                    (
+                        request_target.value,
+                        str(transition_id),
+                        timestamp,
+                        str(transition.host_id),
+                        str(transition.request_id),
+                    ),
+                )
+                if target is not TransitionState.COMPLETED:
+                    connection.execute(
+                        "UPDATE user_views SET state = 'degraded', "
+                        "revision = revision + 1, updated_at = ? "
+                        "WHERE view_id = ? AND state = 'transitioning'",
+                        (timestamp, str(transition.view_id)),
+                    )
+        return self.get_transition(transition_id)
+
+    def store_transition_brief(self, brief: TransitionBrief) -> TransitionBrief:
+        values = (
+            str(brief.brief_id),
+            str(brief.transition_id),
+            str(brief.source_frame_id),
+            str(brief.source_session_key),
+            str(brief.target_frame_id),
+            brief.brief,
+            brief.content_hash,
+            brief.created_at,
+            brief.first_claimed_at,
+        )
+        with self.transaction(immediate=True) as connection:
+            transition_row = connection.execute(
+                "SELECT * FROM view_transitions WHERE transition_id = ?",
+                (str(brief.transition_id),),
+            ).fetchone()
+            if transition_row is None:
+                raise ConflictError("not_found", "transition does not exist")
+            transition = _transition(transition_row)
+            if (
+                transition.kind is not TransitionKind.PUSH
+                or transition.source_frame_id != brief.source_frame_id
+                or transition.target_frame_id != brief.target_frame_id
+            ):
+                raise ConflictError(
+                    "brief_identity", "brief does not match push transition"
+                )
+            source_session = connection.execute(
+                "SELECT 1 FROM frames AS frame "
+                "JOIN frame_sessions AS membership "
+                "ON membership.frame_id = frame.frame_id "
+                "WHERE frame.frame_id = ? AND membership.session_key = ? "
+                "AND frame.current_session_key = ?",
+                (
+                    str(brief.source_frame_id),
+                    str(brief.source_session_key),
+                    str(brief.source_session_key),
+                ),
+            ).fetchone()
+            if source_session is None:
+                raise ConflictError(
+                    "brief_session", "brief source session is not current for frame"
+                )
+            existing = connection.execute(
+                "SELECT * FROM transition_briefs WHERE brief_id = ? "
+                "OR transition_id = ?",
+                (str(brief.brief_id), str(brief.transition_id)),
+            ).fetchone()
+            if existing is not None:
+                if tuple(existing)[:-1] != values[:-1]:
+                    raise ConflictError("brief_conflict", "brief content is immutable")
+                return _brief(existing)
+            connection.execute(
+                "INSERT INTO transition_briefs VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                values,
+            )
+        return brief
+
+    def store_completion_handoff(self, handoff: CompletionHandoff) -> CompletionHandoff:
+        values = (
+            str(handoff.handoff_id),
+            str(handoff.transition_id),
+            str(handoff.source_frame_id),
+            str(handoff.source_session_key),
+            str(handoff.target_frame_id),
+            handoff.summary,
+            handoff.next_action,
+            handoff.content_hash,
+            handoff.created_at,
+            handoff.first_claimed_at,
+        )
+        with self.transaction(immediate=True) as connection:
+            transition_row = connection.execute(
+                "SELECT * FROM view_transitions WHERE transition_id = ?",
+                (str(handoff.transition_id),),
+            ).fetchone()
+            if transition_row is None:
+                raise ConflictError("not_found", "transition does not exist")
+            transition = _transition(transition_row)
+            if (
+                transition.kind is not TransitionKind.COMPLETE_RETURN
+                or transition.source_frame_id != handoff.source_frame_id
+                or transition.target_frame_id != handoff.target_frame_id
+            ):
+                raise ConflictError(
+                    "handoff_identity",
+                    "completion handoff does not match transition",
+                )
+            source_session = connection.execute(
+                "SELECT 1 FROM frames AS frame "
+                "JOIN frame_sessions AS membership "
+                "ON membership.frame_id = frame.frame_id "
+                "WHERE frame.frame_id = ? AND membership.session_key = ? "
+                "AND frame.current_session_key = ?",
+                (
+                    str(handoff.source_frame_id),
+                    str(handoff.source_session_key),
+                    str(handoff.source_session_key),
+                ),
+            ).fetchone()
+            if source_session is None:
+                raise ConflictError(
+                    "handoff_session",
+                    "completion source session is not current for frame",
+                )
+            existing = connection.execute(
+                "SELECT * FROM completion_handoffs WHERE handoff_id = ? "
+                "OR transition_id = ?",
+                (str(handoff.handoff_id), str(handoff.transition_id)),
+            ).fetchone()
+            if existing is not None:
+                if tuple(existing)[:-1] != values[:-1]:
+                    raise ConflictError(
+                        "handoff_conflict", "completion handoff content is immutable"
+                    )
+                return _completion_handoff(existing)
+            frame = connection.execute(
+                "SELECT lifecycle_state FROM frames WHERE frame_id = ?",
+                (str(handoff.source_frame_id),),
+            ).fetchone()
+            if (
+                frame is None
+                or frame["lifecycle_state"] != FrameLifecycleState.OPEN.value
+            ):
+                raise ConflictError(
+                    "frame_state", "completion source frame is not open"
+                )
+            connection.execute(
+                "INSERT INTO completion_handoffs VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                values,
+            )
+            connection.execute(
+                "UPDATE frames SET lifecycle_state = 'closing', updated_at = ? "
+                "WHERE frame_id = ?",
+                (handoff.created_at, str(handoff.source_frame_id)),
+            )
+        return handoff
+
+    def prepare_control_turn(self, control: ControlTurn) -> ControlTurn:
+        if (
+            control.state is not ControlState.PREPARED
+            or control.submission_count != 0
+            or any(
+                value is not None
+                for value in (
+                    control.submitted_at,
+                    control.observed_prompt_id,
+                    control.claimed_at,
+                    control.settled_at,
+                    control.failure,
+                )
+            )
+        ):
+            raise ConflictError(
+                "control_initial", "control turn is not a clean prepared record"
+            )
+        try:
+            with self.transaction(immediate=True) as connection:
+                existing = connection.execute(
+                    "SELECT * FROM control_turns WHERE control_turn_id = ? "
+                    "OR transition_id = ?",
+                    (str(control.control_turn_id), str(control.transition_id)),
+                ).fetchone()
+                if existing is not None:
+                    persisted = _control_turn(existing)
+                    if (
+                        persisted.control_turn_id != control.control_turn_id
+                        or persisted.transition_id != control.transition_id
+                        or persisted.target_frame_id != control.target_frame_id
+                        or persisted.target_session_key != control.target_session_key
+                        or persisted.kind != control.kind
+                        or persisted.template_version != control.template_version
+                        or persisted.transport != control.transport
+                    ):
+                        raise ConflictError(
+                            "control_conflict", "control turn identity is immutable"
+                        )
+                    return persisted
+                transition_row = connection.execute(
+                    "SELECT * FROM view_transitions WHERE transition_id = ?",
+                    (str(control.transition_id),),
+                ).fetchone()
+                frame = connection.execute(
+                    "SELECT current_session_key FROM frames WHERE frame_id = ?",
+                    (str(control.target_frame_id),),
+                ).fetchone()
+                if transition_row is None or frame is None:
+                    raise ConflictError(
+                        "not_found", "transition or frame does not exist"
+                    )
+                transition = _transition(transition_row)
+                expected_kind = (
+                    ControlKind.CLAIM_BRIEF
+                    if transition.kind is TransitionKind.PUSH
+                    else ControlKind.CLAIM_HANDOFF
+                )
+                semantic_table = (
+                    "transition_briefs"
+                    if control.kind is ControlKind.CLAIM_BRIEF
+                    else "completion_handoffs"
+                )
+                if (
+                    control.target_frame_id != transition.target_frame_id
+                    or control.kind is not expected_kind
+                    or frame["current_session_key"] != str(control.target_session_key)
+                    or connection.execute(
+                        f"SELECT 1 FROM {semantic_table} WHERE transition_id = ?",
+                        (str(control.transition_id),),
+                    ).fetchone()
+                    is None
+                ):
+                    raise ConflictError(
+                        "control_identity",
+                        "control turn target or semantic record differs",
+                    )
+                connection.execute(
+                    """
+                    INSERT INTO control_turns VALUES (
+                        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                    )
+                    """,
+                    (
+                        str(control.control_turn_id),
+                        str(control.transition_id),
+                        str(control.target_frame_id),
+                        str(control.target_session_key),
+                        control.kind.value,
+                        control.template_version,
+                        control.transport.value,
+                        control.state.value,
+                        0,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                    ),
+                )
+        except sqlite3.IntegrityError as error:
+            raise ConflictError("control_conflict", str(error)) from error
+        return self.get_control_turn(control.control_turn_id)
+
+    def advance_control_turn(
+        self,
+        control_turn_id: ControlTurnId,
+        expected_state: ControlState,
+        target: ControlState,
+        *,
+        observed_prompt_id: str | None = None,
+        failure: FailureRecord | None = None,
+        now: int | None = None,
+    ) -> ControlTurn:
+        timestamp = _timestamp(now)
+        require_state_edge(expected_state, target, CONTROL_EDGES, "control state")
+        if (target is ControlState.FAILED) != (failure is not None):
+            raise ValueError(
+                "failed control requires and only failed control accepts failure"
+            )
+        if target is ControlState.OBSERVED and observed_prompt_id is None:
+            raise ValueError("observed control requires prompt identity")
+        if observed_prompt_id is not None:
+            observed_prompt_id = bounded_text(
+                observed_prompt_id, "observed_prompt_id", maximum=256
+            )
+        with self.transaction(immediate=True) as connection:
+            row = connection.execute(
+                "SELECT * FROM control_turns WHERE control_turn_id = ?",
+                (str(control_turn_id),),
+            ).fetchone()
+            if row is None:
+                raise ConflictError("not_found", "control turn does not exist")
+            control = _control_turn(row)
+            if control.state is not expected_state:
+                raise ConflictError("stale_state", "control state changed")
+            submission_count = control.submission_count
+            submitted_at = control.submitted_at
+            claimed_at = control.claimed_at
+            settled_at = control.settled_at
+            if target is ControlState.SUBMITTED:
+                if submission_count != 0:
+                    raise ConflictError(
+                        "already_submitted", "control turn cannot be submitted twice"
+                    )
+                submission_count = 1
+                submitted_at = timestamp
+            if target is ControlState.CLAIMED:
+                claimed_at = timestamp
+            if target is ControlState.SETTLED:
+                settled_at = timestamp
+            connection.execute(
+                """
+                UPDATE control_turns SET state = ?, submission_count = ?,
+                    submitted_at = ?,
+                    observed_prompt_id = COALESCE(?, observed_prompt_id),
+                    claimed_at = ?, settled_at = ?, failure_code = ?,
+                    failure_message = ?, failure_retryable = ?
+                WHERE control_turn_id = ?
+                """,
+                (
+                    target.value,
+                    submission_count,
+                    submitted_at,
+                    observed_prompt_id,
+                    claimed_at,
+                    settled_at,
+                    None if failure is None else failure.code,
+                    None if failure is None else failure.message,
+                    None if failure is None else failure.retryable,
+                    str(control_turn_id),
+                ),
+            )
+        return self.get_control_turn(control_turn_id)
+
+    @staticmethod
+    def _validate_capability_tx(
+        connection: sqlite3.Connection,
+        raw_capability: str,
+        timestamp: int,
+    ) -> sqlite3.Row:
+        digest = sha256(raw_capability.encode("utf-8")).hexdigest()
+        row = connection.execute(
+            """
+            SELECT capability.*, placement.state AS placement_state,
+                   placement.generation AS current_placement_generation,
+                   view.state AS current_view_state,
+                   view.active_frame_id AS current_active_frame_id,
+                   frame.current_session_key AS frame_session_key,
+                   surface.lifecycle_state AS current_surface_state,
+                   surface.session_key AS current_session_key,
+                   surface.launch_id AS current_launch_id,
+                   surface.tmux_server_id AS current_tmux_server_id,
+                   surface.pane_id AS current_pane_id,
+                   launch.state AS current_launch_state
+            FROM agent_capabilities AS capability
+            JOIN frame_placements AS placement
+              ON placement.view_id = capability.view_id
+             AND placement.frame_id = capability.frame_id
+             AND placement.surface_id = capability.surface_id
+            JOIN user_views AS view ON view.view_id = capability.view_id
+            JOIN frames AS frame ON frame.frame_id = capability.frame_id
+            JOIN surfaces AS surface ON surface.surface_id = capability.surface_id
+            JOIN launch_intents AS launch ON launch.launch_id = capability.launch_id
+            WHERE capability.capability_digest = ?
+            """,
+            (digest,),
+        ).fetchone()
+        if row is None:
+            raise ConflictError("capability_invalid", "capability is unknown")
+        if row["revoked_at"] is not None or row["expires_at"] <= timestamp:
+            raise ConflictError("capability_expired", "capability expired or revoked")
+        if (
+            row["placement_state"] != PlacementState.ACTIVE.value
+            or row["current_placement_generation"] != row["placement_generation"]
+            or row["current_view_state"] != ViewState.READY.value
+            or row["current_active_frame_id"] != row["frame_id"]
+            or row["frame_session_key"] != row["session_key"]
+            or row["current_surface_state"] != SurfaceState.LIVE.value
+            or row["current_session_key"] != row["session_key"]
+            or row["current_launch_id"] != row["launch_id"]
+            or row["current_tmux_server_id"] != row["tmux_server_id"]
+            or row["current_pane_id"] != row["pane_id"]
+            or row["current_launch_state"] != LaunchState.BOUND.value
+        ):
+            raise ConflictError(
+                "capability_stale", "capability no longer matches active ownership"
+            )
+        return row
+
+    def validate_capability(
+        self, raw_capability: str, *, now: int | None = None
+    ) -> AgentCapability:
+        timestamp = _timestamp(now)
+        row = self._validate_capability_tx(self.connection, raw_capability, timestamp)
+        return AgentCapability(
+            CapabilityId(row["capability_id"]),
+            str(row["capability_digest"]),
+            HostId(row["host_id"]),
+            ViewId(row["view_id"]),
+            FrameId(row["frame_id"]),
+            None
+            if row["session_key"] is None
+            else SessionKey.parse(row["session_key"]),
+            SurfaceId(row["surface_id"]),
+            LaunchId(row["launch_id"]),
+            None
+            if row["tmux_server_id"] is None
+            else TmuxServerId(row["tmux_server_id"]),
+            None if row["pane_id"] is None else str(row["pane_id"]),
+            int(row["placement_generation"]),
+            int(row["issued_at"]),
+            int(row["expires_at"]),
+            None if row["revoked_at"] is None else int(row["revoked_at"]),
+        )
+
+    def transition_claim(
+        self,
+        transition_id: TransitionId,
+        target_session_key: SessionKey,
+        raw_capability: str,
+        *,
+        now: int | None = None,
+    ) -> TransitionClaim:
+        timestamp = _timestamp(now)
+        with self.transaction(immediate=True) as connection:
+            capability = self._validate_capability_tx(
+                connection, raw_capability, timestamp
+            )
+            transition_row = connection.execute(
+                "SELECT * FROM view_transitions WHERE transition_id = ?",
+                (str(transition_id),),
+            ).fetchone()
+            if transition_row is None:
+                raise ConflictError("not_found", "transition does not exist")
+            transition = _transition(transition_row)
+            if transition.state not in {
+                TransitionState.AWAITING_CLAIM,
+                TransitionState.SETTLING,
+                TransitionState.COMPLETED,
+            }:
+                raise ConflictError(
+                    "transition_state", "transition is not awaiting a claim"
+                )
+            if capability["frame_id"] != str(transition.target_frame_id) or capability[
+                "session_key"
+            ] != str(target_session_key):
+                raise ConflictError(
+                    "claim_identity", "capability does not identify transition target"
+                )
+            frame = connection.execute(
+                "SELECT current_session_key FROM frames WHERE frame_id = ?",
+                (str(transition.target_frame_id),),
+            ).fetchone()
+            if frame is None or frame["current_session_key"] != str(target_session_key):
+                raise ConflictError(
+                    "claim_session", "target session is not current for frame"
+                )
+            if transition.work_context_id is not None:
+                context = connection.execute(
+                    "SELECT claim_state, claim_generation, foreground_frame_id "
+                    "FROM work_contexts WHERE work_context_id = ?",
+                    (str(transition.work_context_id),),
+                ).fetchone()
+                expected_generation = transition.expected_claim_generation
+                assert expected_generation is not None
+                if (
+                    context is None
+                    or context["claim_state"] != ClaimState.HELD.value
+                    or context["claim_generation"] != expected_generation + 1
+                    or context["foreground_frame_id"] != str(transition.target_frame_id)
+                ):
+                    raise ConflictError(
+                        "claim_generation", "foreground claim transfer is not exact"
+                    )
+            brief_row = connection.execute(
+                "SELECT * FROM transition_briefs WHERE transition_id = ?",
+                (str(transition_id),),
+            ).fetchone()
+            handoff_row = connection.execute(
+                "SELECT * FROM completion_handoffs WHERE transition_id = ?",
+                (str(transition_id),),
+            ).fetchone()
+            if (brief_row is None) == (handoff_row is None):
+                raise ConflictError(
+                    "claim_semantic", "transition must have exactly one semantic record"
+                )
+            control_row = connection.execute(
+                "SELECT * FROM control_turns WHERE transition_id = ?",
+                (str(transition_id),),
+            ).fetchone()
+            if control_row is not None:
+                control = _control_turn(control_row)
+                if (
+                    control.target_session_key != target_session_key
+                    or control.target_frame_id != transition.target_frame_id
+                ):
+                    raise ConflictError(
+                        "control_identity", "control turn target differs from claim"
+                    )
+                if control.state not in {
+                    ControlState.OBSERVED,
+                    ControlState.UNCERTAIN,
+                    ControlState.CLAIMED,
+                    ControlState.SETTLED,
+                }:
+                    raise ConflictError(
+                        "control_state", "control turn is not claimable"
+                    )
+                if control.state in {ControlState.OBSERVED, ControlState.UNCERTAIN}:
+                    connection.execute(
+                        "UPDATE control_turns SET state = 'claimed', "
+                        "claimed_at = COALESCE(claimed_at, ?) "
+                        "WHERE control_turn_id = ?",
+                        (timestamp, str(control.control_turn_id)),
+                    )
+            if brief_row is not None:
+                connection.execute(
+                    "UPDATE transition_briefs SET first_claimed_at = "
+                    "COALESCE(first_claimed_at, ?) WHERE transition_id = ?",
+                    (timestamp, str(transition_id)),
+                )
+                brief = _brief(brief_row)
+                claim = TransitionClaim(
+                    "brief",
+                    transition_id,
+                    transition.target_frame_id,
+                    brief=brief.brief,
+                )
+            else:
+                assert handoff_row is not None
+                connection.execute(
+                    "UPDATE completion_handoffs SET first_claimed_at = "
+                    "COALESCE(first_claimed_at, ?) WHERE transition_id = ?",
+                    (timestamp, str(transition_id)),
+                )
+                handoff = _completion_handoff(handoff_row)
+                source = connection.execute(
+                    "SELECT lifecycle_state FROM frames WHERE frame_id = ?",
+                    (str(handoff.source_frame_id),),
+                ).fetchone()
+                if source is None:
+                    raise ConflictError("not_found", "completion source is missing")
+                if source["lifecycle_state"] == FrameLifecycleState.CLOSING.value:
+                    connection.execute(
+                        "UPDATE frames SET lifecycle_state = 'closed', "
+                        "close_reason = 'completed', updated_at = ? WHERE frame_id = ?",
+                        (timestamp, str(handoff.source_frame_id)),
+                    )
+                elif source["lifecycle_state"] != FrameLifecycleState.CLOSED.value:
+                    raise ConflictError(
+                        "frame_state", "completion source is not closing"
+                    )
+                claim = TransitionClaim(
+                    "handoff",
+                    transition_id,
+                    transition.target_frame_id,
+                    summary=handoff.summary,
+                    next_action=handoff.next_action,
+                )
+            if transition.state is TransitionState.AWAITING_CLAIM:
+                connection.execute(
+                    "UPDATE view_transitions SET state = 'settling', updated_at = ? "
+                    "WHERE transition_id = ?",
+                    (timestamp, str(transition_id)),
+                )
+        return claim
+
+    def settle_transition_claim(
+        self,
+        transition_id: TransitionId,
+        *,
+        now: int | None = None,
+    ) -> ViewTransition:
+        timestamp = _timestamp(now)
+        with self.transaction(immediate=True) as connection:
+            row = connection.execute(
+                "SELECT * FROM view_transitions WHERE transition_id = ?",
+                (str(transition_id),),
+            ).fetchone()
+            if row is None:
+                raise ConflictError("not_found", "transition does not exist")
+            transition = _transition(row)
+            if transition.state is TransitionState.COMPLETED:
+                return transition
+            require_state_edge(
+                transition.state,
+                TransitionState.COMPLETED,
+                TRANSITION_EDGES,
+                "transition state",
+            )
+            if transition.transport_phase is not TransportPhase.COMMITTED:
+                raise ConflictError(
+                    "transport_uncommitted", "transition transport is not committed"
+                )
+            semantic_claimed = connection.execute(
+                "SELECT first_claimed_at FROM transition_briefs "
+                "WHERE transition_id = ? "
+                "UNION ALL SELECT first_claimed_at FROM completion_handoffs "
+                "WHERE transition_id = ?",
+                (str(transition_id), str(transition_id)),
+            ).fetchone()
+            if semantic_claimed is None or semantic_claimed[0] is None:
+                raise ConflictError("claim_missing", "semantic record was not claimed")
+            control = connection.execute(
+                "SELECT * FROM control_turns WHERE transition_id = ?",
+                (str(transition_id),),
+            ).fetchone()
+            if control is not None:
+                control_record = _control_turn(control)
+                if control_record.state is ControlState.CLAIMED:
+                    connection.execute(
+                        "UPDATE control_turns SET state = 'settled', settled_at = ? "
+                        "WHERE control_turn_id = ?",
+                        (timestamp, str(control_record.control_turn_id)),
+                    )
+                elif control_record.state is not ControlState.SETTLED:
+                    raise ConflictError(
+                        "control_state", "control turn has not been claimed"
+                    )
+            connection.execute(
+                "UPDATE view_transitions SET state = 'completed', updated_at = ? "
+                "WHERE transition_id = ?",
+                (timestamp, str(transition_id)),
+            )
+            connection.execute(
+                "UPDATE request_records SET state = 'completed', "
+                "result_type = 'transition', result_id = ?, completed_at = ? "
+                "WHERE host_id = ? AND request_id = ? AND state = 'prepared'",
+                (
+                    str(transition_id),
+                    timestamp,
+                    str(transition.host_id),
+                    str(transition.request_id),
+                ),
+            )
+        return self.get_transition(transition_id)
+
+    def open_recovery(self, recovery: Recovery) -> Recovery:
+        self._require_local_host(recovery.host_id)
+        if recovery.state is not RecoveryState.OPEN:
+            raise ValueError("new recovery must be open")
+        try:
+            with self.transaction(immediate=True) as connection:
+                existing = connection.execute(
+                    """
+                    SELECT * FROM recoveries
+                    WHERE host_id = ? AND kind = ? AND subject_type = ?
+                      AND subject_id = ? AND state = 'open'
+                    """,
+                    (
+                        str(recovery.host_id),
+                        recovery.kind,
+                        recovery.subject_type,
+                        recovery.subject_id,
+                    ),
+                ).fetchone()
+                if existing is not None:
+                    return _recovery(existing)
+                connection.execute(
+                    "INSERT INTO recoveries VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        str(recovery.recovery_id),
+                        str(recovery.host_id),
+                        recovery.kind,
+                        recovery.subject_type,
+                        recovery.subject_id,
+                        recovery.actionability.value,
+                        recovery.state.value,
+                        recovery.bounded_explanation,
+                        recovery.created_at,
+                        recovery.updated_at,
+                    ),
+                )
+        except sqlite3.IntegrityError as error:
+            raise ConflictError("recovery_conflict", str(error)) from error
+        return self.get_recovery(recovery.recovery_id)
+
+    def settle_recovery(
+        self,
+        recovery_id: RecoveryId,
+        target: RecoveryState,
+        *,
+        now: int | None = None,
+    ) -> Recovery:
+        timestamp = _timestamp(now)
+        with self.transaction(immediate=True) as connection:
+            row = connection.execute(
+                "SELECT * FROM recoveries WHERE recovery_id = ?",
+                (str(recovery_id),),
+            ).fetchone()
+            if row is None:
+                raise ConflictError("not_found", "recovery does not exist")
+            recovery = _recovery(row)
+            require_state_edge(recovery.state, target, RECOVERY_EDGES, "recovery state")
+            connection.execute(
+                "UPDATE recoveries SET state = ?, updated_at = ? WHERE recovery_id = ?",
+                (target.value, timestamp, str(recovery_id)),
+            )
+        return self.get_recovery(recovery_id)
+
+    @staticmethod
+    def _expire_leases_tx(connection: sqlite3.Connection, timestamp: int) -> int:
+        return connection.execute(
+            "UPDATE desktop_attachment_leases SET state = 'expired' "
+            "WHERE state = 'offered' AND expires_at <= ?",
+            (timestamp,),
+        ).rowcount
+
+    def expire_desktop_leases(self, *, now: int | None = None) -> int:
+        timestamp = _timestamp(now)
+        with self.transaction(immediate=True) as connection:
+            return self._expire_leases_tx(connection, timestamp)
+
+    def offer_desktop_lease(
+        self, lease: DesktopAttachmentLease, *, now: int | None = None
+    ) -> DesktopAttachmentLease:
+        timestamp = _timestamp(now)
+        if lease.state is not LeaseState.OFFERED or lease.expires_at <= timestamp:
+            raise ValueError("new desktop lease must be an unexpired offer")
+        try:
+            with self.transaction(immediate=True) as connection:
+                self._expire_leases_tx(connection, timestamp)
+                exact = connection.execute(
+                    "SELECT * FROM desktop_attachment_leases "
+                    "WHERE view_id = ? AND request_id = ?",
+                    (str(lease.view_id), str(lease.request_id)),
+                ).fetchone()
+                if exact is not None:
+                    record = _lease(exact)
+                    if record.state is LeaseState.OFFERED:
+                        return record
+                    raise ConflictError(
+                        "lease_settled", "desktop request lease is already settled"
+                    )
+                offered = connection.execute(
+                    "SELECT 1 FROM desktop_attachment_leases "
+                    "WHERE view_id = ? AND state = 'offered'",
+                    (str(lease.view_id),),
+                ).fetchone()
+                if offered is not None:
+                    raise ConflictError(
+                        "desktop_launch_in_progress",
+                        "another desktop attachment request owns the view",
+                    )
+                connection.execute(
+                    "INSERT INTO desktop_attachment_leases VALUES (?, ?, ?, ?, ?)",
+                    (
+                        str(lease.lease_id),
+                        str(lease.view_id),
+                        str(lease.request_id),
+                        lease.state.value,
+                        lease.expires_at,
+                    ),
+                )
+        except sqlite3.IntegrityError as error:
+            raise ConflictError("lease_conflict", str(error)) from error
+        return self.get_lease(lease.lease_id)
+
+    def claim_desktop_lease(
+        self,
+        view_id: ViewId,
+        request_id: RequestId,
+        *,
+        now: int | None = None,
+    ) -> DesktopAttachmentLease:
+        timestamp = _timestamp(now)
+        with self.transaction(immediate=True) as connection:
+            self._expire_leases_tx(connection, timestamp)
+            row = connection.execute(
+                "SELECT * FROM desktop_attachment_leases "
+                "WHERE view_id = ? AND request_id = ?",
+                (str(view_id), str(request_id)),
+            ).fetchone()
+            if row is None:
+                raise ConflictError("not_found", "desktop attachment lease is missing")
+            lease = _lease(row)
+            if lease.state is LeaseState.CLAIMED:
+                return lease
+            require_state_edge(
+                lease.state, LeaseState.CLAIMED, LEASE_EDGES, "lease state"
+            )
+            connection.execute(
+                "UPDATE desktop_attachment_leases SET state = 'claimed' "
+                "WHERE lease_id = ?",
+                (str(lease.lease_id),),
+            )
+        return self.get_lease(lease.lease_id)
+
 
 __all__ = [
     "DEFAULT_BUSY_TIMEOUT_MS",
@@ -1755,6 +3500,7 @@ __all__ = [
     "Registry",
     "RegistryClosed",
     "StorageError",
+    "TransitionClaim",
     "WorkspaceResult",
     "connect_database",
     "now_ms",
