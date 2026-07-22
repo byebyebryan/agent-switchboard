@@ -112,6 +112,13 @@ Before execution, verify `snap.lan` is reachable, both legacy registries are
 quiescent, all listed sessions are verified idle and resumable, and no pending
 launch or transition owns a checkout.
 
+After the immutable host backup and hook shutdown, the executor performs one
+last full legacy reconciliation. It rejects any live provider session or active
+launch intent, then retires only the remaining inactive v0.2 surface records and
+records their count and identity digest. This terminal bookkeeping write is
+restored from the host backup on every pre-commit rollback; direct database
+cleanup is neither required nor accepted operator procedure.
+
 ## Execution and recovery
 
 Exit the managed provider and every tmux client. From a plain desktop shell with
@@ -124,10 +131,11 @@ python /home/bryan/.local/state/agent-switchboard-cutover/<cutover-id>/phase6e_c
   --confirm <cutover-id>
 ```
 
-The coordinator disables legacy hooks, stages a read-only public `swbctl` on
-both hosts, proves remote online/offline/online behavior, and proves core, hook,
-view, and DMS actions reject mutation while staged. It cold-starts DMS from the
-versioned artifact; a plugin reload is not accepted as evidence.
+The coordinator disables legacy hooks, reconciles and retires inactive legacy
+surfaces, stages a read-only public `swbctl` on both hosts, proves remote
+online/offline/online behavior, and proves core, hook, view, and DMS actions
+reject mutation while staged. It cold-starts DMS from the versioned artifact; a
+plugin reload is not accepted as evidence.
 
 Before the first commit, any failure restores the original public symlinks,
 complete hook files, DMS plugin/state/settings, service state, and prior core

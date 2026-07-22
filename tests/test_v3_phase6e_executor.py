@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import sqlite3
 import sys
 from pathlib import Path
 
@@ -203,3 +204,82 @@ def test_atomic_symlink_replacement(tmp_path: Path) -> None:
     assert os.readlink(destination) == "/opt/swbctl-0.3/bin/swbctl"
     phase6e.replace_symlink(destination, "/opt/swbctl-next/bin/swbctl")
     assert os.readlink(destination) == "/opt/swbctl-next/bin/swbctl"
+
+
+def legacy_database(
+    tmp_path: Path, *, live: bool = False, active: bool = False
+) -> Path:
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    database = tmp_path / "legacy.db"
+    with sqlite3.connect(database) as connection:
+        connection.executescript(
+            """
+            PRAGMA user_version = 10;
+            CREATE TABLE hosts(host_id TEXT PRIMARY KEY, is_local INTEGER NOT NULL);
+            CREATE TABLE sessions(
+                session_key TEXT PRIMARY KEY,
+                host_id TEXT NOT NULL,
+                runtime_presence TEXT NOT NULL,
+                surface_id TEXT
+            );
+            CREATE TABLE launch_intents(
+                launch_id TEXT PRIMARY KEY,
+                state TEXT NOT NULL
+            );
+            CREATE TABLE surfaces(
+                surface_id TEXT PRIMARY KEY,
+                host_id TEXT NOT NULL,
+                current_session_key TEXT,
+                binding_confidence TEXT NOT NULL,
+                client_attached INTEGER NOT NULL,
+                last_observed_at INTEGER NOT NULL,
+                retired_at INTEGER
+            );
+            """
+        )
+        connection.execute("INSERT INTO hosts VALUES (?, 1)", (LOCAL_HOST,))
+        connection.execute(
+            "INSERT INTO surfaces VALUES (?, ?, ?, 'confirmed', 1, 20, NULL)",
+            ("540f6a81-67b6-42ce-b7ca-2068bb190e88", LOCAL_HOST, "session"),
+        )
+        connection.execute(
+            "INSERT INTO sessions VALUES (?, ?, ?, ?)",
+            (
+                "session",
+                LOCAL_HOST,
+                "live" if live else "stopped",
+                "540f6a81-67b6-42ce-b7ca-2068bb190e88",
+            ),
+        )
+        if active:
+            connection.execute(
+                "INSERT INTO launch_intents VALUES (?, 'provider_started')",
+                ("640f6a81-67b6-42ce-b7ca-2068bb190e88",),
+            )
+    return database
+
+
+def test_legacy_surface_retirement_requires_complete_quiescence(tmp_path: Path) -> None:
+    live = legacy_database(tmp_path / "live", live=True)
+    with pytest.raises(phase6e.CutoverFailure, match="became active"):
+        phase6e.retire_legacy_surfaces(live, LOCAL_HOST, observed_at=30)
+
+    active = legacy_database(tmp_path / "active", active=True)
+    with pytest.raises(phase6e.CutoverFailure, match="became active"):
+        phase6e.retire_legacy_surfaces(active, LOCAL_HOST, observed_at=30)
+
+
+def test_legacy_surface_retirement_clears_only_inactive_surfaces(
+    tmp_path: Path,
+) -> None:
+    database = legacy_database(tmp_path)
+    result = phase6e.retire_legacy_surfaces(database, LOCAL_HOST, observed_at=30)
+    assert result["retiredSurfaceCount"] == 1
+    with sqlite3.connect(database) as connection:
+        assert connection.execute(
+            "SELECT surface_id FROM sessions WHERE session_key = 'session'"
+        ).fetchone() == (None,)
+        assert connection.execute(
+            "SELECT current_session_key, binding_confidence, client_attached, "
+            "last_observed_at, retired_at FROM surfaces"
+        ).fetchone() == (None, "unknown", 0, 30, 30)

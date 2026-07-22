@@ -16,6 +16,7 @@ import json
 import os
 import re
 import shutil
+import sqlite3
 import subprocess
 import sys
 import time
@@ -42,6 +43,13 @@ REQUIRED_CHECKS: Final = (
     "dmsWarmCache",
     "remoteOnline",
     "remoteOffline",
+)
+LEGACY_SCHEMA_VERSION: Final = 10
+LEGACY_ACTIVE_LAUNCH_STATES: Final = (
+    "provider_started",
+    "reserved",
+    "surface_ready",
+    "waiting_for_client",
 )
 
 
@@ -718,6 +726,7 @@ def worker_import(spec: Spec, role: str) -> dict[str, Any]:
             ],
             timeout=60,
         )
+    quiesced = quiesce_legacy_registry(host)
     export_dir = backup / "export"
     bundle = export_dir / "cutover-bundle.json"
     if bundle.is_file() and not bundle.is_symlink():
@@ -763,7 +772,135 @@ def worker_import(spec: Spec, role: str) -> dict[str, Any]:
         "bundleHash": exported["bundleHash"],
         "bundleSha256": digest_file(bundle),
         "generationId": host.generation_id,
+        "legacyQuiescence": quiesced,
     }
+
+
+def _legacy_snapshot(host: HostSpec) -> dict[str, Any]:
+    value = json_command(
+        [
+            str(host.legacy_swbctl),
+            "snapshot",
+            "--reconcile",
+            "full",
+            "--json",
+        ],
+        timeout=180,
+    )
+    if (
+        not isinstance(value, dict)
+        or value.get("host", {}).get("hostId") != host.host_id
+    ):
+        raise CutoverFailure("legacy snapshot host identity is incompatible")
+    sessions = value.get("sessions")
+    surfaces = value.get("surfaces")
+    if not isinstance(sessions, list) or not isinstance(surfaces, list):
+        raise CutoverFailure("legacy snapshot collections are incompatible")
+    live = [
+        item
+        for item in sessions
+        if isinstance(item, dict) and item.get("runtimePresence") == "live"
+    ]
+    if live:
+        raise CutoverFailure(
+            f"legacy host still has {len(live)} live provider session(s)"
+        )
+    return value
+
+
+def retire_legacy_surfaces(
+    database: Path, host_id: str, *, observed_at: int | None = None
+) -> dict[str, Any]:
+    """Fence inactive v0.2 surfaces after backup and complete reconciliation."""
+
+    if not database.is_file() or database.is_symlink():
+        raise CutoverFailure("legacy database is missing or unsafe")
+    timestamp = int(time.time() * 1000) if observed_at is None else observed_at
+    if isinstance(timestamp, bool) or not isinstance(timestamp, int) or timestamp < 0:
+        raise CutoverFailure("legacy quiescence timestamp is invalid")
+    connection = sqlite3.connect(database, timeout=5)
+    try:
+        connection.execute("PRAGMA foreign_keys = ON")
+        connection.execute("BEGIN IMMEDIATE")
+        schema = connection.execute("PRAGMA user_version").fetchone()[0]
+        if schema != LEGACY_SCHEMA_VERSION:
+            raise CutoverFailure("legacy database is not schema v10")
+        local_hosts = connection.execute(
+            "SELECT host_id FROM hosts WHERE is_local = 1 ORDER BY host_id"
+        ).fetchall()
+        if local_hosts != [(host_id,)]:
+            raise CutoverFailure("legacy database local host identity is incompatible")
+        live = connection.execute(
+            "SELECT count(*) FROM sessions "
+            "WHERE host_id = ? AND runtime_presence = 'live'",
+            (host_id,),
+        ).fetchone()[0]
+        placeholders = ",".join("?" for _ in LEGACY_ACTIVE_LAUNCH_STATES)
+        active_launches = connection.execute(
+            f"SELECT count(*) FROM launch_intents WHERE state IN ({placeholders})",
+            LEGACY_ACTIVE_LAUNCH_STATES,
+        ).fetchone()[0]
+        if live or active_launches:
+            raise CutoverFailure(
+                "legacy runtimes or launch intents became active during quiescence"
+            )
+        rows = connection.execute(
+            "SELECT surface_id, last_observed_at FROM surfaces "
+            "WHERE host_id = ? AND retired_at IS NULL ORDER BY surface_id",
+            (host_id,),
+        ).fetchall()
+        if rows:
+            timestamp = max(timestamp, *(int(row[1]) for row in rows))
+            connection.execute(
+                "UPDATE sessions SET surface_id = NULL WHERE surface_id IN ("
+                "SELECT surface_id FROM surfaces "
+                "WHERE host_id = ? AND retired_at IS NULL)",
+                (host_id,),
+            )
+            connection.execute(
+                "UPDATE surfaces SET current_session_key = NULL, "
+                "binding_confidence = 'unknown', client_attached = 0, "
+                "retired_at = ?, last_observed_at = ? "
+                "WHERE host_id = ? AND retired_at IS NULL",
+                (timestamp, timestamp, host_id),
+            )
+        remaining = connection.execute(
+            "SELECT count(*) FROM surfaces "
+            "WHERE host_id = ? AND retired_at IS NULL",
+            (host_id,),
+        ).fetchone()[0]
+        if remaining:
+            raise CutoverFailure("legacy surface retirement was incomplete")
+        connection.commit()
+    except sqlite3.Error as error:
+        if connection.in_transaction:
+            connection.rollback()
+        raise CutoverFailure("legacy surface retirement failed") from error
+    except Exception:
+        if connection.in_transaction:
+            connection.rollback()
+        raise
+    finally:
+        connection.close()
+    surface_ids = [str(row[0]) for row in rows]
+    return {
+        "retiredSurfaceCount": len(surface_ids),
+        "retiredSurfaceIdsSha256": digest_bytes(canonical(surface_ids)),
+    }
+
+
+def quiesce_legacy_registry(host: HostSpec) -> dict[str, Any]:
+    _legacy_snapshot(host)
+    retired = retire_legacy_surfaces(host.legacy_database, host.host_id)
+    verified = _legacy_snapshot(host)
+    active_surfaces = [
+        item
+        for item in verified["surfaces"]
+        if isinstance(item, dict) and item.get("retiredAt") is None
+    ]
+    if active_surfaces:
+        raise CutoverFailure("legacy surfaces remained active after retirement")
+    return retired
 
 
 def expected_staged_failure(argv: list[str]) -> bytes:
