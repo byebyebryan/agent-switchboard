@@ -4,16 +4,23 @@ Date: 2026-07-21
 
 Status: design direction; pre-implementation decision record
 
+Decision update: the automatic first slice accepts fixed, visible child and
+parent bootstrap turns plus parking the parent after confirmed child binding.
+Guided keep-alive remains an explicit fallback, not the seamless default.
+
 ## Summary
 
 Switchboard should make one focused task per agent session feel automatic rather
 than asking the user to decide where every task boundary belongs. The user
 normally interacts with a durable project-level session. When a distinct piece
 of work becomes substantial, the current agent may push a focused child task
-session into the foreground. The parent remains intact and idle in its own
-native terminal surface. When the child finishes, Switchboard returns the user
-to the parent with a durable handoff. A child may push another child, producing
-a bounded stack rather than a flat collection of unrelated sessions.
+session into the foreground. The parent remains durable and recoverable. The
+accepted automatic mode parks its process after the child binds; an explicit
+guided mode may keep it live.
+When the child finishes, Switchboard returns the user to the parent with a
+durable handoff. Longer term, a child may push another child, producing a
+bounded stack rather than a flat collection of unrelated sessions; the UX
+walkthrough below deliberately narrows the first slice.
 
 These are foreground user sessions, not provider subagents. A task session may
 own the native Codex or Claude Code TUI for dozens of interactive turns. The
@@ -59,6 +66,286 @@ The provider TUI remains unmodified. Switchboard performs a bounded state and
 surface transition, selects the exact child or parent tmux surface, and then
 leaves the interaction path.
 
+## UX tabletop walkthroughs
+
+The following flows stress-test the design from the user's point of view. They
+are design evidence, not accepted implementation behavior. A flow fails when
+the registry state is sound but the user must restate intent, type a ceremonial
+`continue`, hunt for the prior surface, or infer that a transition failed.
+
+| Flow | Current design result |
+| --- | --- |
+| Enter a project | Blocked: there is no first-class project workspace |
+| Start substantial work | Conditional: switching alone opens an idle child |
+| Ask a quick question | Pass if boundary policy is conservative |
+| Undo a mistaken split | Blocked after the child starts its first turn |
+| Finish and return | Blocked while the parent remains live and idle |
+| Push a nested task | Blocked by an exclusive linked-worktree claim |
+| Open a task directly | Pass, but automatic return has no destination |
+| Transition with two viewers | Conditional on exact client authority |
+| Child launch fails | State-safe, but post-turn feedback is missing |
+| Slow post-turn hook | Blocked if the hook prepares or waits for a provider |
+
+### Flow 1: enter a project workspace
+
+The automation-first journey cannot begin in the current task-first launcher.
+Today the user selects an existing task or explicitly creates one. The proposed
+journey needs a primary project action with no task form:
+
+```text
+open Switchboard
+  -> choose project
+  -> open its durable workspace session
+  -> ask for work in ordinary language
+```
+
+The workspace is a real provider session on the project's default local
+checkout. It should not appear as an ordinary Open task, require a synthetic
+task title, or become Closed when one child finishes. Its provider and title
+remain presentation metadata; project, host, checkout, and provider UUIDs
+remain the routing identities.
+
+The durable workspace identity should not require one provider thread to live
+forever. Like a task, it may eventually retain prior provider sessions and one
+current session so context can roll over without changing the user's entry
+point or filling the task list with maintenance records.
+
+This favors a distinct workspace-session role over disguising the root as a
+task. The exact schema is still open, but the launcher and authorization model
+must treat the workspace as the normal entry point if task management is meant
+to become automatic.
+
+Daily activation should use the declared default checkout and provider. A
+missing checkout routes to the project manager with an explicit issue. A
+missing provider may require one bounded first-open choice that becomes the
+workspace preference; it must not force a provider/task form on every open.
+The project row's primary action becomes **Open workspace**, while catalog
+editing remains an explicit secondary action.
+
+### Flow 2: automatically push substantial work
+
+Consider a user asking the workspace agent to implement a multi-turn feature.
+The visible happy path should be:
+
+```text
+user request
+  -> workspace agent prepares a leased child task and waiting surface
+  -> workspace agent says that it is opening the focused task
+  -> parent turn ends
+  -> the post-turn hook revalidates and switches the same client
+  -> the child starts its first turn without another user message
+```
+
+The last step is essential. Opening an empty child TUI and asking the user to
+type `continue` has automated storage, not workflow.
+
+Local no-model CLI help confirms that both provider CLIs expose a native
+mechanism for this shape. Codex `0.144.6` accepts an optional initial prompt on
+exact `fork` and `resume`, and Claude Code `2.1.216` accepts a prompt while using
+`--resume` with optional `--fork-session`. This is command-shape evidence, not a
+full Claude `2.1.216` runtime-compatibility claim. The safer Switchboard contract
+is not to persist or replay the raw user prompt. The parent records a bounded
+semantic transition brief; the child receives one fixed bootstrap instruction
+telling it to read that exact brief through an authorized transition tool and
+continue.
+
+The first tool call must atomically claim the pending bootstrap for the current
+authorized frame without accepting a transition, task, or session identifier
+from the model. A retried initial prompt then observes `already_claimed` and
+resumes the bound session instead of creating another task or independently
+starting the same work. Provider prompt submission itself is not treated as an
+exactly-once transaction.
+
+That fixed first turn is still automatic prompt dispatch. It is a deliberate
+expansion of the current boundary and must be versioned, visible in provider
+history, idempotent, and separately accepted in implementation. This design
+record accepts that expansion for automatic mode because implicit push cannot
+meet the desired UX without it.
+
+The waiting surface should be prepared by the authorized agent tool while the
+parent turn is still active. Attach-before-start keeps it inert: no provider is
+started and no surface moves until the turn finishes. This moves fallible task,
+checkout, launch, and tmux preparation into a normal tool result that the agent
+can report, rather than hiding it after an optimistic final response.
+
+The post-turn hook has a one-second provider timeout and a 250 ms health budget.
+It must not perform discovery, wait for provider binding, or supervise the full
+transition. Its hot path should claim the prepared transition, revalidate the
+exact client and waiting surface, switch, and return. A transition-owned,
+short-lived worker or later lifecycle hook may settle binding, parent parking,
+and rollback; no persistent controller remains.
+
+Preparation ordering should keep the parent usable until the child binds:
+
+1. atomically record the push, child task, launch, and waiting surface during
+   the agent tool call;
+2. let the parent finish its response normally;
+3. revalidate and switch the exact client on the post-turn hot path;
+4. release attach-before-start and bind the child through `SessionStart`;
+5. only then park the parent runtime through bounded transition settlement; and
+6. repair or return to the still-live parent on any earlier failure.
+
+This permits a short bounded overlap between runtimes but avoids leaving the
+user on a failed child after prematurely stopping the parent.
+
+### Flow 3: stay for incidental work
+
+The workspace should answer status questions, explain code, inspect a small
+fact, and perform ordinary steps within the current outcome without creating a
+task. False positives are more disruptive than false negatives: they change
+surfaces, create durable records, and may start another model turn.
+
+The automatic policy should therefore be asymmetric. An explicit user request
+to create or separate a task is sufficient. An implicit agent decision requires
+high confidence that the outcome is independently meaningful and multi-turn.
+Anything less stays in the current session; the agent may promote it later if
+the work actually grows.
+
+### Flow 4: undo, pause, and complete are different
+
+One overloaded `return` action cannot cover the important user intents:
+
+- **Back** changes navigation only. The child stays Open and receives no
+  completion handoff.
+- **Cancel push** rolls back an unbound transition and its transition-owned child
+  reservation. Once a child has bound or started a turn, cancellation becomes
+  Back plus an explicit lifecycle choice; history is never silently deleted.
+- **Complete and return** writes one exact handoff, returns to the parent, and
+  closes the child only after the parent has resumed successfully.
+- **Close** remains the existing human organizational action and is not an
+  alias for any of the above.
+
+An automatic first child turn narrows the useful cancellation window. This is
+another reason to prefer conservative boundary detection rather than adding a
+countdown or confirmation dialog to every high-confidence transition.
+
+### Flow 5: automatically complete and return
+
+A child that finishes should not switch away immediately after printing the
+only user-visible result; the user may never see it. Returning to a live idle
+parent is also insufficient because neither isolated provider TUI offers a safe
+external way to make that already-running TUI submit its next turn.
+
+The seamless path therefore requires the parent to be parked after the child
+successfully binds. Completion can then use the provider's exact resume path:
+
+```text
+child records exact handoff and requests complete-and-return
+  -> child turn ends
+  -> Switchboard prepares parent resume with a fixed bootstrap instruction
+  -> exact client switches to the parent
+  -> parent binds, reads the returned handoff, and produces the visible result
+  -> child is stopped and closed only after parent presentation succeeds
+```
+
+The parent response becomes the canonical user-visible completion. The child
+may emit a short transition acknowledgement, but the workflow must not depend
+on the user reading a surface that is about to leave the foreground.
+
+Automatic return therefore costs one additional parent model turn and its
+latency. A guided mode can focus the parent and wait for the user's next prompt,
+but it cannot claim seamless continuation. The implementation plan must measure
+and expose this tradeoff rather than hiding the extra turn as infrastructure.
+
+Parking has a real tradeoff: provider-owned background work in the parent may
+stop. Automatic mode therefore requires proof that the parent can be parked or
+fails the transition without leaving it. An explicit keep-alive mode degrades
+return to a guided user action. Silently promising both live parent background
+work and automatic parent continuation is not implementable with the selected
+isolated TUI model.
+
+### Flow 6: nested tasks and checkout ownership
+
+The proposed arbitrary bounded stack conflicts with the implemented checkout
+claim model. A linked worktree may be claimed by only one Open task. If task A
+has uncommitted changes and pushes task B:
+
+- a new worktree does not contain A's uncommitted state;
+- sharing A's linked worktree violates its exclusive task claim; and
+- leaving A's runtime alive weakens any claim that only B can mutate it.
+
+The first automation slice should therefore stop at one child below the
+workspace. Work discovered inside that child remains part of the task or uses a
+provider subagent/background command. A later nested-task design needs a
+stack-level work-context claim, an explicit claim transfer while ancestors are
+parked, or another model that preserves uncommitted state without concurrent
+ownership.
+
+This is a product-visible limitation and must not vary silently depending on
+whether the checkout happens to be `main` or `worktree`.
+
+### Flow 7: direct opens, multiple viewers, and failures
+
+A task opened directly from DMS or the TUI has no parent frame. It remains a
+normal recovery and power-user path: the agent may record a handoff, but it
+cannot automatically return to a project workspace that was never part of the
+attachment path. Human close/reopen remains valid.
+
+Automatic switching must also be scoped to one exact attachment. If multiple
+tmux clients view the source surface and the initiating client cannot be
+revalidated uniquely, the transition should remain recorded but must not park
+the parent or retarget every viewer. The first slice should fail closed rather
+than pretend foreground is global session state.
+
+Finally, a post-turn transition can fail after the agent has already said it is
+switching. Keeping the parent usable is necessary but not sufficient. The
+initiating surface needs one bounded status signal—such as an exact tmux client
+message or frontend notification—for started, failed, and ready-to-retry
+states. A silent no-op is a broken flow even when the registry is correct.
+
+## Proposed first UX slice
+
+The walkthrough supports this deliberately narrower first increment:
+
+1. Add one durable workspace-session role and a primary **Open workspace**
+   action for a configured project/default checkout.
+2. Permit automatic push only from a workspace into one child task. Defer
+   task-to-grandchild nesting.
+3. Use conservative semantic detection; explicit user task intent always wins,
+   while uncertain implicit boundaries stay in the workspace.
+4. Inherit the workspace's exact checkout. The workspace does not hold an
+   exclusive task claim, so the child can claim a linked worktree normally.
+5. Store a bounded transition brief and prepare one leased inert surface during
+   the agent tool call, then start the child with one fixed, visible bootstrap
+   instruction through the provider's tested initial-prompt contract.
+6. Keep the parent live until child binding and presentation succeed, then park
+   it for a resumable automatic return.
+7. Implement separate Back, Cancel push, and Complete and return operations;
+   do not overload human task close.
+8. On completion, resume the parent with one fixed bootstrap instruction that
+   retrieves the exact child handoff. Close the child only after the parent is
+   visibly usable.
+9. Require one exact initiating attachment for automatic surface movement and
+   expose bounded transition status on that surface.
+10. Keep direct task opens and current human close/reopen as explicit recovery
+    paths.
+
+Items 5, 6, and 8 are accepted design direction for automatic mode. They do not
+change the implemented prompt-dispatch or runtime boundaries until a versioned
+implementation plan and provider acceptance explicitly land them.
+
+The resulting visible flow should be this small:
+
+```text
+[Agent Switchboard workspace]
+User: Implement project import and export.
+Agent: I am opening "Project import and export" as a focused task.
+
+[Switchboard: opening Project import and export]
+[Project import and export]
+Agent: I have the task brief. I am inspecting the catalog contract now.
+...normal multi-turn work and approvals...
+Agent: The implementation and tests are complete. Returning to the workspace.
+
+[Switchboard: returning to Agent Switchboard]
+[Agent Switchboard workspace]
+Agent: Project import and export is complete. The child verified ...
+```
+
+The bracketed transition lines are Switchboard-owned status, not synthetic
+provider conversation. There is no task form, `continue` prompt, handoff editor,
+or manual surface lookup in the nominal path.
+
 ## Why subagents are not the abstraction
 
 Provider subagents are appropriate for delegated, bounded work whose result is
@@ -84,8 +371,9 @@ new durable task session.
    provider sessions may remain as retained history.
 3. Each non-root stack frame has exactly one parent frame.
 4. One frame is foreground for a given user attachment path at a time.
-5. Moving a frame out of the foreground does not imply that its provider
-   process exited or that provider-internal background work stopped.
+5. Foreground navigation and runtime presence are separate state. A transition
+   records whether its source remains live or is parked; neither is inferred
+   from moving an attachment cursor.
 6. Push and return intents are durable and idempotent before any surface switch.
 7. Provider UUIDs, not names, remain the routing identity.
 8. A failed transition leaves the currently visible session usable and never
@@ -95,45 +383,60 @@ new durable task session.
 10. Switchboard does not proxy terminal input/output or re-render a provider
     conversation.
 
-The project-level root needs an explicit representation. It may become a
-distinguished root task or a separate project-session role, but it must still
-be a normal durable provider session rather than a hidden orchestration agent.
-That schema choice remains open because it affects migration and whether the
-one-task-per-session rule applies literally to the root.
+The project-level root needs an explicit representation. The UX walkthrough
+favors a separate workspace-session role over a distinguished root task, but it
+must still be a normal durable provider session rather than a hidden
+orchestration agent. The exact schema remains open because it affects migration
+and whether the one-task-per-session rule applies literally to the root.
 
 ## Foreground stack model
 
 The existing `Task.current_session_key`, `AgentSession`, `LaunchIntent`,
 `RuntimeLocator`, and `Surface` records provide most of the substrate. The new
-behavior needs an explicit transition/stack record rather than inferring
-parentage from timestamps or handoff prose. A candidate shape is:
+behavior needs explicit lineage, navigation, and transition records rather than
+inferring them from timestamps or handoff prose. Foreground is relative to an
+attachment path, so it cannot be a global frame state. A revised candidate is:
 
 ```text
-TaskFrame
+SessionFrame
   frame_id
   project_id
-  task_id
+  checkout_id
+  role                    workspace | task
+  task_id                 null only for a workspace root
   session_key
   parent_frame_id         null only for root
-  state                   foreground | suspended | returning | closed
+  lifecycle_state         active | returning | completed | cancelled
   created_by              user | agent
   transition_reason       bounded semantic label
   source_handoff_id
-  pending_transition_id
   created_at
   updated_at
 
-TaskTransition
+NavigationCursor
+  cursor_id
+  current_frame_id
+  pending_transition_id
+  state                   active | switching | blocked
+  created_at
+  updated_at
+
+FrameTransition
   transition_id
-  kind                    push | return
+  cursor_id
+  kind                    push | back | complete_return
   source_frame_id
   target_frame_id         nullable until child binding
-  target_task_id
+  target_task_id          required only for push
   target_session_key      nullable until provider binding
   launch_id               nullable for an already-live target
-  handoff_id              required before completed return
+  handoff_id              required for complete_return
+  source_runtime_policy   keep_live | park
+  bootstrap_mode          none | fixed
+  bootstrap_state         none | pending | claimed | completed
+  bootstrap_session_key   nullable until claimed
   requested_by            user | agent
-  state                   requested | waiting_for_stop |
+  state                   requested | preparing |
                           launching | switching | completed |
                           failed | cancelled
   request_id
@@ -142,10 +445,11 @@ TaskTransition
   updated_at
 ```
 
-The exact schema is not yet accepted. The important contract is that the stack
-and pending transition are explicit durable state. Process ancestry, tmux
-window order, provider fork lineage, and session names are supporting evidence,
-not authority.
+The exact schema and durable representation of `cursor_id` are not yet
+accepted. The important contract is that lineage and pending transitions are
+durable while foreground selection is attachment-relative. Process ancestry,
+tmux window order, provider fork lineage, and session names are supporting
+evidence, not authority.
 
 ## Push lifecycle
 
@@ -154,18 +458,21 @@ producing the turn that requested the transition. Push therefore has two
 phases:
 
 1. The user or current authorized agent requests a push with a bounded title,
-   purpose, and optional initial child prompt.
-2. Switchboard validates current-frame authority, creates the child task and a
-   leased transition/launch intent, and records the parent link.
+   purpose, and transition brief.
+2. Switchboard validates current-frame authority, creates the child task,
+   leased transition/launch intent, and inert waiting surface, and records the
+   parent link without starting a provider.
 3. The current agent finishes its response normally.
-4. A trusted post-turn/Stop hook observes the pending transition.
-5. Switchboard prepares the child provider session and waiting tmux surface.
+4. A trusted post-turn/Stop hook claims the prepared transition and revalidates
+   the exact client and waiting surface.
+5. The exact tmux client or desktop surface switches or attaches to the child,
+   releasing the attach-before-start bootstrap.
 6. The provider's `SessionStart` hook binds the child provider UUID to the
    launch, task, frame, and surface.
 7. Switchboard projects the task title into provider metadata when supported.
-8. The exact tmux client or desktop surface switches to the child.
-9. Only after confirmed presentation does the transition become `completed`
-   and the parent frame become `suspended`.
+8. Only after confirmed binding and presentation does the transition become
+   `completed`, the cursor select the child, and the explicit parent runtime
+   policy take effect.
 
 For same-provider work, the adapter may use a provider-native fork so the child
 inherits useful conversation context while retaining a new durable identity.
@@ -180,32 +487,30 @@ than creating another child.
 
 ## Return lifecycle
 
-Return is also a deferred, two-phase operation:
+Back and complete-and-return are also deferred, two-phase operations:
 
-1. The user explicitly requests return, or the foreground agent determines
-   that the task's completion condition has been met.
-2. The agent records a bounded immutable handoff and requests return to the
-   exact parent frame.
+1. The user requests Back, or the foreground agent records a bounded immutable
+   handoff and requests Complete and return to the exact parent frame.
+2. Switchboard validates a live parent or prepares one inert waiting resume
+   before the current turn ends.
 3. The current turn finishes normally.
-4. A trusted post-turn/Stop hook validates the pending return.
-5. Switchboard makes the child non-foreground and performs the accepted child
-   runtime disposition.
-6. Switchboard selects or resumes the exact parent surface and marks it
-   foreground.
-7. The parent receives the exact child handoff through a bounded context path.
+4. A trusted post-turn/Stop hook revalidates and switches the exact client.
+5. A parked parent starts and binds through attach-before-start.
+6. Only after confirmed parent presentation does the cursor select the parent.
+7. Back leaves the child Open. Complete and return applies the accepted child
+   runtime disposition, retains the exact handoff, and closes the child.
 
-Whether return closes the child task, merely parks it, or offers distinct
-`return` and `complete-and-return` operations is not yet resolved. This matters
-because the implemented `task close` command is human-only, does not call a
-model, does not create a handoff, and commits task state before best-effort
-runtime cleanup. The foreground stack must not quietly overload that command
-with incompatible semantics.
+This transition-owned completion remains distinct from the implemented human
+`task close` command, which does not call a model, create a handoff, or navigate
+to a parent. The foreground stack must not quietly overload that command with
+incompatible semantics.
 
-The initial handoff delivery should not synthesize a hidden provider prompt.
-The safer contract is to focus the parent, retain the exact handoff, and expose
-it through the parent's Switchboard context on the next user prompt or explicit
-`task_get` call. Automatically submitting a parent turn would expand the
-prompt-dispatch boundary and requires a separate review.
+The tabletop walkthrough shows that focusing the parent and waiting for the
+next user prompt is a guided return, not seamless continuation. The proposed
+automatic path uses one fixed, visible bootstrap instruction that retrieves the
+exact handoff through an authorized transition tool. Arbitrary hidden prompts
+remain excluded. Guided return remains available only as the explicit fallback
+when automatic parent parking or resume cannot be proven safe.
 
 ## Automatic boundary policy
 
@@ -223,19 +528,21 @@ The agent should use judgment without requiring a confirmation dialog for every
 boundary, while preserving explicit user controls to push, stay, return, or
 cancel. The stack must have a fixed maximum depth, and repeated automatic
 push/return loops must degrade to a visible error rather than churn sessions.
-The exact heuristic prompt and depth limit belong in a later implementation
-plan and acceptance fixtures.
+Bootstrap turns may not initiate another implicit transition before the cursor
+is stable; an explicit new user instruction is required. The exact heuristic
+prompt and depth limit belong in a later implementation plan and acceptance
+fixtures.
 
 ## Provider runtime decision
 
 Managed Codex and Claude Code sessions use the same surface model:
 
 ```text
-one live task session
+one live managed frame
     = one native provider TUI process
     + one managed tmux surface
     + one durable provider UUID
-    + one Switchboard task/frame binding
+    + one Switchboard workspace/task frame binding
 ```
 
 Claude Agent View remains disabled. Its supervisor changes process ownership,
@@ -354,8 +661,10 @@ close, or send prompts to provider sessions. Foreground transitions require a
 new narrow authority rather than widening every tool:
 
 ```text
-task_push(title, purpose?, provider?, initial_context?)
-task_return(summary, next_action, disposition?)
+task_push(title, purpose?, provider?, brief)
+task_back()
+task_complete_return(summary, next_action)
+task_transition_begin()
 task_transition_status()
 task_transition_cancel()
 ```
@@ -366,9 +675,11 @@ capability. The caller supplies no source session, source task, parent frame,
 surface, tmux target, provider UUID, launch ID, or arbitrary command. Core
 derives those from the bound capability and registry.
 
-The tool records intent only. It never changes the TUI surface or terminates
-the calling runtime while the agent turn is active. Trusted hooks and existing
-presentation commands execute the deferred transition after the turn.
+The tool may atomically record the intent and prepare one leased inert waiting
+surface. It never starts a provider, changes the visible TUI surface, or
+terminates the calling runtime while the agent turn is active. Trusted hooks,
+short-lived transition settlement, and existing presentation commands execute
+the visible transition after the turn.
 
 ## Surface and frontend behavior
 
@@ -378,6 +689,11 @@ current stack cursor. A transition must switch only that validated client or
 desktop window; it must not globally retarget every attachment viewing the
 parent session.
 
+The first automatic slice requires exactly one revalidated client on the source
+surface. A manual frontend action may carry its own exact client identity, but
+an agent request from a multiply viewed provider pane cannot prove which viewer
+submitted the turn and must fail closed.
+
 Frontends should show a compact breadcrumb rather than another task-management
 form:
 
@@ -385,10 +701,11 @@ form:
 Agent Switchboard > task A > task B
 ```
 
-The child provider TUI remains the main screen. Parent frames remain visible in
-the ordinary Switchboard task list with a suspended/background-navigation
-marker that is distinct from provider activity. If a parent still has
-provider-internal work running, its normal activity state remains visible.
+The child provider TUI remains the main screen. A frontend displaying the same
+cursor may mark ancestor frames as background navigation, distinct from
+provider activity. Other frontends show ordinary task/runtime state; they must
+not present a cursor-relative `suspended` label as global truth. If a parent
+runtime remains live, its normal activity state remains visible.
 
 ## Failure and recovery
 
@@ -399,6 +716,8 @@ provider-internal work running, its normal activity state remains visible.
   waiting surface is reclaimed, and the parent remains foreground.
 - **Child binds but presentation fails:** retain one child runtime and a
   retryable transition; never launch another child.
+- **Post-turn transition fails:** keep the current session usable and emit one
+  bounded status message to the exact initiating surface; do not fail silently.
 - **Naming fails:** keep the Switchboard title, expose a bounded provider
   capability warning, and continue the transition.
 - **Parent process exited:** resume the exact durable parent session in its
@@ -441,6 +760,9 @@ The design continues to preserve these existing boundaries:
 
 ## Acceptance scenarios
 
+These describe the longer-term end state. The proposed first UX slice above
+intentionally stops at one workspace child until checkout ownership is revised.
+
 1. From a project root session, the agent recognizes a multi-turn deliverable,
    records one push, finishes its response, and the same user attachment opens
    exactly one named child session.
@@ -464,28 +786,36 @@ The design continues to preserve these existing boundaries:
 
 ## Open decisions before implementation
 
-1. Model the project root as a distinguished task or a separate project-session
-   role.
-2. Choose separate `return`, `complete-and-return`, and `close` semantics.
-3. Decide the exact confidence policy for an agent-initiated automatic push or
-   return and the maximum stack depth.
-4. Choose handoff delivery on parent resume without silently dispatching a
-   model prompt.
-5. Define whether a push inherits the same checkout by default or prepares an
-   existing worktree when one is available.
-6. Define behavior when multiple clients view the same frame and only one
-   initiated the transition.
-7. Version-gate Codex fork, resume, and name mutation contracts and Claude fork
-   semantics with isolated no-model probes.
-8. Decide whether provider-native title projection happens at binding, after
+1. Define the separate workspace-session role's exact project,
+   checkout, provider, and migration schema.
+2. Define the fixed child-bootstrap and parent-return text, capability bounds,
+   retry behavior, and measurable model-turn latency and cost.
+3. Define the safe parent-parking precondition and rollback. Automatic mode
+   parks; an explicit keep-alive choice uses guided return.
+4. Define storage and transaction semantics for separate Back, Cancel push,
+   Complete and return, and human Close operations, including which transitions
+   may close their exact child task.
+5. Define the exact high-confidence automatic-boundary policy and its fixtures.
+6. Enforce a maximum depth of one child for the first slice, then design
+   stack-level checkout ownership before enabling nested tasks.
+7. Define the exact initiating-attachment proof, multi-client failure behavior,
+   and bounded transition status surface.
+8. Version-gate Codex fork/resume/initial-prompt/name contracts and Claude
+   fork/resume/initial-prompt semantics with isolated no-model probes.
+9. Decide whether provider-native title projection happens at binding, after
    the first completed turn, or through a bounded retry queue.
-9. Decide how a manually resumed historical session joins or replaces a stack
-   frame.
-10. Defer cross-host push/return until the local stack and existing pull-based
-    remote action contracts can be reconciled.
+10. Decide how a directly or manually resumed historical session joins a
+    workspace path or remains a parentless recovery flow.
+11. Define workspace provider-thread rollover without changing durable
+    workspace identity or manufacturing user tasks.
+12. Defer cross-host push/return until the local workspace flow and existing
+    pull-based remote action contracts can be reconciled.
 
 ## Evidence
 
+- Local no-model CLI help on 2026-07-21 confirmed that Codex `0.144.6` accepts
+  an initial prompt on exact `fork` and `resume`, and Claude Code `2.1.216`
+  accepts a prompt with `--resume` plus optional `--fork-session`.
 - Codex `0.144.6` TUI source selects an embedded in-process App Server when no
   reusable default daemon socket is reachable, and otherwise auto-selects the
   local daemon for eligible launches:

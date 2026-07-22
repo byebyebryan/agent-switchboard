@@ -42,6 +42,7 @@ only-include = [
   "docs/phase-5-plan.md",
   "docs/project-management-plan.md",
   "docs/frictionless-task-close-plan.md",
+  "docs/foreground-task-session-stack.md",
 ]
 
 [tool.pytest.ini_options]

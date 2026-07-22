@@ -47,6 +47,7 @@ def test_static_pep_621_metadata_and_stdlib_runtime() -> None:
         "docs/phase-5-plan.md",
         "docs/project-management-plan.md",
         "docs/frictionless-task-close-plan.md",
+        "docs/foreground-task-session-stack.md",
     ]
     assert metadata["tool"]["pytest"]["ini_options"]["pythonpath"] == ["src"]
 
@@ -145,6 +146,7 @@ def test_ci_smokes_wheel_and_source_distribution_installations() -> None:
     assert '"docs/phase-5-plan.md"' in verifier
     assert '"docs/project-management-plan.md"' in verifier
     assert '"docs/frictionless-task-close-plan.md"' in verifier
+    assert '"docs/foreground-task-session-stack.md"' in verifier
     assert '"agent_switchboard/migrations/v0003_name_provenance_runtime_index.py"' in (
         verifier
     )

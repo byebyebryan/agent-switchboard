@@ -445,8 +445,11 @@ Tasks are explicit host-owned registry state. One open task may share a main or
 directory checkout with other tasks, or exclusively claim a linked worktree.
 Each task has at most one current top-level provider session; a continuation or
 provider switch requires the prior current session's exact immutable handoff.
-Closing wraps but does not stop that session. Full invariants and the v1
-migration are specified in
+Closing preserves existing handoff and wrap state, commits the task state
+first, and then makes a best-effort attempt to stop only an exact safely owned
+managed runtime. It creates no handoff. The current close contract is specified
+in [`docs/frictionless-task-close-plan.md`](frictionless-task-close-plan.md);
+the historical v1 migration is recorded in
 [`docs/phase-4d-plan.md`](phase-4d-plan.md).
 
 ### Session identity
