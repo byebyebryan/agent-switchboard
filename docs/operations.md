@@ -38,10 +38,14 @@ agent outage across hosts.
 Provider hook files are global, but Switchboard authority is pane-local.
 Therefore:
 
-- when both `AGENT_SWITCHBOARD_CAPABILITY` and `SWB_V3_SESSION_KEY` are absent,
-  the hook exits successfully without reading or writing Switchboard state;
-- when only part of the authority is present, or managed evidence is invalid,
-  the hook fails closed with one bounded, content-free diagnostic; and
+- when capability, session, and generation markers are absent, the hook exits
+  successfully without reading or writing Switchboard state;
+- sessions launched before the generation marker, sessions whose recorded
+  generation is no longer current, and sessions whose Switchboard state was
+  discarded also exit successfully as deliberately unmanaged;
+- when only part of current-generation authority is present, or its managed
+  evidence is invalid, the hook fails closed with one bounded, content-free
+  diagnostic; and
 - hook installation and removal edits only handlers owned by the current
   Switchboard hook identity and preserves all unrelated provider settings.
 
@@ -83,3 +87,37 @@ The Phase 6E two-host coordinator was a one-time activation artifact and is not
 an operational update mechanism. Its exact executed copy and evidence remain in
 the private activation workspace; it is intentionally absent from release and
 source-distribution surfaces after acceptance.
+
+## Fresh initialization and reset
+
+`swbctl init --config TEMPLATE` is the normal first-start path. `TEMPLATE` is
+Config v3 and may omit `generation_id`; Switchboard allocates and canonically
+binds a new ID, creates an empty committed registry, materializes only the
+declared catalog, fsyncs both generation directories, validates their final
+paths, and atomically publishes `state/current`. It performs no provider probe,
+provider launch, hook edit, DMS action, or tmux action.
+
+Reset uses the current configuration unless a replacement template is supplied:
+
+```sh
+generation=$(swbctl state host --json | jq -r .generationId)
+swbctl reset --confirm-generation "$generation"
+```
+
+The exact generation confirmation is a compare-and-swap guard. Reset publishes
+a new empty committed generation and retains the previous generation on disk.
+It does not retire a view, move or kill a pane, stop a provider, edit hooks,
+restart DMS, or kill a tmux server. Old managed views consequently become
+unmanaged but remain attachable through tmux; their provider processes continue
+unchanged. DMS observes the new generation on its next ordinary refresh.
+
+Hook installation remains a separate opt-in operation after initialization:
+
+```sh
+swbctl hooks install --provider codex
+swbctl hooks install --provider claude
+```
+
+Install only providers that will launch new Switchboard-managed sessions. An
+unmanaged provider environment remains a successful no-op even while these
+global handlers are installed.

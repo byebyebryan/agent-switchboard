@@ -1234,6 +1234,7 @@ class WorkflowRuntime:
             "AGENT_SWITCHBOARD_SURFACE_ID": str(surface.surface_id),
             "SWB_V3_TRANSITION_ID": str(transition.transition_id),
             "SWB_V3_SESSION_KEY": str(session_key),
+            "SWB_V3_GENERATION_ID": str(self.generation_id),
             "SWB_V3_CONFIG_ROOT": str(self.paths.config_root),
             "SWB_V3_STATE_ROOT": str(self.paths.state_root),
             "SWB_V3_MCP_COMMAND": (f"{sys.executable} -m agent_switchboard agent-mcp"),
@@ -2115,6 +2116,7 @@ class WorkflowRuntime:
                 "AGENT_SWITCHBOARD_LAUNCH_ID": str(surface.launch_id),
                 "AGENT_SWITCHBOARD_SURFACE_ID": str(surface.surface_id),
                 "SWB_V3_SESSION_KEY": str(session.session_key),
+                "SWB_V3_GENERATION_ID": str(self.generation_id),
                 "SWB_V3_CONFIG_ROOT": str(self.paths.config_root),
                 "SWB_V3_STATE_ROOT": str(self.paths.state_root),
                 "SWB_V3_MCP_COMMAND": (

@@ -18,6 +18,9 @@ produces a self-authenticating bundle without mutating the source.
 The primary command surface is:
 
 ```text
+swbctl init --config CONFIG_V3_TEMPLATE
+swbctl reset --confirm-generation GENERATION [--config CONFIG_V3_TEMPLATE]
+
 swbctl state host --json
 swbctl state navigator [--refresh] --json
 
@@ -44,9 +47,10 @@ owner host. Provider versions are strict observations rather than allowlists:
 missing/malformed executables and behavioral or identity mismatch fail closed.
 
 The `0.3.0` artifact is paired with DMS adapter `0.5.0`. Their one-time Phase 6E
-activation is complete. The coordinator is intentionally not shipped: future
-development installs and resets treat Switchboard state as disposable and
-never require an existing Codex or Claude Code session to stop.
+activation and Phase 6E.1 operational closure are complete. The coordinator is
+intentionally not shipped: `init` and `reset` publish fresh committed
+generations without provider or tmux lifecycle operations. Existing Codex and
+Claude Code sessions never need to stop.
 
 Design and operations:
 
@@ -55,6 +59,7 @@ Design and operations:
 - [View and Frame Workflow](docs/view-workflow.md)
 - [Runtime Operations and Safety](docs/operations.md)
 - [Phase 6 Clean-Break Plan](docs/phase-6-plan.md)
+- [Phase 6E.1 Acceptance](docs/phase-6e1-acceptance.md)
 - [CutoverBundle v1 and Activation](docs/cutover-bundle-v1.md)
 
 Historical `0.2` records remain outside the installed package under

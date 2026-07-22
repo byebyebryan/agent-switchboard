@@ -2,7 +2,7 @@
 
 Date: 2026-07-21
 
-Status: Phase 6E activated; Phase 6F recursive frames are next
+Status: Phase 6E.1 operational closure complete; Phase 6F recursive frames are next
 
 Target release: `0.3.0`
 
@@ -275,13 +275,16 @@ provider command. `attach` grants one expiring desktop lease.
 The replacement public command tree is:
 
 ```text
+swbctl init --config CONFIG_V3_TEMPLATE
+swbctl reset --confirm-generation GENERATION [--config CONFIG_V3_TEMPLATE]
+
 swbctl state host --json
 swbctl state navigator [--refresh] --json
 
 swbctl view open --host HOST (--view VIEW | --project PROJECT) --request-id UUID \
   [--can-focus-desktop] [--can-launch-terminal] --json
 swbctl view recover --host HOST --recovery RECOVERY --request-id UUID --json
-swbctl view attach --host HOST --view VIEW --request-id UUID --json
+swbctl view attach --view VIEW [--host HOST] [--request-id UUID]
 swbctl view list|show|focus|mode|retire
 swbctl frame list|show|push|back|complete|close|reopen
 swbctl project ...
@@ -360,6 +363,12 @@ mutation commands are fixed argv and never derive an endpoint from UI data.
 `0.3` starts from a fresh registry baseline. Config v3 and the database share a
 generation ID and are activated through one state-home pointer. Runtime fails
 closed on missing/mismatched generations and on the old fixed schema-v10 file.
+
+Normal development starts with `init` or a compare-and-swap `reset`. Both
+publish a complete empty committed generation atomically. Reset retains the old
+generation and deliberately performs no provider, hook, DMS, pane, session, or
+tmux-server lifecycle action, so user work survives even when Switchboard state
+is abandoned.
 
 The offline exporter/importer preserves aligned catalog/session/handoff evidence
 without importing old task semantics. New settings make task push conservative,

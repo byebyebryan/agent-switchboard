@@ -60,8 +60,9 @@ RequestRecord
 ```
 
 Config, database metadata, and the caller's expected generation and local host
-must all agree before normal open. Phase 6B.1 can initialize only an empty
-database and does not resolve the generation pointer. An old schema-v10,
+must all agree before normal open. Normal open never creates state. `init` and
+confirmed `reset` are the only non-cutover paths that may create an empty
+committed database and publish the generation pointer. An old schema-v10,
 partially initialized, unknown, or mismatched database fails closed.
 
 `(host_id, request_id)` is unique. Presentation capability is excluded from the
@@ -302,9 +303,11 @@ Only an exact launch-owned pane/window may be killed. Killing an owning view or
 tmux server is never a surface cleanup primitive.
 
 The raw capability exists only in the launched surface environment. SQLite
-retains its digest and exact authority bindings. No launch becomes `started`
-until durable authorization and exact physical placement agree; `bound`
-requires the one provider session and surface to agree.
+retains its digest and exact authority bindings. The environment also carries
+the exact generation ID. Global hooks compare that marker to `state/current`
+before reading an event; stale or discarded generations are successful no-ops.
+No launch becomes `started` until durable authorization and exact physical
+placement agree; `bound` requires the one provider session and surface to agree.
 
 ### ViewTransition
 
@@ -587,6 +590,10 @@ initial_max_depth = 1
 transport = "live_first"
 watchdog_timeout_seconds = 5
 ```
+
+The canonical stored Config v3 always contains `generation_id`. An `init` or
+reset replacement template may omit it because publication binds the template
+to the newly allocated generation before storage and validation.
 
 `complete_return` is `synthesize | handoff` and may be overridden per project.
 `handoff` returns to the parent without a control turn; the navigator surfaces

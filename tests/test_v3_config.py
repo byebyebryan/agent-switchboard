@@ -4,10 +4,16 @@ from pathlib import Path
 
 import pytest
 
-from agent_switchboard._v3.config import ConfigError, parse_config, render_config
+from agent_switchboard._v3.config import (
+    ConfigError,
+    parse_config,
+    parse_config_template,
+    render_config,
+)
 from agent_switchboard._v3.domain import (
     CompleteReturnPolicy,
     ControlTurnPolicy,
+    GenerationId,
     ProviderId,
     TaskPushPolicy,
     ViewMode,
@@ -140,6 +146,13 @@ def test_full_v3_configuration_is_typed_canonical_and_round_trips(
     assert config.control_turns.watchdog_timeout_seconds == 9
     assert render_config(config).startswith("config_version = 3\n")
     assert parse_config(render_config(config)) == config
+
+
+def test_init_template_may_omit_or_rebind_generation() -> None:
+    allocated = GenerationId("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb")
+    without = minimal_config().replace(f'generation_id = "{GENERATION}"\n', "")
+    assert parse_config_template(without, allocated).generation_id == allocated
+    assert parse_config_template(minimal_config(), allocated).generation_id == allocated
 
 
 @pytest.mark.parametrize(

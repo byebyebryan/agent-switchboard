@@ -2,7 +2,7 @@
 
 Date: 2026-07-22
 
-Status: Phase 6A.1 through 6E complete; Phase 6F is next
+Status: Phase 6A.1 through 6E.1 complete; Phase 6F is next
 
 Target core release: `0.3.0`
 
@@ -298,6 +298,23 @@ and no duplicate prompt or runtime.
 Exit: installed core and DMS expose no old command/protocol/cache route;
 local/two-host acceptance passed; operational ownership now follows
 [Runtime Operations and Safety](operations.md).
+
+### Phase 6E.1: operational closure — complete
+
+- Add normal `init` from a Config v3 template, with no provider, hook, DMS, or
+  tmux I/O.
+- Add compare-and-swap `reset` that publishes a new empty committed generation,
+  retains the previous generation, and never changes provider or tmux runtime.
+- Keep global hook installation explicitly opt-in and prove unmanaged events
+  remain successful no-ops.
+- Prove a fresh generation can create and attach a persistent view from the
+  SSH-first CLI path, then survive a state reset unchanged.
+- Package and smoke the fresh-init/reset surface independently of historical
+  cutover machinery.
+
+Exit: empty roots become a usable committed generation without CutoverBundle;
+reset abandons Switchboard state without stopping user work; exact acceptance is
+recorded in [Phase 6E.1 Acceptance](phase-6e1-acceptance.md).
 
 ### Phase 6F: recursive task frames
 

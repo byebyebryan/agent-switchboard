@@ -14,12 +14,14 @@ import os
 import shutil
 import sys
 import time
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
 from . import __version__
 from .agent_mcp import AgentToolService, run_mcp_server
+from .config import parse_config_template
 from .cutover import CutoverBundle, CutoverError, export_artifacts
 from .domain import (
     FailureRecord,
@@ -43,7 +45,10 @@ from .generation import (
     GenerationPaths,
     commit,
     import_bundle,
+    initialize,
     open_generation,
+    reset,
+    resolve_current,
     rollback,
     status,
 )
@@ -209,6 +214,52 @@ def _cutover(arguments: argparse.Namespace) -> int:
         _print({"previousGenerationId": None if previous is None else str(previous)})
     else:  # pragma: no cover - argparse owns the command set
         raise AssertionError(arguments.cutover_command)
+    return 0
+
+
+def _template(path: Path, generation_id: GenerationId):
+    try:
+        raw = path.read_bytes()
+    except OSError as error:
+        raise GenerationError("generation_config_invalid", str(error)) from error
+    return parse_config_template(raw, generation_id)
+
+
+def _init(arguments: argparse.Namespace) -> int:
+    generation_id = (
+        GenerationId.new()
+        if arguments.generation_id is None
+        else GenerationId(arguments.generation_id)
+    )
+    result = initialize(
+        _template(arguments.config, generation_id),
+        _paths(arguments),
+        created_at=_timestamp(arguments.at),
+    )
+    _print(result)
+    return 0
+
+
+def _reset(arguments: argparse.Namespace) -> int:
+    paths = _paths(arguments)
+    expected = GenerationId(arguments.confirm_generation)
+    generation_id = (
+        GenerationId.new()
+        if arguments.generation_id is None
+        else GenerationId(arguments.generation_id)
+    )
+    if arguments.config is None:
+        with open_generation(paths, expected) as opened:
+            config = replace(opened.config, generation_id=generation_id)
+    else:
+        config = _template(arguments.config, generation_id)
+    result = reset(
+        config,
+        paths,
+        expected_current=expected,
+        created_at=_timestamp(arguments.at),
+    )
+    _print(result)
     return 0
 
 
@@ -461,14 +512,33 @@ def _agent_mcp(arguments: argparse.Namespace) -> int:
 def _hook(arguments: argparse.Namespace) -> int:
     raw_capability = os.environ.get("AGENT_SWITCHBOARD_CAPABILITY")
     raw_session_key = os.environ.get("SWB_V3_SESSION_KEY")
-    if not raw_capability and not raw_session_key:
+    raw_generation_id = os.environ.get("SWB_V3_GENERATION_ID")
+    if not raw_capability and not raw_session_key and not raw_generation_id:
         # Provider hook configuration is global, while Switchboard authority is
         # intentionally pane-local. Unmanaged provider sessions are outside
         # our ownership boundary and must not be disrupted by the hook.
         return 0
-    if not raw_capability or not raw_session_key:
+    if raw_capability and raw_session_key and not raw_generation_id:
+        # Sessions launched before Phase 6E.1 have no generation marker. They
+        # may outlive a reset and are intentionally left unmanaged rather than
+        # disrupted by a newly installed global hook.
+        return 0
+    if not raw_capability or not raw_session_key or not raw_generation_id:
         print("swbctl: incomplete managed hook authority", file=sys.stderr)
         return 2
+    try:
+        expected_generation = GenerationId(raw_generation_id)
+    except ValueError:
+        print("swbctl: incomplete managed hook authority", file=sys.stderr)
+        return 2
+    try:
+        current_generation = resolve_current(_paths(arguments))
+    except GenerationError:
+        # Switchboard state is disposable. Its absence or damage must not make
+        # a provider session unusable merely because a global hook remains.
+        return 0
+    if current_generation != expected_generation:
+        return 0
     try:
         payload = read_hook_json(sys.stdin.buffer)
         opened, workflow = _open_workflow(arguments)
@@ -482,7 +552,13 @@ def _hook(arguments: argparse.Namespace) -> int:
             )
         finally:
             opened.close()
-    except (HookInputError, WorkflowError, ConflictError, ValueError):
+    except (
+        HookInputError,
+        WorkflowError,
+        ConflictError,
+        GenerationError,
+        ValueError,
+    ):
         print("swbctl: managed hook event rejected", file=sys.stderr)
         return 2
     return 0
@@ -730,6 +806,17 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--state-root", type=Path)
     root = parser.add_subparsers(dest="command", required=True)
 
+    init = root.add_parser("init")
+    init.add_argument("--config", type=Path, required=True)
+    init.add_argument("--generation-id")
+    init.add_argument("--at", type=int)
+
+    reset_command = root.add_parser("reset")
+    reset_command.add_argument("--confirm-generation", required=True)
+    reset_command.add_argument("--config", type=Path)
+    reset_command.add_argument("--generation-id")
+    reset_command.add_argument("--at", type=int)
+
     cutover = root.add_parser("cutover")
     cutover_sub = cutover.add_subparsers(dest="cutover_command", required=True)
     export = cutover_sub.add_parser("export")
@@ -880,6 +967,10 @@ def main(argv: list[str] | None = None) -> int:
     parser = _parser()
     arguments = parser.parse_args(argv)
     try:
+        if arguments.command == "init":
+            return _init(arguments)
+        if arguments.command == "reset":
+            return _reset(arguments)
         if arguments.command == "cutover":
             return _cutover(arguments)
         if arguments.command == "state":

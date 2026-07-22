@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 from test_v3_cutover import (
     GENERATION,
+    GENERATION_2,
     HOST,
     PROJECT,
     SESSION_KEY,
@@ -20,7 +21,10 @@ from test_v3_cutover import (
 )
 
 from agent_switchboard._v3.cli import main as v3_main
+from agent_switchboard._v3.config import render_config
 from agent_switchboard._v3.domain import ProviderId, ViewId, ViewMode
+from agent_switchboard._v3.generation import GenerationError
+from agent_switchboard._v3.hook_config import STATUS_MESSAGE
 from agent_switchboard._v3.provider_runtime import ProviderContract
 from agent_switchboard._v3.tmux_view import ROLE_SURFACE, TmuxExecutor
 
@@ -32,6 +36,7 @@ def test_global_hook_noops_only_outside_managed_authority(
 ) -> None:
     monkeypatch.delenv("AGENT_SWITCHBOARD_CAPABILITY", raising=False)
     monkeypatch.delenv("SWB_V3_SESSION_KEY", raising=False)
+    monkeypatch.delenv("SWB_V3_GENERATION_ID", raising=False)
 
     assert v3_main(["hook", "--provider", "codex"]) == 0
     assert capsys.readouterr() == ("", "")
@@ -41,6 +46,30 @@ def test_global_hook_noops_only_outside_managed_authority(
     captured = capsys.readouterr()
     assert captured.out == ""
     assert captured.err == "swbctl: incomplete managed hook authority\n"
+
+    monkeypatch.setenv("AGENT_SWITCHBOARD_CAPABILITY", "legacy-opaque")
+    monkeypatch.setenv(
+        "SWB_V3_SESSION_KEY",
+        "040f6a81-67b6-42ce-b7ca-2068bb190e88:codex:"
+        "019f6a67-a897-7661-97c5-41ca255d1284",
+    )
+    assert v3_main(["hook", "--provider", "codex"]) == 0
+    assert capsys.readouterr() == ("", "")
+
+    monkeypatch.setenv("SWB_V3_GENERATION_ID", str(GENERATION))
+    monkeypatch.setattr(
+        "agent_switchboard._v3.cli.resolve_current",
+        lambda _paths: GENERATION_2,
+    )
+    assert v3_main(["hook", "--provider", "codex"]) == 0
+    assert capsys.readouterr() == ("", "")
+
+    def missing_state(_paths: object) -> None:
+        raise GenerationError("generation_missing", "state was discarded")
+
+    monkeypatch.setattr("agent_switchboard._v3.cli.resolve_current", missing_state)
+    assert v3_main(["hook", "--provider", "codex"]) == 0
+    assert capsys.readouterr() == ("", "")
 
     monkeypatch.delenv("AGENT_SWITCHBOARD_CAPABILITY")
     monkeypatch.setenv(
@@ -63,12 +92,220 @@ def test_managed_hook_rejection_writes_safe_feedback(
         "040f6a81-67b6-42ce-b7ca-2068bb190e88:codex:"
         "019f6a67-a897-7661-97c5-41ca255d1284",
     )
+    monkeypatch.setenv("SWB_V3_GENERATION_ID", str(GENERATION))
+    monkeypatch.setattr(
+        "agent_switchboard._v3.cli.resolve_current", lambda _paths: GENERATION
+    )
     monkeypatch.setattr("sys.stdin", io.TextIOWrapper(io.BytesIO(b"not-json")))
 
     assert v3_main(["hook", "--provider", "codex"]) == 2
     captured = capsys.readouterr()
     assert captured.out == ""
     assert captured.err == "swbctl: managed hook event rejected\n"
+
+
+def test_fresh_cli_init_reset_and_opt_in_hooks_are_self_contained(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    database, legacy = seeded_legacy(tmp_path)
+    template = export_legacy(database, legacy, exported_at=100).target_config(
+        GENERATION
+    )
+    template_path = tmp_path / "template.toml"
+    template_path.write_text(
+        render_config(template).replace(f'generation_id = "{GENERATION}"\n', ""),
+        encoding="utf-8",
+    )
+    paths = roots(tmp_path)
+    base = [
+        "--config-root",
+        str(paths.config_root),
+        "--state-root",
+        str(paths.state_root),
+    ]
+    assert (
+        v3_main(
+            [
+                *base,
+                "init",
+                "--config",
+                str(template_path),
+                "--generation-id",
+                str(GENERATION),
+                "--at",
+                "101",
+            ]
+        )
+        == 0
+    )
+    initialized = json.loads(capsys.readouterr().out)
+    assert initialized["sourceKind"] == "fresh"
+    assert initialized["generationId"] == str(GENERATION)
+    assert initialized["previousGenerationId"] is None
+
+    command = tmp_path / "swbctl"
+    command.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    command.chmod(0o700)
+    codex_home = tmp_path / "codex"
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    assert (
+        v3_main(
+            [
+                *base,
+                "hooks",
+                "install",
+                "--provider",
+                "codex",
+                "--executable",
+                str(command),
+            ]
+        )
+        == 0
+    )
+    installed = json.loads(capsys.readouterr().out)
+    assert installed["installedHandlers"] == 5
+    hook_document = json.loads((codex_home / "hooks.json").read_text())
+    assert (
+        sum(
+            handler.get("statusMessage") == STATUS_MESSAGE
+            for groups in hook_document["hooks"].values()
+            for group in groups
+            for handler in group["hooks"]
+        )
+        == 5
+    )
+
+    assert (
+        v3_main(
+            [
+                *base,
+                "reset",
+                "--confirm-generation",
+                str(GENERATION),
+                "--generation-id",
+                "88888888-8888-4888-8888-888888888888",
+                "--at",
+                "102",
+            ]
+        )
+        == 0
+    )
+    replaced = json.loads(capsys.readouterr().out)
+    assert replaced["sourceKind"] == "fresh"
+    assert replaced["previousGenerationId"] == str(GENERATION)
+    assert v3_main([*base, "state", "host", "--json", "--at", "103"]) == 0
+    state = json.loads(capsys.readouterr().out)
+    assert state["frames"] == []
+    assert state["sessions"] == []
+
+
+def test_fresh_cli_ssh_attach_and_reset_leave_existing_tmux_view_untouched(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    database, legacy = seeded_legacy(tmp_path)
+    template = export_legacy(database, legacy, exported_at=100).target_config(
+        GENERATION
+    )
+    template_path = tmp_path / "template.toml"
+    template_path.write_text(render_config(template), encoding="utf-8")
+    paths = roots(tmp_path)
+    base = [
+        "--config-root",
+        str(paths.config_root),
+        "--state-root",
+        str(paths.state_root),
+    ]
+    socket = tmp_path / "fresh-tmux.sock"
+    monkeypatch.setenv("SWB_V3_TMUX_SOCKET", str(socket))
+    tmux = TmuxExecutor(socket)
+    try:
+        assert (
+            v3_main(
+                [
+                    *base,
+                    "init",
+                    "--config",
+                    str(template_path),
+                    "--generation-id",
+                    str(GENERATION),
+                    "--at",
+                    "101",
+                ]
+            )
+            == 0
+        )
+        capsys.readouterr()
+        assert (
+            v3_main(
+                [
+                    *base,
+                    "view",
+                    "open",
+                    "--host",
+                    HOST,
+                    "--project",
+                    PROJECT,
+                    "--request-id",
+                    "aaaaaaaa-3131-4131-8131-313131313131",
+                    "--json",
+                    "--at",
+                    "102",
+                ]
+            )
+            == 0
+        )
+        capsys.readouterr()
+        assert v3_main([*base, "view", "list", "--at", "102"]) == 0
+        views = json.loads(capsys.readouterr().out)
+        view_id = ViewId(views[0]["viewId"])
+        before = tmux.inspect_shell("agent", GENERATION, view_id, ViewMode.NAVIGATOR)
+
+        class Attached(RuntimeError):
+            pass
+
+        captured: list[str] = []
+
+        def capture_exec(_executable: str, argv: tuple[str, ...]) -> None:
+            captured.extend(argv)
+            raise Attached
+
+        monkeypatch.setattr("os.execvp", capture_exec)
+        with pytest.raises(Attached):
+            v3_main(
+                [
+                    *base,
+                    "view",
+                    "attach",
+                    "--view",
+                    str(view_id),
+                    "--at",
+                    "103",
+                ]
+            )
+        assert captured[-1] == f"{tmux.names('agent', view_id).view_session}:main"
+
+        assert (
+            v3_main(
+                [
+                    *base,
+                    "reset",
+                    "--confirm-generation",
+                    str(GENERATION),
+                    "--generation-id",
+                    "88888888-8888-4888-8888-888888888888",
+                    "--at",
+                    "104",
+                ]
+            )
+            == 0
+        )
+        capsys.readouterr()
+        after = tmux.inspect_shell("agent", GENERATION, view_id, ViewMode.NAVIGATOR)
+        assert after.active.pane_id == before.active.pane_id
+        assert after == before
+    finally:
+        tmux.run("kill-server", check=False)
 
 
 def test_private_cli_runs_staged_reads_then_committed_view_workflow(

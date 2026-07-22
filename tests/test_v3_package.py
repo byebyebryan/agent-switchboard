@@ -25,6 +25,7 @@ def test_clean_break_metadata_maps_only_replacement_runtime() -> None:
     assert "src/agent_switchboard/_v3" in sdist["only-include"]
     assert "src/agent_switchboard" not in sdist["only-include"]
     assert "docs/operations.md" in sdist["only-include"]
+    assert "docs/phase-6e1-acceptance.md" in sdist["only-include"]
     assert "docs/phase-6e-activation.md" not in sdist["only-include"]
     assert "scripts/phase6e_cutover.py" not in sdist["only-include"]
     requirements = (ROOT / "requirements-offline.txt").read_text().splitlines()
@@ -58,6 +59,8 @@ def test_public_help_and_version(capsys: pytest.CaptureFixture[str]) -> None:
     assert caught.value.code == 0
     output = capsys.readouterr().out
     assert "persistent project and task views" in output
+    assert "init" in output
+    assert "reset" in output
     assert "snapshot" not in output
     assert (
         "task"
@@ -70,3 +73,4 @@ def test_public_help_and_version(capsys: pytest.CaptureFixture[str]) -> None:
 def test_ci_executes_installed_navigator_module() -> None:
     workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text()
     assert '"$python" -m agent_switchboard.navigator --help' in workflow
+    assert "Smoke fresh generation lifecycle" in workflow

@@ -110,6 +110,8 @@ Crash recovery is deterministic at four publication boundaries:
 | state published | old/none | remove inactive staged pair |
 | pointer switched | new staged | retain and validate active generation |
 
-Recovery never removes a committed inactive generation and never repairs an
-active torn generation by guessing. The same import may be retried after safe
-pre-pointer cleanup.
+Cutover recovery never removes a committed inactive cutover generation and
+never repairs an active torn generation by guessing. The same import may be
+retried after safe pre-pointer cleanup. Post-cutover fresh publication may
+remove only an inactive fresh generation whose recorded predecessor is still
+current, which identifies a failure before its pointer switch.

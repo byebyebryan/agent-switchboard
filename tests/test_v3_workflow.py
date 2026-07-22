@@ -292,6 +292,14 @@ def test_workspace_child_complete_return_is_exact_and_single_turn(
             now=30,
         )
         assert push.state is TransitionState.PREPARED
+        child_frame = workflow.registry.get_frame(push.target_frame_id)
+        assert child_frame.current_session_key is not None
+        child_environment = workflow._provider_environment(
+            raw_capability=child_token,
+            transition=workflow.registry.get_transition(push.transition_id),
+            session_key=child_frame.current_session_key,
+        )
+        assert child_environment["SWB_V3_GENERATION_ID"] == str(workflow.generation_id)
         pushed = workflow.trusted_stop(parent_token, now=31)
         assert pushed.state is TransitionState.AWAITING_CLAIM
         control = workflow.observe_prompt(

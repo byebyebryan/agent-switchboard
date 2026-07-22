@@ -28,7 +28,8 @@ from .storage import Registry
 
 CORE_TARGET_VERSION: Final = "0.3.0"
 DMS_TARGET_VERSION: Final = "0.5.0"
-MANIFEST_VERSION: Final = 1
+CUTOVER_MANIFEST_VERSION: Final = 1
+FRESH_MANIFEST_VERSION: Final = 2
 EVIDENCE_VERSION: Final = 1
 _POINTER_TARGET_PARTS: Final = 2
 _SHA256_LENGTH: Final = 64
@@ -349,13 +350,14 @@ class GenerationStatus:
     generation_id: GenerationId
     activation_state: ActivationState
     previous_generation_id: GenerationId | None
-    bundle_hash: str
+    source_kind: str
+    source_sha256: str
     created_at: int
     committed_at: int | None
     evidence_sha256: str | None
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        result = {
             "generationId": str(self.generation_id),
             "activationState": self.activation_state.value,
             "previousGenerationId": (
@@ -363,11 +365,15 @@ class GenerationStatus:
                 if self.previous_generation_id is None
                 else str(self.previous_generation_id)
             ),
-            "bundleHash": self.bundle_hash,
+            "sourceKind": self.source_kind,
+            "sourceSha256": self.source_sha256,
             "createdAt": self.created_at,
             "committedAt": self.committed_at,
             "evidenceSha256": self.evidence_sha256,
         }
+        if self.source_kind == "cutover":
+            result["bundleHash"] = self.source_sha256
+        return result
 
 
 @dataclass(slots=True)
@@ -514,8 +520,12 @@ def _switch_pointer(paths: GenerationPaths, generation_id: GenerationId | None) 
             temporary.unlink()
 
 
-def _manifest_path(paths: GenerationPaths, generation_id: GenerationId) -> Path:
+def _cutover_manifest_path(paths: GenerationPaths, generation_id: GenerationId) -> Path:
     return paths.state_generation(generation_id) / "cutover-manifest.json"
+
+
+def _fresh_manifest_path(paths: GenerationPaths, generation_id: GenerationId) -> Path:
+    return paths.state_generation(generation_id) / "generation-manifest.json"
 
 
 def _evidence_path(paths: GenerationPaths, generation_id: GenerationId) -> Path:
@@ -525,7 +535,15 @@ def _evidence_path(paths: GenerationPaths, generation_id: GenerationId) -> Path:
 def _read_manifest(
     paths: GenerationPaths, generation_id: GenerationId
 ) -> Mapping[str, Any]:
-    path = _manifest_path(paths, generation_id)
+    fresh_path = _fresh_manifest_path(paths, generation_id)
+    cutover_path = _cutover_manifest_path(paths, generation_id)
+    if fresh_path.exists() == cutover_path.exists():
+        raise GenerationError(
+            "generation_manifest_invalid",
+            "generation must contain exactly one manifest",
+        )
+    path = fresh_path if fresh_path.exists() else cutover_path
+    _validate_regular_private_file(path)
     try:
         raw = path.read_bytes()
     except OSError as error:
@@ -534,27 +552,61 @@ def _read_manifest(
         value = json.loads(raw)
     except (UnicodeDecodeError, json.JSONDecodeError) as error:
         raise GenerationError("generation_manifest_invalid", str(error)) from error
-    expected = {
-        "manifestVersion",
-        "generationId",
-        "previousGenerationId",
-        "bundleHash",
-        "coreVersion",
-        "dmsVersion",
-        "createdAt",
-    }
-    if not isinstance(value, dict) or set(value) != expected:
+    if not isinstance(value, dict):
         raise GenerationError(
             "generation_manifest_invalid", "manifest fields are incompatible"
         )
-    if value["manifestVersion"] != MANIFEST_VERSION:
+    version = value.get("manifestVersion")
+    expected = (
+        {
+            "manifestVersion",
+            "generationId",
+            "previousGenerationId",
+            "bundleHash",
+            "coreVersion",
+            "dmsVersion",
+            "createdAt",
+        }
+        if version == CUTOVER_MANIFEST_VERSION
+        else {
+            "manifestVersion",
+            "generationId",
+            "previousGenerationId",
+            "sourceKind",
+            "configSha256",
+            "coreVersion",
+            "dmsVersion",
+            "createdAt",
+        }
+    )
+    if version not in {CUTOVER_MANIFEST_VERSION, FRESH_MANIFEST_VERSION}:
         raise GenerationError(
             "generation_manifest_invalid", "manifest version is incompatible"
+        )
+    if set(value) != expected:
+        raise GenerationError(
+            "generation_manifest_invalid", "manifest fields are incompatible"
         )
     if value["generationId"] != str(generation_id):
         raise GenerationError(
             "generation_manifest_invalid", "manifest generation does not match"
         )
+    previous = value["previousGenerationId"]
+    if previous is not None:
+        try:
+            GenerationId(previous)
+        except Exception as error:
+            raise GenerationError(
+                "generation_manifest_invalid",
+                "previous generation is invalid",
+            ) from error
+    _timestamp_value(value["createdAt"], "createdAt")
+    if version == FRESH_MANIFEST_VERSION:
+        if value["sourceKind"] != "fresh":
+            raise GenerationError(
+                "generation_manifest_invalid", "generation source is incompatible"
+            )
+        _sha256(value["configSha256"], "configSha256")
     return value
 
 
@@ -648,6 +700,152 @@ def _checkpoint_database(database: Path) -> None:
     _fsync_file(database)
 
 
+def _publish_fresh_generation(
+    config: SwitchboardConfig,
+    paths: GenerationPaths,
+    *,
+    expected_current: GenerationId | None,
+    created_at: int,
+    fault_injector: FaultInjector | None = None,
+) -> GenerationStatus:
+    if not isinstance(config, SwitchboardConfig):
+        raise GenerationError("generation_config_invalid", "init requires Config v3")
+    if (
+        isinstance(created_at, bool)
+        or not isinstance(created_at, int)
+        or created_at < 0
+    ):
+        raise GenerationError("generation_time_invalid", "init time is invalid")
+    generation_id = config.generation_id
+    config_payload = render_config(config).encode("utf-8")
+    config_sha256 = hashlib.sha256(config_payload).hexdigest()
+    with _cutover_lock(paths):
+        current = _read_pointer(paths, required=False)
+        if current != expected_current:
+            if expected_current is None:
+                raise GenerationError(
+                    "generation_active", "a current generation already exists"
+                )
+            raise GenerationError(
+                "generation_changed", "current generation does not match confirmation"
+            )
+        config_parent = paths.config_root / "generations"
+        state_parent = paths.state_root / "generations"
+        _secure_directory(config_parent)
+        _secure_directory(state_parent)
+        final_config = paths.config_generation(generation_id)
+        final_state = paths.state_generation(generation_id)
+        if final_config.exists() or final_state.exists():
+            raise GenerationError(
+                "generation_exists", "target generation already exists"
+            )
+        nonce = uuid4()
+        temporary_config = config_parent / f".staging-{generation_id}-{nonce}"
+        temporary_state = state_parent / f".staging-{generation_id}-{nonce}"
+        temporary_config.mkdir(mode=0o700)
+        temporary_state.mkdir(mode=0o700)
+        try:
+            config_file = temporary_config / "config.toml"
+            database_file = temporary_state / "switchboard.db"
+            manifest_file = temporary_state / "generation-manifest.json"
+            _write_file(config_file, config_payload)
+            with Registry(
+                database_file,
+                generation_id=generation_id,
+                local_host_id=config.host.host_id,
+                local_display_name=config.host.display_name,
+                initial_activation_state=ActivationState.COMMITTED,
+                now=created_at,
+            ) as registry:
+                registry.materialize_catalog(
+                    config.host.host_id,
+                    config.projects,
+                    config.repositories,
+                    config.project_repositories,
+                    config.checkouts,
+                    now=created_at,
+                )
+            _checkpoint_database(database_file)
+            manifest = {
+                "manifestVersion": FRESH_MANIFEST_VERSION,
+                "generationId": str(generation_id),
+                "previousGenerationId": (None if current is None else str(current)),
+                "sourceKind": "fresh",
+                "configSha256": config_sha256,
+                "coreVersion": CORE_TARGET_VERSION,
+                "dmsVersion": DMS_TARGET_VERSION,
+                "createdAt": created_at,
+            }
+            _write_file(
+                manifest_file,
+                (canonical_json(manifest) + "\n").encode("utf-8"),
+                mode=0o400,
+            )
+            _fsync_directory(temporary_config)
+            _fsync_directory(temporary_state)
+            _fault(fault_injector, "files_fsynced")
+            os.replace(temporary_config, final_config)
+            _fsync_directory(config_parent)
+            _fault(fault_injector, "config_published")
+            os.replace(temporary_state, final_state)
+            _fsync_directory(state_parent)
+            _fault(fault_injector, "state_published")
+            with _open_exact(paths, generation_id) as opened:
+                if opened.activation_state is not ActivationState.COMMITTED:
+                    raise GenerationError(
+                        "generation_state_invalid",
+                        "fresh generation is not committed",
+                    )
+            _switch_pointer(paths, generation_id)
+            _fault(fault_injector, "pointer_switched")
+            return status(paths)
+        finally:
+            for temporary in (temporary_config, temporary_state):
+                if temporary.exists():
+                    shutil.rmtree(temporary)
+
+
+def initialize(
+    config: SwitchboardConfig,
+    paths: GenerationPaths,
+    *,
+    created_at: int,
+    fault_injector: FaultInjector | None = None,
+) -> GenerationStatus:
+    """Create the first committed generation without provider or tmux I/O."""
+
+    return _publish_fresh_generation(
+        config,
+        paths,
+        expected_current=None,
+        created_at=created_at,
+        fault_injector=fault_injector,
+    )
+
+
+def reset(
+    config: SwitchboardConfig,
+    paths: GenerationPaths,
+    *,
+    expected_current: GenerationId,
+    created_at: int,
+    fault_injector: FaultInjector | None = None,
+) -> GenerationStatus:
+    """Abandon exact current state by publishing a new empty generation."""
+
+    if not isinstance(expected_current, GenerationId):
+        raise GenerationError(
+            "generation_confirmation_invalid", "reset confirmation is invalid"
+        )
+    return _publish_fresh_generation(
+        config,
+        paths,
+        expected_current=expected_current,
+        created_at=created_at,
+        fault_injector=fault_injector,
+    )
+
+
 def import_bundle(
     bundle: CutoverBundle,
     paths: GenerationPaths,
@@ -707,7 +905,7 @@ def import_bundle(
             _checkpoint_database(database_file)
             _write_file(bundle_file, bundle.to_json().encode("utf-8"), mode=0o400)
             manifest = {
-                "manifestVersion": MANIFEST_VERSION,
+                "manifestVersion": CUTOVER_MANIFEST_VERSION,
                 "generationId": str(generation_id),
                 "previousGenerationId": None if previous is None else str(previous),
                 "bundleHash": bundle.bundle_hash,
@@ -748,20 +946,38 @@ def import_bundle(
 def status(paths: GenerationPaths) -> GenerationStatus:
     generation_id = resolve_current(paths)
     manifest = _read_manifest(paths, generation_id)
-    bundle_path = paths.state_generation(generation_id) / "cutover-bundle.json"
-    try:
-        bundle = CutoverBundle.from_json(bundle_path.read_bytes())
-    except (OSError, CutoverError) as error:
-        raise GenerationError("generation_bundle_invalid", str(error)) from error
-    if manifest["bundleHash"] != bundle.bundle_hash:
-        raise GenerationError(
-            "generation_manifest_invalid", "manifest bundle hash does not match"
-        )
+    cutover = manifest["manifestVersion"] == CUTOVER_MANIFEST_VERSION
+    if cutover:
+        bundle_path = paths.state_generation(generation_id) / "cutover-bundle.json"
+        try:
+            bundle = CutoverBundle.from_json(bundle_path.read_bytes())
+        except (OSError, CutoverError) as error:
+            raise GenerationError("generation_bundle_invalid", str(error)) from error
+        if manifest["bundleHash"] != bundle.bundle_hash:
+            raise GenerationError(
+                "generation_manifest_invalid", "manifest bundle hash does not match"
+            )
+        source_sha256 = bundle.bundle_hash
+    else:
+        config_path = paths.config_generation(generation_id) / "config.toml"
+        try:
+            source_sha256 = hashlib.sha256(config_path.read_bytes()).hexdigest()
+        except OSError as error:
+            raise GenerationError("generation_config_invalid", str(error)) from error
+        if manifest["configSha256"] != source_sha256:
+            raise GenerationError(
+                "generation_manifest_invalid", "manifest config hash does not match"
+            )
     previous_raw = manifest["previousGenerationId"]
     previous = None if previous_raw is None else GenerationId(previous_raw)
     evidence_path = _evidence_path(paths, generation_id)
     evidence_sha256: str | None = None
     if evidence_path.exists():
+        if not cutover:
+            raise GenerationError(
+                "generation_evidence_unexpected",
+                "fresh generation cannot contain cutover evidence",
+            )
         _validate_regular_private_file(evidence_path)
         try:
             evidence = CutoverEvidence.from_json(evidence_path.read_bytes())
@@ -777,7 +993,8 @@ def status(paths: GenerationPaths) -> GenerationStatus:
         metadata = opened.registry.metadata()
         committed_at = metadata["committed_at"]
         if (
-            opened.activation_state is ActivationState.COMMITTED
+            cutover
+            and opened.activation_state is ActivationState.COMMITTED
             and evidence_sha256 is None
         ):
             raise GenerationError(
@@ -788,7 +1005,8 @@ def status(paths: GenerationPaths) -> GenerationStatus:
             generation_id,
             opened.activation_state,
             previous,
-            str(manifest["bundleHash"]),
+            "cutover" if cutover else "fresh",
+            source_sha256,
             int(manifest["createdAt"]),
             None if committed_at is None else int(committed_at),
             evidence_sha256,
@@ -811,6 +1029,12 @@ def commit(
         raise GenerationError("cutover_time_invalid", "commit time is invalid")
     with _cutover_lock(paths):
         generation_id = resolve_current(paths)
+        manifest = _read_manifest(paths, generation_id)
+        if manifest["manifestVersion"] != CUTOVER_MANIFEST_VERSION:
+            raise GenerationError(
+                "cutover_not_applicable",
+                "fresh generations do not cross the cutover commit boundary",
+            )
         with open_generation(paths, generation_id) as opened:
             metadata = opened.registry.metadata()
             created_at = int(metadata["created_at"])
@@ -930,10 +1154,20 @@ def recover_incomplete(paths: GenerationPaths) -> tuple[str, ...]:
             try:
                 generation_id = GenerationId(raw_id)
                 with _open_exact(paths, generation_id) as opened:
-                    staged = opened.activation_state is ActivationState.CUTOVER_STAGED
+                    removable = (
+                        opened.activation_state is ActivationState.CUTOVER_STAGED
+                    )
+                if not removable:
+                    manifest = _read_manifest(paths, generation_id)
+                    previous = manifest["previousGenerationId"]
+                    removable = manifest[
+                        "manifestVersion"
+                    ] == FRESH_MANIFEST_VERSION and previous == (
+                        None if current is None else str(current)
+                    )
             except Exception:
-                staged = True
-            if staged:
+                removable = True
+            if removable:
                 for candidate in (
                     paths.config_root / "generations" / raw_id,
                     paths.state_root / "generations" / raw_id,
@@ -966,8 +1200,10 @@ __all__ = [
     "bundle_file_hash",
     "commit",
     "import_bundle",
+    "initialize",
     "open_generation",
     "recover_incomplete",
+    "reset",
     "resolve_current",
     "rollback",
     "status",

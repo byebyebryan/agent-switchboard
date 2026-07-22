@@ -7,7 +7,7 @@ import re
 import tomllib
 import unicodedata
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Never
 
@@ -735,6 +735,34 @@ def parse_config(data: bytes | str) -> SwitchboardConfig:
     )
 
 
+def parse_config_template(
+    data: bytes | str, generation_id: GenerationId
+) -> SwitchboardConfig:
+    """Parse Config v3 settings and bind them to one new generation.
+
+    Initialization templates may omit ``generation_id``.  A present value must
+    still be a valid Config v3 generation, but the newly allocated generation
+    always wins so an existing canonical config can be reused for a safe reset.
+    """
+
+    if isinstance(data, bytes):
+        try:
+            text = data.decode("utf-8")
+        except UnicodeDecodeError as error:
+            raise ConfigError(f"invalid TOML: {error}") from error
+    elif isinstance(data, str):
+        text = data
+    else:
+        raise ConfigError("configuration template must be bytes or text")
+    try:
+        document = tomllib.loads(text)
+    except (tomllib.TOMLDecodeError, ValueError) as error:
+        raise ConfigError(f"invalid TOML: {error}") from error
+    if "generation_id" not in document:
+        text = f'generation_id = "{generation_id}"\n' + text
+    return replace(parse_config(text), generation_id=generation_id)
+
+
 def _toml_string(value: str) -> str:
     return json.dumps(value, ensure_ascii=False)
 
@@ -899,5 +927,6 @@ __all__ = [
     "TmuxConfig",
     "ViewsConfig",
     "parse_config",
+    "parse_config_template",
     "render_config",
 ]

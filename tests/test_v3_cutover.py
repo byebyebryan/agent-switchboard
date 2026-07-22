@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -12,15 +14,22 @@ from agent_switchboard._v3.cutover import (
     export_artifacts,
     export_legacy,
 )
-from agent_switchboard._v3.domain import ActivationState, GenerationId
+from agent_switchboard._v3.domain import (
+    ActivationState,
+    FrameId,
+    GenerationId,
+    WorkContextId,
+)
 from agent_switchboard._v3.generation import (
     CutoverEvidence,
     GenerationError,
     GenerationPaths,
     commit,
     import_bundle,
+    initialize,
     open_generation,
     recover_incomplete,
+    reset,
     resolve_current,
     rollback,
     status,
@@ -319,6 +328,106 @@ def test_import_builds_one_private_staged_generation_without_frames(
     assert (
         paths.state_generation(GENERATION) / "cutover-bundle.json"
     ).stat().st_mode & 0o777 == 0o400
+
+
+def test_fresh_init_and_confirmed_reset_publish_empty_committed_generations(
+    tmp_path: Path,
+) -> None:
+    database, config = seeded_legacy(tmp_path)
+    template = export_legacy(database, config, exported_at=100).target_config(
+        GENERATION
+    )
+    paths = roots(tmp_path)
+
+    initialized = initialize(template, paths, created_at=101)
+    assert initialized.activation_state is ActivationState.COMMITTED
+    assert initialized.source_kind == "fresh"
+    assert initialized.previous_generation_id is None
+    assert initialized.evidence_sha256 is None
+    with open_generation(paths) as opened:
+        assert opened.registry.metadata()["committed_at"] == 101
+        assert (
+            opened.registry.connection.execute(
+                "SELECT count(*) FROM provider_sessions"
+            ).fetchone()[0]
+            == 0
+        )
+        opened.registry.ensure_workspace(
+            WorkContextId("aaaaaaaa-1111-4111-8111-111111111111"),
+            FrameId("bbbbbbbb-1111-4111-8111-111111111111"),
+            template.host.host_id,
+            template.projects[0].project_id,
+            template.checkouts[0].checkout_id,
+            "Disposable workspace",
+            now=102,
+        )
+
+    with pytest.raises(GenerationError) as caught:
+        initialize(replace(template, generation_id=GENERATION_2), paths, created_at=103)
+    assert caught.value.code == "generation_active"
+    with pytest.raises(GenerationError) as caught:
+        commit(paths, cutover_evidence(GENERATION, captured_at=102), committed_at=103)
+    assert caught.value.code == "cutover_not_applicable"
+    assert not (paths.state_generation(GENERATION) / "cutover-evidence.json").exists()
+
+    replacement = replace(template, generation_id=GENERATION_2)
+    replaced = reset(
+        replacement,
+        paths,
+        expected_current=GENERATION,
+        created_at=104,
+    )
+    assert replaced.generation_id == GENERATION_2
+    assert replaced.previous_generation_id == GENERATION
+    with open_generation(paths) as opened:
+        assert (
+            opened.registry.connection.execute(
+                "SELECT count(*) FROM frames"
+            ).fetchone()[0]
+            == 0
+        )
+    old_database = paths.state_generation(GENERATION) / "switchboard.db"
+    with sqlite3.connect(old_database) as old:
+        assert old.execute("SELECT count(*) FROM frames").fetchone()[0] == 1
+
+    with pytest.raises(GenerationError) as caught:
+        reset(
+            replace(template, generation_id=GenerationId.new()),
+            paths,
+            expected_current=GENERATION,
+            created_at=105,
+        )
+    assert caught.value.code == "generation_changed"
+    assert resolve_current(paths) == GENERATION_2
+
+
+@pytest.mark.parametrize(
+    "boundary",
+    ["files_fsynced", "config_published", "state_published", "pointer_switched"],
+)
+def test_fresh_init_crash_recovery_never_exposes_torn_state(
+    tmp_path: Path, boundary: str
+) -> None:
+    database, config = seeded_legacy(tmp_path)
+    template = export_legacy(database, config, exported_at=100).target_config(
+        GENERATION
+    )
+    paths = roots(tmp_path)
+
+    def fail(current: str) -> None:
+        if current == boundary:
+            raise RuntimeError("simulated crash")
+
+    with pytest.raises(RuntimeError, match="simulated crash"):
+        initialize(template, paths, created_at=101, fault_injector=fail)
+    if boundary == "pointer_switched":
+        assert status(paths).source_kind == "fresh"
+    else:
+        assert not paths.current.exists()
+    recover_incomplete(paths)
+    if boundary != "pointer_switched":
+        assert not paths.config_generation(GENERATION).exists()
+        assert not paths.state_generation(GENERATION).exists()
 
 
 def test_precommit_rollback_and_commit_are_exact_boundaries(tmp_path: Path) -> None:

@@ -72,6 +72,8 @@ jobs:
           swbctl=/tmp/switchboard-wheel-smoke/bin/swbctl
           test "$("$swbctl" --version)" = "swbctl 0.3.0"
           "$swbctl" --help | grep -F "persistent project and task views"
+          "$swbctl" init --help | grep -F -- "--config"
+          "$swbctl" reset --help | grep -F -- "--confirm-generation"
           "$swbctl" state navigator --help | grep -F -- "--refresh"
           "$swbctl" view open --help | grep -F -- "--can-focus-desktop"
           "$python" -m agent_switchboard.navigator --help >/dev/null
@@ -96,6 +98,54 @@ jobs:
           ).is_file()
           for removed in ("snapshot", "task_actions", "tui_gateway", "providers"):
               assert util.find_spec(f"agent_switchboard.{removed}") is None
+          PY
+      - name: Smoke fresh generation lifecycle
+        working-directory: /tmp
+        run: |
+          python=/tmp/switchboard-wheel-smoke/bin/python
+          swbctl=/tmp/switchboard-wheel-smoke/bin/swbctl
+          root=$(mktemp -d)
+          "$python" - "$root/config-template.toml" <<'PY'
+          from pathlib import Path
+          import sys
+
+          Path(sys.argv[1]).write_text('''\
+          config_version = 3
+
+          [host]
+          host_id = "11111111-1111-4111-8111-111111111111"
+          display_name = "ci"
+
+          [providers.codex]
+          enabled = false
+
+          [providers.claude]
+          enabled = false
+          ''', encoding="utf-8")
+          PY
+          "$swbctl" --config-root "$root/config" --state-root "$root/state" \
+            init --config "$root/config-template.toml" \
+            --generation-id aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa --at 1 \
+            > "$root/init.json"
+          "$swbctl" --config-root "$root/config" --state-root "$root/state" \
+            state host --json --at 2 > "$root/host.json"
+          "$swbctl" --config-root "$root/config" --state-root "$root/state" \
+            reset --confirm-generation aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa \
+            --generation-id bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb --at 3 \
+            > "$root/reset.json"
+          "$python" - "$root/init.json" "$root/host.json" "$root/reset.json" <<'PY'
+          import json
+          from pathlib import Path
+          import sys
+
+          initialized, host, reset = (
+              json.loads(Path(path).read_text(encoding="utf-8"))
+              for path in sys.argv[1:]
+          )
+          assert initialized["sourceKind"] == "fresh"
+          assert host["generationId"] == initialized["generationId"]
+          assert reset["previousGenerationId"] == initialized["generationId"]
+          assert reset["sourceKind"] == "fresh"
           PY
       - uses: actions/upload-artifact@v7
         with:
