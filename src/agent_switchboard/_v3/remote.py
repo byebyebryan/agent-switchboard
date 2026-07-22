@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import time
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from typing import Final
@@ -19,6 +20,11 @@ REMOTE_TIMEOUT_SECONDS: Final = 12.0
 MAX_CONCURRENT_SSH: Final = 4
 
 Runner = Callable[[Sequence[str]], Awaitable[CommandOutput]]
+Clock = Callable[[], int]
+
+
+def _clock_ms() -> int:
+    return int(time.time() * 1_000)
 
 
 class RemoteError(RuntimeError):
@@ -163,10 +169,12 @@ class RemoteRuntime:
         registry: Registry,
         *,
         runner: Runner = _default_runner,
+        clock: Clock = _clock_ms,
     ) -> None:
         self.config = config
         self.registry = registry
         self.runner = runner
+        self.clock = clock
 
     def _remote_for_host(self, host_id: HostId) -> RemoteConfig:
         aliases = {
@@ -203,6 +211,7 @@ class RemoteRuntime:
                     state = HostState.from_json(
                         _one_json(output, operation="HostState read")
                     )
+                    completed_at = max(now, self.clock())
                     if state.host_id == self.config.host.host_id:
                         raise RemoteError(
                             "remote_identity_invalid",
@@ -217,8 +226,8 @@ class RemoteRuntime:
                             encoded,
                             hashlib.sha256(encoded.encode()).hexdigest(),
                             int(state.data["generatedAt"]),
-                            now,
-                            now,
+                            completed_at,
+                            completed_at,
                             Reachability.ONLINE,
                             None,
                         )
@@ -232,6 +241,7 @@ class RemoteRuntime:
                     ProtocolError,
                     ConflictError,
                 ) as error:
+                    completed_at = max(now, self.clock())
                     code = getattr(error, "code", "remote_state_invalid")
                     retryable = getattr(error, "retryable", False)
                     failure = FailureRecord(code, str(error)[:1024], retryable)
@@ -252,7 +262,7 @@ class RemoteRuntime:
                                 existing.content_hash,
                                 existing.observed_at,
                                 existing.received_at,
-                                now,
+                                completed_at,
                                 Reachability.OFFLINE,
                                 failure,
                             )

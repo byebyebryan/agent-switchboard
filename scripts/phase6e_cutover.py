@@ -898,8 +898,7 @@ def retire_legacy_surfaces(
                 (timestamp, timestamp, host_id),
             )
         remaining = connection.execute(
-            "SELECT count(*) FROM surfaces "
-            "WHERE host_id = ? AND retired_at IS NULL",
+            "SELECT count(*) FROM surfaces WHERE host_id = ? AND retired_at IS NULL",
             (host_id,),
         ).fetchone()[0]
         if remaining:
@@ -1159,8 +1158,12 @@ def navigator_reachability(raw: bytes, host_id: str) -> str:
     if not isinstance(hosts, list) or not all(isinstance(item, dict) for item in hosts):
         raise CutoverFailure("navigator host collection is invalid")
     matches = [item for item in hosts if item.get("hostId") == host_id]
-    if len(matches) != 1 or not isinstance(matches[0].get("reachability"), str):
+    if not matches:
+        raise CutoverFailure("navigator remote host is missing after refresh")
+    if len(matches) != 1:
         raise CutoverFailure("navigator remote host identity is ambiguous")
+    if not isinstance(matches[0].get("reachability"), str):
+        raise CutoverFailure("navigator remote host reachability is invalid")
     return str(matches[0]["reachability"])
 
 

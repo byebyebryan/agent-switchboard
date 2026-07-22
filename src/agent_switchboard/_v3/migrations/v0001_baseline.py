@@ -701,7 +701,7 @@ STATEMENTS = (
             length(content_hash) = 64 AND content_hash NOT GLOB '*[^0-9a-f]*'
         ),
         observed_at INTEGER NOT NULL CHECK (observed_at >= 0),
-        received_at INTEGER NOT NULL CHECK (received_at >= observed_at),
+        received_at INTEGER NOT NULL CHECK (received_at >= 0),
         last_attempt_at INTEGER NOT NULL CHECK (last_attempt_at >= 0),
         reachability TEXT NOT NULL CHECK (reachability IN ('online', 'offline', 'unknown')),
         error_code TEXT CHECK (error_code IS NULL OR length(error_code) <= 64),

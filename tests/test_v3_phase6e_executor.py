@@ -174,7 +174,7 @@ def test_navigator_reachability_is_exact() -> None:
         }
     )
     assert phase6e.navigator_reachability(raw, REMOTE_HOST) == "offline"
-    with pytest.raises(phase6e.CutoverFailure, match="ambiguous"):
+    with pytest.raises(phase6e.CutoverFailure, match="missing after refresh"):
         phase6e.navigator_reachability(raw, SESSION)
 
 
@@ -249,9 +249,7 @@ def test_worker_call_propagates_bounded_remote_failure(
     )
     with pytest.raises(
         phase6e.CutoverFailure,
-        match=(
-            "remote_owner stage failed: release console script failed"
-        ),
+        match=("remote_owner stage failed: release console script failed"),
     ):
         phase6e.worker_call(spec, "remote_owner", "stage")
 

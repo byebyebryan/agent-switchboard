@@ -105,7 +105,10 @@ def test_refresh_pins_validated_host_and_retains_last_good_on_failure() -> None:
         local_display_name="local",
         now=1,
     ) as registry:
-        runtime = RemoteRuntime(config(), registry, runner=runner)
+        completions = iter((20, 30))
+        runtime = RemoteRuntime(
+            config(), registry, runner=runner, clock=lambda: next(completions)
+        )
         first = asyncio.run(runtime.refresh(now=20))[0]
         assert first.host_id == REMOTE
         assert first.reachability is Reachability.ONLINE
@@ -117,6 +120,30 @@ def test_refresh_pins_validated_host_and_retains_last_good_on_failure() -> None:
         assert cached.received_at == 20
         assert cached.last_attempt_at == 30
         assert cached.state_json == host_state(REMOTE, "snap").decode().strip()
+
+
+def test_refresh_accepts_independent_remote_and_local_clocks() -> None:
+    async def runner(_argv):
+        return CommandOutput(host_state(REMOTE, "snap"), b"", 0)
+
+    with Registry(
+        ":memory:",
+        generation_id=GENERATION,
+        local_host_id=LOCAL,
+        local_display_name="local",
+        now=1,
+    ) as registry:
+        result = asyncio.run(
+            RemoteRuntime(config(), registry, runner=runner, clock=lambda: 5).refresh(
+                now=2
+            )
+        )[0]
+        cached = registry.cached_host_states()[0]
+
+    assert result.reachability is Reachability.ONLINE
+    assert cached.observed_at == 10
+    assert cached.received_at == 5
+    assert cached.last_attempt_at == 5
 
 
 def test_remote_directive_routes_by_pinned_host_and_revalidates_identity() -> None:
