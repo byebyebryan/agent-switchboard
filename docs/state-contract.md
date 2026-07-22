@@ -2,7 +2,7 @@
 
 Date: 2026-07-21
 
-Status: accepted Phase 6A.1 normative contract; implementation pending
+Status: Phase 6B.1 implementation contract locked; implementation pending
 
 Target release: `0.3.0`
 
@@ -33,6 +33,82 @@ is a saga with durable intent, observed evidence, and a repairable phase.
 
 All identifiers below are opaque UUIDs except provider session keys and tmux
 server/pane evidence. Timestamps are UTC Unix milliseconds.
+
+### RegistryMetadata and RequestRecord
+
+```text
+RegistryMetadata
+  singleton               exactly 1
+  schema_version          1
+  protocol_version        1
+  generation_id
+  local_host_id
+  activation_state        cutover_staged | committed
+  created_at
+  committed_at            optional
+
+RequestRecord
+  host_id
+  request_id
+  operation
+  semantic_fingerprint
+  state                   prepared | completed | failed
+  result_type             optional
+  result_id               optional
+  created_at
+  completed_at            optional
+```
+
+Config, database metadata, and the caller's expected generation and local host
+must all agree before normal open. Phase 6B.1 can initialize only an empty
+database and does not resolve the generation pointer. An old schema-v10,
+partially initialized, unknown, or mismatched database fails closed.
+
+`(host_id, request_id)` is unique. Presentation capability is excluded from the
+semantic fingerprint. The stored result identifies the committed semantic
+outcome, never a serialized desktop directive, so focus fallback can reuse the
+request without repeating navigation.
+
+### ProviderSession and historical SessionHandoff
+
+```text
+ProviderSession
+  session_key             host_id:provider:provider_session_id
+  host_id
+  provider                codex | claude
+  provider_session_id
+  project_id              optional
+  checkout_id             optional
+  name                    optional curated value
+  purpose                 optional curated value
+  pinned
+  runtime_presence        live | stopped | unknown
+  resumability            resumable | missing | unknown
+  activity                working | needs_input | ready | completed | unknown
+  activity_reason         permission | question | elicitation | turn_complete |
+                          provider_complete | error | unknown
+  created_at              optional
+  provider_updated_at     optional
+  last_observed_at
+  updated_at
+
+SessionHandoff
+  handoff_id
+  session_key
+  sequence
+  summary
+  next_action
+  source                  user | agent | imported
+  source_host_id
+  content_hash
+  created_at
+```
+
+ProviderSession is materialized state, not an event log. Phase 6D may add
+privacy-safe lifecycle evidence after its hook contract is accepted. A
+SessionHandoff is immutable provider history and permits the Phase 6B.2 cutover
+to preserve old session handoffs without inventing frames or transitions. It is
+not claimable transition authority.
 
 ### Frame
 
@@ -89,6 +165,7 @@ updates the frame's current session atomically.
 WorkContext
   work_context_id
   host_id
+  project_id
   checkout_id
   claim_state             released | held | blocked
   claim_generation
@@ -99,7 +176,9 @@ WorkContext
   updated_at
 ```
 
-The WorkContext is durable; its checkout claim is not permanent. One partial
+The WorkContext is durable; its checkout claim is not permanent. Its project is
+stored explicitly so the context may be created before its workspace frame and
+every member frame can be checked against it. One partial
 unique constraint permits only one `held` context per checkout. One foreground
 frame exists per held context and must be an open member of that context.
 
@@ -155,7 +234,7 @@ falling back to the workspace frame. If the view already shows that project,
 the active frame remains the target. Concurrent route opens single-flight on
 the workspace frame and converge even when callers use different request IDs.
 
-### Surface and tmux server evidence
+### Surface, launch, capability, and tmux server evidence
 
 ```text
 TmuxServer
@@ -181,6 +260,36 @@ Surface
   created_at
   updated_at
   retired_at              optional
+
+LaunchIntent
+  launch_id
+  request_id
+  host_id
+  frame_id
+  provider                codex | claude
+  action                  new | resume
+  target_session_key      required only for resume
+  state                   planned | authorized | started | bound | failed |
+                          superseded
+  failure                 optional bounded record
+  created_at
+  updated_at
+
+AgentCapability
+  capability_id
+  capability_digest       sha256 of raw capability
+  host_id
+  view_id
+  frame_id
+  session_key             optional until binding
+  surface_id
+  launch_id
+  tmux_server_id          optional until physical creation
+  pane_id                 optional until physical creation
+  placement_generation
+  issued_at
+  expires_at
+  revoked_at              optional
 ```
 
 `planned` is durable intent, not a claim that a tmux pane exists. Physical
@@ -191,6 +300,11 @@ names are reused.
 
 Only an exact launch-owned pane/window may be killed. Killing an owning view or
 tmux server is never a surface cleanup primitive.
+
+The raw capability exists only in the launched surface environment. SQLite
+retains its digest and exact authority bindings. No launch becomes `started`
+until durable authorization and exact physical placement agree; `bound`
+requires the one provider session and surface to agree.
 
 ### ViewTransition
 
@@ -237,10 +351,21 @@ source/target placement, and the transition lease in one transaction.
 repeatable. Reconciliation reads pane metadata and either finishes the intended
 placement or rolls back; it never blindly repeats `swap-pane`.
 
-### Handoff and ControlTurn
+### TransitionBrief, CompletionHandoff, and ControlTurn
 
 ```text
-Handoff
+TransitionBrief
+  brief_id
+  transition_id
+  source_frame_id
+  source_session_key
+  target_frame_id
+  brief
+  content_hash
+  created_at
+  first_claimed_at        optional
+
+CompletionHandoff
   handoff_id
   transition_id
   source_frame_id
@@ -270,8 +395,11 @@ ControlTurn
   failure                 optional bounded record
 ```
 
-Handoff content is immutable and unique per completion transition. Claim is
-idempotent for the exact target session and never deletes the handoff.
+TransitionBrief content is immutable and unique per push transition.
+CompletionHandoff content is immutable and unique per completion transition.
+Both claims are idempotent for the exact target session and never delete the
+semantic record. SessionHandoff history is separate and cannot satisfy a
+transition claim.
 
 The only `control.claim.v1` terminal text is:
 
@@ -321,10 +449,22 @@ Recovery
   updated_at
 
 DesktopAttachmentLease
+  lease_id
   view_id
   request_id
   state                   offered | claimed | expired
   expires_at
+
+HostStateCache
+  remote_name
+  host_id
+  state_json              canonical validated HostState v1
+  content_hash
+  observed_at
+  received_at
+  last_attempt_at
+  reachability            online | offline | unknown
+  bounded_error           optional
 ```
 
 Recoveries caused by external side-effect uncertainty are durable and have
@@ -337,6 +477,57 @@ One unexpired desktop attachment lease exists per view. Presentation fallback
 with the same semantic request may claim it. A concurrent different request
 receives `desktop_launch_in_progress`; ambiguous matching desktop windows block
 rather than grant another lease.
+
+Cached owner-host state is projection evidence only. It cannot satisfy a local
+foreign key, revision, claim, capability, request, transition, or mutation
+precondition.
+
+## HostState v1 and NavigatorState v1
+
+`HostState v1` contains:
+
+```text
+schemaVersion = 1
+protocolVersion = 1
+hostStateVersion = 1
+generationId
+activationState
+generatedAt
+host
+projects
+repositories
+projectRepositories
+checkouts
+workContexts
+frames
+frameSessions
+sessions
+surfaces
+views
+placements
+transitions
+controlTurns
+recoveries
+warnings
+truncation
+```
+
+It contains bounded structural summaries, not raw database rows. It excludes
+tmux socket/pane/process locators, capability material, provider argv, paths,
+brief and handoff bodies, prompts, transcripts, and credentials.
+
+`NavigatorState v1` contains `schemaVersion`, `protocolVersion`,
+`navigatorVersion`, `generatedAt`, `localHostId`, `hosts`, `views`, `projects`,
+`recoveries`, `warnings`, and `truncation`. It combines one live local
+HostState with individually validated cached remote states. Structural arrays
+are ordered by host ID then stable entity ID. Cached/remote state never grants
+mutation authority.
+
+Both envelopes retain the existing safety ceilings: 8 MiB encoded JSON, depth
+32, 64 KiB per string, 100,000 array items, and 256 object keys. Bounded
+non-sensitive future fields are accepted and omitted during canonical
+reserialization. Sensitive/raw/prompt/transcript/token/argv fields, terminal
+controls, nonfinite numbers, invalid references, and unsafe bounds are rejected.
 
 ## PresentationDirective v1
 
@@ -368,6 +559,17 @@ navigation.
 ## Config v3 Defaults
 
 ```toml
+config_version = 3
+generation_id = "<non-nil UUID>"
+
+[host]
+host_id = "<non-nil UUID>"
+display_name = "<bounded name>"
+
+[views]
+cli_default_mode = "direct"
+desktop_default_mode = "navigator"
+
 [automation]
 task_push = "conservative"
 complete_return = "synthesize"
@@ -385,6 +587,72 @@ the pending handoff and the next normal parent turn may claim it.
 `live_first` uses the fenced live path only when every prerequisite is proven,
 otherwise exact UUID resume. It never weakens to uncertain live input.
 
+Config v3 also carries providers, remotes, projects, repositories, checkouts,
+tmux, hooks, and optional memory configuration. It has no working-directory or
+recent-row task-first policy. Memory remains disabled by default and confers no
+skill, routing, claim, or transition authority.
+
+## Remaining Legal State Edges
+
+Storage exposes named workflow operations, not arbitrary row updates. In
+addition to the Frame, ViewTransition, and ControlTurn edges above, it enforces:
+
+```text
+WorkContext
+  released -> held | blocked
+  held -> released | blocked
+  blocked -> released | held       explicit human resolution only
+
+UserView
+  ready -> transitioning | degraded | retired
+  transitioning -> ready | degraded
+  degraded -> ready | retired
+
+FramePlacement
+  staged -> active | orphaned
+  active -> parked | stopped_affinity | orphaned
+  parked -> active | stopped_affinity | orphaned
+  stopped_affinity -> staged | orphaned
+
+Surface
+  planned -> live | orphaned | retired
+  live -> dead | orphaned
+  dead -> retired
+  orphaned -> live | dead | retired
+
+LaunchIntent
+  planned -> authorized | failed | superseded
+  authorized -> started | failed | superseded
+  started -> bound | failed
+
+ControlTurn
+  prepared -> submitted | failed | superseded
+  submitted -> observed | uncertain
+  observed -> claimed | uncertain | failed
+  uncertain -> observed | claimed | failed
+  claimed -> settled | failed
+
+Recovery
+  open -> resolved | dismissed
+
+DesktopAttachmentLease
+  offered -> claimed | expired
+
+RequestRecord
+  prepared -> completed | failed
+```
+
+Terminal rows are retained for audit and never reopened. A fresh identity is
+used for another launch, surface, transition, control turn, recovery, or lease.
+Every WorkContext claim edge increments `claim_generation`; every placement
+edge increments `generation`; every committed view mutation increments
+`revision`.
+
+Transport phase advances `intent -> moved -> inspected -> committed`. A
+model-free focus/mode operation may use `intent -> inspected -> committed`.
+Only `moved` or `inspected` may advance to terminal `rolled_back`; committed or
+rolled-back work is never executed again.
+
 ## Host-Global Concurrency Matrix
 
 Storage constraints and CAS enforce:
@@ -396,7 +664,8 @@ Storage constraints and CAS enforce:
 - one live surface and one pending launch per provider session;
 - one nonterminal transition per view;
 - one active placement per view and one owning placement per open frame;
-- one completion handoff and control turn per transition;
+- one transition brief per push, and one completion handoff and control turn per
+  completion transition;
 - one active desktop attachment lease per view; and
 - one normalized semantic fingerprint per host/request UUID.
 

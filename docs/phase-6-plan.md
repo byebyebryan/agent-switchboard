@@ -81,9 +81,10 @@ repeat navigation.
 ### Canonical mutable state
 
 The fresh registry owns Host, Project, Repository, Checkout, ProviderSession,
-Handoff, Frame, FrameSession, WorkContext, UserView, FramePlacement, Transition,
-ControlTurn, Recovery, Surface, launch intent, capability digest, request
-idempotency, and owner-host cache records.
+immutable historical SessionHandoff, Frame, FrameSession, WorkContext, UserView,
+FramePlacement, TransitionBrief, CompletionHandoff, Transition, ControlTurn,
+Recovery, Surface, launch intent, capability digest, request idempotency, and
+owner-host cache records.
 
 The exact state machines and invariants live in `docs/state-contract.md`. That
 document is normative when a delivery slice or frontend plan is less precise.
