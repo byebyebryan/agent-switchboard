@@ -113,6 +113,34 @@ def test_dry_run_does_not_create_provider_directory(tmp_path: Path) -> None:
     assert not root.exists()
 
 
+def test_install_preserves_stable_public_executable_symlink(tmp_path: Path) -> None:
+    release_root = tmp_path / "release"
+    release_root.mkdir()
+    release = executable(release_root)
+    public = tmp_path / "public" / "swbctl"
+    public.parent.mkdir()
+    public.symlink_to(release)
+    root = tmp_path / "codex"
+
+    edit_hooks(
+        "install",
+        "codex",
+        executable=public,
+        timeout_seconds=1,
+        environment={"HOME": str(tmp_path), "CODEX_HOME": str(root)},
+    )
+
+    document = json.loads((root / "hooks.json").read_text(encoding="utf-8"))
+    handlers = [
+        handler
+        for group in document["hooks"]["Stop"]
+        for handler in group["hooks"]
+        if handler.get("statusMessage") == STATUS_MESSAGE
+    ]
+    assert len(handlers) == 1
+    assert handlers[0]["command"].split()[0] == str(public)
+
+
 @pytest.mark.parametrize("unsafe", ["document", "lock", "directory"])
 def test_symlink_boundaries_fail_closed(tmp_path: Path, unsafe: str) -> None:
     root = tmp_path / "codex"

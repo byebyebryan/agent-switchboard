@@ -254,8 +254,12 @@ def edit_hooks(
 ) -> HookEditResult:
     if operation not in {"install", "uninstall"}:
         raise HookConfigError("hook operation is unsupported")
-    executable = executable.resolve(strict=True)
-    if not executable.is_file() or not os.access(executable, os.X_OK):
+    executable = Path(os.path.abspath(executable))
+    try:
+        target = executable.resolve(strict=True)
+    except OSError as error:
+        raise HookConfigError("swbctl executable is not runnable") from error
+    if not target.is_file() or not os.access(executable, os.X_OK):
         raise HookConfigError("swbctl executable is not runnable")
     if not 1 <= timeout_seconds <= 30:
         raise HookConfigError("hook timeout is outside bounds")
