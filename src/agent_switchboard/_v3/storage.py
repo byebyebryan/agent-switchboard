@@ -55,6 +55,7 @@ from .domain import (
     GenerationId,
     HandoffId,
     HostId,
+    HostStateCache,
     LaunchAction,
     LaunchId,
     LaunchIntent,
@@ -68,6 +69,7 @@ from .domain import (
     ProjectRepository,
     ProviderId,
     ProviderSession,
+    Reachability,
     Recovery,
     RecoveryActionability,
     RecoveryId,
@@ -407,6 +409,26 @@ def _request(row: sqlite3.Row) -> RequestRecord:
     )
 
 
+def _host_state_cache(row: sqlite3.Row) -> HostStateCache:
+    return HostStateCache(
+        str(row["remote_name"]),
+        HostId(row["host_id"]),
+        str(row["state_json"]),
+        str(row["content_hash"]),
+        int(row["observed_at"]),
+        int(row["received_at"]),
+        int(row["last_attempt_at"]),
+        Reachability(row["reachability"]),
+        None
+        if row["error_code"] is None
+        else FailureRecord(
+            str(row["error_code"]),
+            str(row["error_message"]),
+            bool(row["error_retryable"]),
+        ),
+    )
+
+
 def _database_path(path: str | os.PathLike[str]) -> str:
     value = os.fspath(path)
     if value == ":memory:":
@@ -435,6 +457,20 @@ def _secure_sidecars(path: Path) -> None:
             candidate.chmod(0o600)
         except FileNotFoundError:
             continue
+
+
+def _enable_wal_with_retry(
+    connection: sqlite3.Connection, *, busy_timeout_ms: int
+) -> None:
+    deadline = time.monotonic() + busy_timeout_ms / 1_000
+    while True:
+        try:
+            connection.execute("PRAGMA journal_mode = WAL")
+            return
+        except sqlite3.OperationalError as error:
+            if "locked" not in str(error).casefold() or time.monotonic() >= deadline:
+                raise
+            time.sleep(min(0.01, max(0.0, deadline - time.monotonic())))
 
 
 def connect_database(
@@ -474,7 +510,7 @@ def connect_database(
         connection.row_factory = sqlite3.Row
         connection.execute(f"PRAGMA busy_timeout = {busy_timeout_ms}")
         connection.execute("PRAGMA foreign_keys = ON")
-        connection.execute("PRAGMA journal_mode = WAL")
+        _enable_wal_with_retry(connection, busy_timeout_ms=busy_timeout_ms)
         connection.execute("PRAGMA synchronous = NORMAL")
         migrate(
             connection,
@@ -3491,6 +3527,91 @@ class Registry:
                 (str(lease.lease_id),),
             )
         return self.get_lease(lease.lease_id)
+
+    def cache_host_state(self, cached: HostStateCache) -> HostStateCache:
+        if cached.host_id == self._local_host_id:
+            raise ConflictError(
+                "cache_local_host", "local owner state cannot be stored as remote cache"
+            )
+        try:
+            with self.transaction(immediate=True) as connection:
+                existing = connection.execute(
+                    "SELECT * FROM host_state_cache WHERE remote_name = ? "
+                    "OR host_id = ?",
+                    (cached.remote_name, str(cached.host_id)),
+                ).fetchone()
+                if existing is not None:
+                    current = _host_state_cache(existing)
+                    if (
+                        current.remote_name != cached.remote_name
+                        or current.host_id != cached.host_id
+                    ):
+                        raise ConflictError(
+                            "remote_identity", "remote name and host identity disagree"
+                        )
+                    if cached.observed_at < current.observed_at:
+                        raise ConflictError(
+                            "stale_observation", "remote HostState moved backwards"
+                        )
+                    if (
+                        cached.observed_at == current.observed_at
+                        and cached.content_hash != current.content_hash
+                    ):
+                        raise ConflictError(
+                            "observation_conflict",
+                            "equal remote observation time has different content",
+                        )
+                connection.execute(
+                    """
+                    INSERT INTO host_state_cache VALUES (
+                        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                    ) ON CONFLICT(remote_name) DO UPDATE SET
+                        state_json = excluded.state_json,
+                        content_hash = excluded.content_hash,
+                        observed_at = excluded.observed_at,
+                        received_at = excluded.received_at,
+                        last_attempt_at = excluded.last_attempt_at,
+                        reachability = excluded.reachability,
+                        error_code = excluded.error_code,
+                        error_message = excluded.error_message,
+                        error_retryable = excluded.error_retryable
+                    """,
+                    (
+                        cached.remote_name,
+                        str(cached.host_id),
+                        cached.state_json,
+                        cached.content_hash,
+                        cached.observed_at,
+                        cached.received_at,
+                        cached.last_attempt_at,
+                        cached.reachability.value,
+                        None
+                        if cached.bounded_error is None
+                        else cached.bounded_error.code,
+                        None
+                        if cached.bounded_error is None
+                        else cached.bounded_error.message,
+                        None
+                        if cached.bounded_error is None
+                        else cached.bounded_error.retryable,
+                    ),
+                )
+        except sqlite3.IntegrityError as error:
+            raise ConflictError("cache_conflict", str(error)) from error
+        row = self.connection.execute(
+            "SELECT * FROM host_state_cache WHERE remote_name = ?",
+            (cached.remote_name,),
+        ).fetchone()
+        assert row is not None
+        return _host_state_cache(row)
+
+    def cached_host_states(self) -> tuple[HostStateCache, ...]:
+        return tuple(
+            _host_state_cache(row)
+            for row in self.connection.execute(
+                "SELECT * FROM host_state_cache ORDER BY host_id, remote_name"
+            )
+        )
 
 
 __all__ = [

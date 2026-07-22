@@ -80,6 +80,7 @@ from agent_switchboard._v3.domain import (
     content_hash,
     request_fingerprint,
 )
+from agent_switchboard._v3.protocol import build_host_state
 from agent_switchboard._v3.storage import ConflictError, Registry
 
 
@@ -548,6 +549,9 @@ def test_push_transition_claim_is_exact_atomic_and_idempotent() -> None:
         assert opened.get_view(VIEW).active_frame_id == TASK
         assert opened.get_placement(WORKSPACE_PLACEMENT).state is PlacementState.PARKED
         assert opened.get_control_turn(PUSH_CONTROL).state is ControlState.SETTLED
+        projected = build_host_state(opened, generated_at=151)
+        assert projected.data["transitions"][0]["state"] == "completed"  # type: ignore[index]
+        assert projected.data["controlTurns"][0]["state"] == "settled"  # type: ignore[index]
         with pytest.raises(StateTransitionError):
             opened.advance_control_turn(
                 PUSH_CONTROL,

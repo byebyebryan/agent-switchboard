@@ -2,8 +2,8 @@
 
 Date: 2026-07-21
 
-Status: Phase 6A.1 normative repair and isolated tmux evidence complete;
-replacement implementation pending
+Status: Phase 6A.1 complete; Phase 6B.1 private baseline implemented and
+validated; Phase 6B.2 activation work pending
 
 Target core release: `0.3.0`
 

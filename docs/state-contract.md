@@ -2,7 +2,7 @@
 
 Date: 2026-07-21
 
-Status: Phase 6B.1 implementation contract locked; implementation pending
+Status: Phase 6B.1 implementation contract locked, implemented, and validated
 
 Target release: `0.3.0`
 
