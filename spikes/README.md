@@ -36,6 +36,27 @@ and canonical fingerprint
 Raw file hashes and canonical semantic fingerprints are different evidence and
 must not be substituted for one another.
 
+## Codex thread-name mutation probe
+
+Codex exposes `/rename` inside its interactive TUI but has no `codex rename`
+shell command. `codex_thread_name_probe.py` retains the
+no-model proof originally implemented by the local `$name-thread` skill. It
+uses `CODEX_THREAD_ID` from the current Codex turn, launches one isolated
+short-lived App Server over stdio, calls `thread/name/set`, verifies the result
+with `thread/read`, and exits without creating a shared listener.
+
+Run it only from a Codex turn whose title may be changed:
+
+```sh
+.venv/bin/python spikes/codex_thread_name_probe.py \
+  --title "verify Codex thread naming"
+```
+
+The probe prints no thread ID, title, path, prompt, or transcript content. The
+App Server method and `CODEX_THREAD_ID` environment contract are experimental,
+version-specific evidence. Production naming must capability-gate them and
+must not depend on installing or invoking the personal skill.
+
 ## Production Codex smoke
 
 `live_codex_smoke.py` exercises the production adapter, reconciliation, and

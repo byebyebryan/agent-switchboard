@@ -516,10 +516,14 @@ The first-slice lifecycle is:
 4. After binding, a transition-owned bounded action attempts to project that
    same title into provider metadata. This stays off the post-turn
    surface-switch hot path and cannot delay or roll back a successful push.
-5. Codex performs the projection with a transient stdio App Server call to
-   `thread/name/set(threadId, name)`, verifies it with `thread/read`, and reaps
-   the process. It does not type `/rename` into the TUI or enable the shared
-   default-socket daemon.
+5. Codex has no `codex rename` shell command. Its documented user-facing
+   operation is interactive `/rename`; the retained local `$name-thread` skill
+   proved that a noninteractive helper can reach the same metadata through a
+   transient stdio App Server call to `thread/name/set(threadId, name)`, verify
+   it with `thread/read`, and reap the process. Switchboard must port that
+   bounded helper into its version-gated adapter rather than type `/rename`
+   into the TUI, invoke a personal skill, or enable the shared default-socket
+   daemon.
 6. A known not-yet-writable metadata result may receive one bounded retry after
    the first completed turn. Unsupported providers and exhausted failures keep
    the curated Switchboard name and report bounded diagnostic state; they do
@@ -688,10 +692,13 @@ is known. The existing `SessionStart` binding supplies that UUID. The adapter
 then calls `thread/name/set` through the transient stdio process and verifies
 the result with `thread/read`.
 
-The operation was proven locally against an active isolated Codex `0.144.6`
-thread on 2026-07-21. The title was persisted in Codex's session index, the
-transient process exited, the shared service stayed disabled, and no default
-socket or App Server process remained.
+The operation was proven locally by the `$name-thread` skill against an active
+isolated Codex `0.144.6` thread on 2026-07-21. The title was persisted in
+Codex's session index, the transient process exited, the shared service stayed
+disabled, and no default socket or App Server process remained. The proof is
+now retained as
+[`spikes/codex_thread_name_probe.py`](../spikes/codex_thread_name_probe.py);
+the personal skill itself is not a production dependency.
 
 Naming contracts:
 
@@ -876,6 +883,10 @@ intentionally stops at one workspace child until checkout ownership is revised.
 - Local no-model CLI help on 2026-07-21 confirmed that Codex `0.144.6` accepts
   an initial prompt on exact `fork` and `resume`, and Claude Code `2.1.216`
   accepts a prompt with `--resume` plus optional `--fork-session`.
+- Codex's command overview has no thread-rename shell command. The
+  supported interactive surface is `/rename`; the repo-owned no-model probe
+  retains the local `$name-thread` skill's experimental stdio bridge for
+  version-gated adapter work.
 - Codex `0.144.6` TUI source selects an embedded in-process App Server when no
   reusable default daemon socket is reachable, and otherwise auto-selects the
   local daemon for eligible launches:
