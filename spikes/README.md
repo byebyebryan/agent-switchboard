@@ -41,40 +41,45 @@ must not be substituted for one another.
 
 `tmux_sidebar_swap_spike.py` tests the proposed persistent Switchboard view
 without starting Codex, Claude, or a model turn. It creates a private tmux
-server with one fixed sidebar pane, one visible dummy project runtime, and one
-dummy child runtime staged in a hidden window. It attaches real PTY-backed tmux
-clients and swaps the complete project and child panes through the right-hand
-slot.
+server whose view session exposes only `main`, plus a separate unattached
+holding session. The view contains a fixed sidebar and one visible dummy
+project runtime; a dummy child runtime waits behind a durable authorization,
+exact-placement, pane-metadata, and client-selection gate in holding. Real
+PTY-backed tmux clients exercise the shared right-hand slot.
 
 ```sh
 .venv/bin/python spikes/tmux_sidebar_swap_spike.py
 ```
 
-The recorded tmux `3.7b` result on 2026-07-21 passed these feasibility checks:
+The recorded tmux `3.7b` result on 2026-07-21 passes 33 checks, including:
 
-- a hidden dead `remain-on-exit` anchor kept the view session durable without a
-  resident Switchboard process;
-- the hidden child remained inert even though its tmux session had an attached
-  client, then started only when an exact client viewed its pane;
-- `swap-pane` preserved the sidebar, both dummy agent processes, their pane
-  IDs, pane-scoped metadata, and the right-slot geometry;
-- removing the sidebar produced a true single-pane direct mode, and recreating
-  it restored navigator geometry without changing the active agent pane or
-  process;
-- a reverse swap restored the project while keeping the child alive for retry
-  or rollback;
-- native pane zoom hid and restored the sidebar without changing the split;
-  and
-- two clients attached to one view followed the same active right-hand slot,
-  confirming that one view session is one shared navigation cursor rather than
-  two independent foreground selections.
+- a dead placeholder keeps each Switchboard-owned session durable without an
+  anchor process, and per-session `destroy-unattached=off` defeats an
+  adversarial global `on` value;
+- the view session exposes only `main`; even an explicitly attached holding
+  client cannot start the child before the durable intent, exact `view:main`
+  placement, authorized pane metadata, and exact client selection agree;
+- the swapped pane identity and placement are inspectable before the simulated
+  durable locator commit, and the right-slot geometry remains stable;
+- an unequal read-only `ignore-size` observer does not drive geometry, while an
+  `active-pane` client is detected as unsupported rather than silently gaining
+  a private navigation cursor;
+- complete-and-return presents the parent first, submits only the fixed
+  `transition_claim()` control prompt through an explicit writable client,
+  fences input until simulated hook observation, and only then removes the
+  parked child;
+- direct mode and native zoom preserve the provider process while the sidebar
+  is removed and reconstructed; and
+- killing and recreating the server on the same named socket changes the
+  `(socket_path, pid, start_time)` generation.
 
 The probe uses a unique tmux socket, loads no user tmux configuration, emits no
-paths or process IDs, and kills only its isolated server. It proves the tmux
-composition, exact-pane visibility gate, rollback, and layout mechanics. It
-does not yet prove the compact Textual sidebar, provider behavior after a live
-pane move and resize, trusted-hook timing, durable locator updates, automatic
-provider parking/resume, or remote-host views.
+provider paths or process IDs, and kills only its isolated server. It proves the
+tmux topology, authorization fencing, explicit-client execution, transition
+ordering, and server-generation mechanics. It does not yet prove the compact
+Textual sidebar, provider behavior after live pane movement, trusted-hook
+timing, real durable locator commits, semantic parent synthesis, or remote-host
+views; those remain installed Phase 6 acceptance work.
 
 ## Codex thread-name mutation probe
 
