@@ -16,17 +16,18 @@ projects/repositories/checkouts, explicit tasks, Snapshot v2/Fleet v1,
 pull-based SSH federation, the full-screen Textual manager, and the separate
 DMS model-v5 picker all have deterministic and guarded live acceptance.
 
-Phase 6A.1 is now the accepted clean-break direction for `0.3.0`. It replaces,
-rather than extends, that product shape with durable host-local user views,
-unified workspace/task Frames, navigator and direct modes, strategic fixed
-control turns, HostState v1/NavigatorState v1/PresentationDirective v1, Config
-v3, a fresh registry baseline, a replacement Textual navigator, and a
-views/projects/recovery-only DMS entry picker.
+Phase 6A.1 through 6C are implemented and validated behind the private `_v3`
+boundary for `0.3.0`. The replacement now has Config v3, its fresh registry,
+HostState v1/NavigatorState v1/PresentationDirective v1, exact offline
+CutoverBundle conversion, generation-safe staged activation, durable host-local
+views, direct/navigator tmux composition, and the compact resident navigator.
+The [6C acceptance record](docs/phase-6c-acceptance.md) captures the isolated
+CLI, tmux, Textual, Codex, and Claude evidence.
 
-Phase 6 production code has not landed. The old runtime remains usable only
-until the coordinated activation slice; it is not a compatibility contract.
-Do not run the registry/config cutover before the Phase 6 implementation and
-paired core/DMS acceptance are complete.
+The public executable remains `0.2.0`; private Phase 6 modules do not register
+a second `swbctl` entrypoint. Phase 6D workspace/one-child automation and the
+paired DMS replacement still precede coordinated activation. Do not run the
+registry/config cutover against live user state before Phase 6E.
 
 Current design sources:
 
@@ -34,6 +35,8 @@ Current design sources:
 - [State and Control-Turn Contract](docs/state-contract.md)
 - [View and Frame Workflow](docs/view-workflow.md)
 - [Phase 6 Clean-Break Plan](docs/phase-6-plan.md)
+- [CutoverBundle v1 and Activation](docs/cutover-bundle-v1.md)
+- [Phase 6C Acceptance](docs/phase-6c-acceptance.md)
 
 The implemented `0.2` phase records are retained as non-packaged historical
 evidence under [`docs/archive/0.2`](docs/archive/0.2/README.md).

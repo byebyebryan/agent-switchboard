@@ -1,9 +1,9 @@
 # Phase 6 Clean-Break View-First Plan
 
-Date: 2026-07-21
+Date: 2026-07-22
 
-Status: Phase 6A.1 complete; Phase 6B.1 private baseline implemented and
-validated; Phase 6B.2 activation work pending
+Status: Phase 6A.1, 6B.1, 6B.2, and 6C complete behind the private replacement
+boundary; Phase 6D is next
 
 Target core release: `0.3.0`
 
@@ -228,6 +228,10 @@ matrices, and reproducible protocol fixtures pass without live user state.
 
 ### Phase 6B.2: exporter, importer, and generation activation
 
+Status: complete in the private replacement. Exact fields, activation ordering,
+and failure behavior are recorded in
+[CutoverBundle v1 and Activation](cutover-bundle-v1.md).
+
 - Implement the exact v10/v2 exporter and bounded CutoverBundle importer.
 - Implement paired generation construction, fsync, pointer switch, mismatch
   rejection, staged restrictions, status, commit, and pre-commit rollback.
@@ -239,17 +243,26 @@ read-only startup, rollback, and irreversible commit behavior pass.
 
 ### Phase 6C: view shell and replacement navigator
 
+Status: complete in the private replacement. Evidence is recorded in
+[Phase 6C Acceptance](phase-6c-acceptance.md).
+
 - Implement the main-only view session, separate holding session, dead
   placeholders, pane metadata, server-generation fencing, and repair.
 - Implement view create/open/focus/attach/mode/retire/recover with revisions and
   desktop leases.
 - Build the compact resident navigator and focused project, settings, history,
   and recovery panels.
-- Prove real no-model Codex/Claude panes survive movement, resize, mode changes,
-  detach, server loss, and exact UUID recovery.
+- Prove real no-model Codex/Claude panes survive movement, client resize, mode
+  changes, and detach. Prove server-generation loss invalidates every locator,
+  revokes capability evidence, recreates a degraded placeholder shell, and
+  exposes an exact provider-resume recovery target.
 
 Exit: direct and navigator workflows pass from plain CLI, tmux, and an isolated
 desktop context without old public commands.
+
+Exact UUID resume/bind after server loss stays in Phase 6D because it uses the
+provider launch/resume authority introduced by that slice; 6C must not invent
+that authority merely to make a shell repair look complete.
 
 ### Phase 6D: workspace and one-child automation
 

@@ -37,6 +37,8 @@ def test_static_pep_621_metadata_and_stdlib_runtime() -> None:
         "docs/state-contract.md",
         "docs/view-workflow.md",
         "docs/phase-6-plan.md",
+        "docs/cutover-bundle-v1.md",
+        "docs/phase-6c-acceptance.md",
     ]
     assert metadata["tool"]["pytest"]["ini_options"]["pythonpath"] == ["src"]
 
@@ -44,11 +46,13 @@ def test_static_pep_621_metadata_and_stdlib_runtime() -> None:
 def test_readme_states_phase_and_license() -> None:
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
     assert "implemented `0.2.0` task-first system" in readme
-    assert "Phase 6A.1 is now the accepted clean-break direction" in readme
+    assert "Phase 6A.1 through 6C are implemented and validated" in readme
     assert "docs/design.md" in readme
     assert "docs/state-contract.md" in readme
     assert "docs/view-workflow.md" in readme
     assert "docs/phase-6-plan.md" in readme
+    assert "docs/cutover-bundle-v1.md" in readme
+    assert "docs/phase-6c-acceptance.md" in readme
     assert "docs/archive/0.2/README.md" in readme
     assert "MIT License" in readme
     assert "SOURCE_DATE_EPOCH=1784073600" in readme
@@ -126,6 +130,8 @@ def test_ci_smokes_wheel_and_source_distribution_installations() -> None:
     assert '"docs/state-contract.md"' in verifier
     assert '"docs/view-workflow.md"' in verifier
     assert '"docs/phase-6-plan.md"' in verifier
+    assert '"docs/cutover-bundle-v1.md"' in verifier
+    assert '"docs/phase-6c-acceptance.md"' in verifier
     assert '"agent_switchboard/migrations/v0003_name_provenance_runtime_index.py"' in (
         verifier
     )
