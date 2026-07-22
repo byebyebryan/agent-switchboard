@@ -3,7 +3,8 @@
 Date: 2026-07-22
 
 Status: implementation complete; live activation requires an accepted paired
-commit and a reachable `snap.lan`.
+commit, a reachable `snap.lan`, and a successful non-disruptive rehearsal of
+the exact release artifacts.
 
 Phase 6E is a clean break from core `0.2` and DMS `0.4.1`. The executor builds
 core `0.3.0` and DMS `0.5.0` twice, verifies byte identity, installs both hosts
@@ -119,6 +120,28 @@ records their count and identity digest. This terminal bookkeeping write is
 restored from the host backup on every pre-commit rollback; direct database
 cleanup is neither required nor accepted operator procedure.
 
+## Disruption budget and rehearsal gate
+
+The final executor is an activation mechanism, not an integration-test loop.
+Validation, deterministic builds, inactive installs, remote transport checks,
+and an isolated DMS cold-start rehearsal must pass while the managed provider
+and its tmux client remain live. The rehearsal uses the exact prepared core and
+DMS artifacts through private staged routes, leaves the public `swbctl`, hooks,
+and generation pointers on the legacy installation, and restores the prior DMS
+plugin, settings, state, and service state when complete.
+
+The rehearsal must prove the DMS 0.5 adapter/model contract, staged mutation
+blocking, a fresh systemd invocation, and distinct cold and post-refresh cache
+values. DMS writes its cache asynchronously, so the rehearsal and executor poll
+for cache creation and change instead of reading immediately after status turns
+fresh.
+
+Only after that gate passes does the operator stop the captured provider and
+detach its tmux client once. A failed final attempt invalidates that prepared
+bundle: diagnose and replay the failing path privately, then prepare a fresh
+cutover ID and fresh generation IDs before asking for another interruption.
+Repeated operator outages are not an accepted debugging workflow.
+
 ## Execution and recovery
 
 Exit the managed provider and every tmux client. From a plain desktop shell with
@@ -138,10 +161,13 @@ reject mutation while staged. It cold-starts DMS from the versioned artifact; a
 plugin reload is not accepted as evidence.
 
 Before the first commit, any failure restores the original public symlinks,
-complete hook files, DMS plugin/state/settings, service state, and prior core
-generation. The journal records any rollback error explicitly. Snap commits
-first. After that boundary, automatic downgrade is forbidden and the journal
-records `forward_recovery_required` until both hosts reach the accepted pair.
+complete legacy SQLite/config contents, complete hook files, DMS
+plugin/state/settings, their recorded live file modes, service state, and prior
+core generation. SQLite backup and restore use the SQLite backup API and remove
+stale WAL/SHM companions as part of atomic database replacement. The journal
+records any rollback error explicitly. Snap commits first. After that boundary,
+automatic downgrade is forbidden and the journal records
+`forward_recovery_required` until both hosts reach the accepted pair.
 
 On success, the executor starts DMS, opens the first local project view in
 direct mode, and calls `frame reopen` for the exact imported session key. The

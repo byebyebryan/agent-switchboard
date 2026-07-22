@@ -17,6 +17,7 @@ import os
 import re
 import shutil
 import sqlite3
+import stat
 import subprocess
 import sys
 import time
@@ -620,6 +621,43 @@ def load_inventory(spec: Spec, host: HostSpec) -> dict[str, Any]:
     return value
 
 
+def recorded_mode(path: Path) -> int:
+    metadata = path.stat(follow_symlinks=False)
+    mode = stat.S_IMODE(metadata.st_mode)
+    if (
+        not stat.S_ISREG(metadata.st_mode)
+        or mode & 0o111
+        or mode & 0o022
+        or not mode & 0o400
+    ):
+        raise CutoverFailure(f"source file mode is unsafe: {path}")
+    return mode
+
+
+def inventory_mode(value: object) -> int:
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, int)
+        or value & 0o111
+        or value & 0o022
+        or not value & 0o400
+        or value > 0o777
+    ):
+        raise CutoverFailure("backup file mode is invalid")
+    return value
+
+
+def copy_sqlite(source: Path, destination: Path) -> None:
+    try:
+        with (
+            sqlite3.connect(f"file:{source}?mode=ro", uri=True) as input_db,
+            sqlite3.connect(destination) as output_db,
+        ):
+            input_db.backup(output_db)
+    except sqlite3.Error as error:
+        raise CutoverFailure("SQLite backup failed") from error
+
+
 def worker_stage(spec: Spec, role: str) -> dict[str, Any]:
     prepared = load_prepared(spec)
     host = spec.host(role)
@@ -667,13 +705,19 @@ def worker_stage(spec: Spec, role: str) -> dict[str, Any]:
             if not source.is_file() or source.is_symlink():
                 raise CutoverFailure(f"legacy source is missing or unsafe: {source}")
             target = temporary_backup / source.name
-            shutil.copy2(source, target, follow_symlinks=False)
+            kind = "sqlite" if source == host.legacy_database else "file"
+            if kind == "sqlite":
+                copy_sqlite(source, target)
+            else:
+                shutil.copy2(source, target, follow_symlinks=False)
             target.chmod(0o400)
             backed_up.append(
                 {
                     "source": str(source),
                     "backupName": target.name,
                     "sha256": digest_file(target),
+                    "mode": recorded_mode(source),
+                    "kind": kind,
                 }
             )
         hooks: dict[str, dict[str, Any]] = {}
@@ -684,6 +728,7 @@ def worker_stage(spec: Spec, role: str) -> dict[str, Any]:
                 raise CutoverFailure(f"hook configuration is unsafe: {source}")
             record: dict[str, Any] = {"path": str(source), "existed": source.exists()}
             if source.exists():
+                mode = recorded_mode(source)
                 target = hook_backup / f"{provider}.json"
                 shutil.copy2(source, target, follow_symlinks=False)
                 target.chmod(0o400)
@@ -691,6 +736,7 @@ def worker_stage(spec: Spec, role: str) -> dict[str, Any]:
                     {
                         "backupName": f"hooks/{provider}.json",
                         "sha256": digest_file(target),
+                        "mode": mode,
                     }
                 )
             hooks[provider] = record
@@ -1053,13 +1099,66 @@ def worker_hide_core(spec: Spec, role: str) -> dict[str, Any]:
     return {"role": role, "activeSwbctl": None}
 
 
-def restore_file(source: Path, destination: Path) -> None:
+def restore_file(source: Path, destination: Path, *, mode: int) -> None:
     if not source.is_file() or source.is_symlink():
         raise CutoverFailure("backup file is missing or unsafe")
+    mode = inventory_mode(mode)
     destination.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     temporary = destination.with_name(f".{destination.name}.{uuid4()}.tmp")
     shutil.copy2(source, temporary, follow_symlinks=False)
+    temporary.chmod(mode)
     os.replace(temporary, destination)
+
+
+def restore_sqlite(source: Path, destination: Path, *, mode: int) -> None:
+    if not source.is_file() or source.is_symlink():
+        raise CutoverFailure("backup database is missing or unsafe")
+    mode = inventory_mode(mode)
+    destination.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    temporary = destination.with_name(f".{destination.name}.{uuid4()}.tmp")
+    try:
+        copy_sqlite(source, temporary)
+        temporary.chmod(mode)
+        companions: list[Path] = []
+        for suffix in ("-wal", "-shm"):
+            companion = Path(f"{destination}{suffix}")
+            if companion.is_symlink() or (
+                companion.exists() and not companion.is_file()
+            ):
+                raise CutoverFailure("legacy database companion is unsafe")
+            companions.append(companion)
+        os.replace(temporary, destination)
+        for companion in companions:
+            companion.unlink(missing_ok=True)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def restore_legacy_sources(
+    inventory: dict[str, Any], backup: Path, host: HostSpec
+) -> None:
+    records = inventory.get("sources")
+    if not isinstance(records, list) or len(records) != 2:
+        raise CutoverFailure("legacy source backup inventory is incompatible")
+    indexed = {
+        record.get("source"): record for record in records if isinstance(record, dict)
+    }
+    expected = (host.legacy_database, host.legacy_config)
+    if set(indexed) != {str(path) for path in expected}:
+        raise CutoverFailure("legacy source backup paths are incompatible")
+    for destination in expected:
+        record = indexed[str(destination)]
+        source = backup / str(record.get("backupName"))
+        if digest_file(source) != record.get("sha256"):
+            raise CutoverFailure("legacy source backup hash changed")
+        mode = inventory_mode(record.get("mode"))
+        kind = record.get("kind")
+        if destination == host.legacy_database and kind == "sqlite":
+            restore_sqlite(source, destination, mode=mode)
+        elif destination == host.legacy_config and kind == "file":
+            restore_file(source, destination, mode=mode)
+        else:
+            raise CutoverFailure("legacy source backup kind is incompatible")
 
 
 def worker_rollback(spec: Spec, role: str) -> dict[str, Any]:
@@ -1072,10 +1171,11 @@ def worker_rollback(spec: Spec, role: str) -> dict[str, Any]:
         with contextlib.suppress(UnicodeDecodeError, json.JSONDecodeError):
             rolled_back = json.loads(result.stdout)
     inventory = load_inventory(spec, host)
+    backup = host.backup_root / spec.cutover_id
+    restore_legacy_sources(inventory, backup, host)
     hooks = inventory.get("hooks")
     if not isinstance(hooks, dict) or set(hooks) != set(host.hook_files):
         raise CutoverFailure("host hook backup inventory is incompatible")
-    backup = host.backup_root / spec.cutover_id
     for provider, destination in sorted(host.hook_files.items()):
         record = hooks[provider]
         if not isinstance(record, dict) or record.get("path") != str(destination):
@@ -1084,7 +1184,7 @@ def worker_rollback(spec: Spec, role: str) -> dict[str, Any]:
             source = backup / str(record.get("backupName"))
             if digest_file(source) != record.get("sha256"):
                 raise CutoverFailure("host hook backup hash changed")
-            restore_file(source, destination)
+            restore_file(source, destination, mode=inventory_mode(record.get("mode")))
         elif record.get("existed") is False:
             if destination.is_symlink() or (
                 destination.exists() and not destination.is_file()
@@ -1263,11 +1363,29 @@ def dms_state_value(path: Path) -> tuple[bytes, dict[str, Any]]:
     return canonical(current), value
 
 
+def wait_for_dms_state(
+    path: Path, *, different_from: bytes | None = None
+) -> tuple[bytes, dict[str, Any]]:
+    deadline = time.monotonic() + 5
+    last_error: CutoverFailure | None = None
+    while time.monotonic() < deadline:
+        try:
+            current = dms_state_value(path)
+        except CutoverFailure as error:
+            last_error = error
+        else:
+            if different_from is None or current[0] != different_from:
+                return current
+        time.sleep(0.05)
+    raise CutoverFailure("DMS 0.5 did not persist a fresh entry cache") from last_error
+
+
 def backup_optional_file(source: Path, target: Path) -> dict[str, Any]:
     if source.is_symlink() or (source.exists() and not source.is_file()):
         raise CutoverFailure(f"backup source is unsafe: {source}")
     if not source.exists():
         return {"path": str(source), "existed": False}
+    mode = recorded_mode(source)
     shutil.copy2(source, target, follow_symlinks=False)
     target.chmod(0o400)
     return {
@@ -1275,6 +1393,7 @@ def backup_optional_file(source: Path, target: Path) -> dict[str, Any]:
         "existed": True,
         "backupName": target.name,
         "sha256": digest_file(target),
+        "mode": mode,
     }
 
 
@@ -1348,7 +1467,7 @@ def restore_optional_file(record: object, backup: Path, destination: Path) -> No
         source = backup / str(record.get("backupName"))
         if digest_file(source) != record.get("sha256"):
             raise CutoverFailure("DMS backup file hash changed")
-        restore_file(source, destination)
+        restore_file(source, destination, mode=inventory_mode(record.get("mode")))
     elif record.get("existed") is False:
         if destination.is_symlink() or (
             destination.exists() and not destination.is_file()
@@ -1394,9 +1513,25 @@ def dms_restore(spec: Spec) -> dict[str, Any]:
     return {"restored": True, "serviceActive": inventory.get("serviceWasActive")}
 
 
-def wait_for_dms(*, minimum_generation: int = -1) -> dict[str, Any]:
+def wait_for_dms(
+    *, minimum_generation: int = -1, ensure_enabled: bool = False
+) -> dict[str, Any]:
+    rescanned = False
     deadline = time.monotonic() + 20
     while time.monotonic() < deadline:
+        if ensure_enabled:
+            if not rescanned:
+                scan = run(
+                    ["dms", "ipc", "call", "plugin-scan", "rescan"],
+                    timeout=5,
+                    check=False,
+                )
+                rescanned = scan.returncode == 0
+            run(
+                ["dms", "ipc", "call", "plugins", "enable", "switchboard"],
+                timeout=5,
+                check=False,
+            )
         result = run(
             ["dms", "ipc", "call", "switchboard-launcher", "status"],
             timeout=5,
@@ -1455,10 +1590,8 @@ def dms_cold_start(spec: Spec, prepared: dict[str, Any]) -> dict[str, Any]:
         ]
     )
     run(["systemctl", "--user", "start", desktop.service], timeout=60)
-    run(["dms", "ipc", "call", "plugin-scan", "rescan"], check=False)
-    run(["dms", "ipc", "call", "plugins", "enable", "switchboard"], check=False)
-    status = wait_for_dms()
-    cold, _all_state = dms_state_value(desktop.plugin_state)
+    status = wait_for_dms(ensure_enabled=True)
+    cold, _all_state = wait_for_dms_state(desktop.plugin_state)
     active_target = Path(str(staged["staged"]))
     model_envelope = json_command(
         [
@@ -1501,7 +1634,7 @@ def dms_cold_start(spec: Spec, prepared: dict[str, Any]) -> dict[str, Any]:
     blocked_action = canonical(blocked_value)
     run(["dms", "ipc", "call", "switchboard-launcher", "refresh"])
     status = wait_for_dms(minimum_generation=int(status["runGeneration"]))
-    warm, _all_state = dms_state_value(desktop.plugin_state)
+    warm, _all_state = wait_for_dms_state(desktop.plugin_state, different_from=cold)
     after = service_properties(desktop.service)
     process_id = ":".join(
         (
@@ -1604,12 +1737,7 @@ def evidence(
 
 def activate_dms(spec: Spec) -> dict[str, Any]:
     run(["systemctl", "--user", "start", spec.desktop.service], timeout=60)
-    run(["dms", "ipc", "call", "plugin-scan", "rescan"], check=False)
-    run(
-        ["dms", "ipc", "call", "plugins", "enable", "switchboard"],
-        check=False,
-    )
-    return wait_for_dms()
+    return wait_for_dms(ensure_enabled=True)
 
 
 def resume_current_session(spec: Spec, prepared: dict[str, Any]) -> dict[str, Any]:

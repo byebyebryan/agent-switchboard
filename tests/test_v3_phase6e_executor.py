@@ -4,6 +4,7 @@ import importlib.util
 import json
 import os
 import sqlite3
+import stat
 import subprocess
 import sys
 from pathlib import Path
@@ -207,6 +208,118 @@ def test_atomic_symlink_replacement(tmp_path: Path) -> None:
     assert os.readlink(destination) == "/opt/swbctl-next/bin/swbctl"
 
 
+def test_restore_file_preserves_recorded_live_mode(tmp_path: Path) -> None:
+    backup = tmp_path / "backup.json"
+    backup.write_text("before\n", encoding="utf-8")
+    backup.chmod(0o400)
+    destination = tmp_path / "live.json"
+    destination.write_text("after\n", encoding="utf-8")
+
+    phase6e.restore_file(backup, destination, mode=0o640)
+
+    assert destination.read_text(encoding="utf-8") == "before\n"
+    assert stat.S_IMODE(destination.stat().st_mode) == 0o640
+
+
+def test_restore_sqlite_replaces_mutation_and_stale_companions(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "live.db"
+    with sqlite3.connect(database) as connection:
+        connection.execute("CREATE TABLE values_table(value TEXT NOT NULL)")
+        connection.execute("INSERT INTO values_table VALUES ('before')")
+    database.chmod(0o600)
+    backup = tmp_path / "backup.db"
+    phase6e.copy_sqlite(database, backup)
+    backup.chmod(0o400)
+    with sqlite3.connect(database) as connection:
+        connection.execute("UPDATE values_table SET value = 'after'")
+    Path(f"{database}-wal").write_bytes(b"stale")
+    Path(f"{database}-shm").write_bytes(b"stale")
+
+    phase6e.restore_sqlite(backup, database, mode=0o600)
+
+    with sqlite3.connect(database) as connection:
+        value = connection.execute("SELECT value FROM values_table").fetchone()[0]
+    assert value == "before"
+    assert stat.S_IMODE(database.stat().st_mode) == 0o600
+    assert not Path(f"{database}-wal").exists()
+    assert not Path(f"{database}-shm").exists()
+
+
+def test_restore_legacy_sources_restores_snapshot_contents_and_modes(
+    tmp_path: Path,
+) -> None:
+    spec = parsed_spec(tmp_path)
+    host = spec.host("desktop_primary")
+    host.legacy_database.parent.mkdir(parents=True)
+    with sqlite3.connect(host.legacy_database) as connection:
+        connection.execute("CREATE TABLE values_table(value TEXT NOT NULL)")
+        connection.execute("INSERT INTO values_table VALUES ('before')")
+    host.legacy_database.chmod(0o600)
+    host.legacy_config.write_text("state = 'before'\n", encoding="utf-8")
+    host.legacy_config.chmod(0o640)
+
+    backup = host.backup_root / spec.cutover_id
+    backup.mkdir(parents=True)
+    database_backup = backup / "legacy.db"
+    phase6e.copy_sqlite(host.legacy_database, database_backup)
+    database_backup.chmod(0o400)
+    config_backup = backup / "legacy.toml"
+    config_backup.write_text("state = 'before'\n", encoding="utf-8")
+    config_backup.chmod(0o400)
+    inventory = {
+        "sources": [
+            {
+                "source": str(host.legacy_database),
+                "backupName": database_backup.name,
+                "sha256": phase6e.digest_file(database_backup),
+                "mode": 0o600,
+                "kind": "sqlite",
+            },
+            {
+                "source": str(host.legacy_config),
+                "backupName": config_backup.name,
+                "sha256": phase6e.digest_file(config_backup),
+                "mode": 0o640,
+                "kind": "file",
+            },
+        ]
+    }
+    with sqlite3.connect(host.legacy_database) as connection:
+        connection.execute("UPDATE values_table SET value = 'after'")
+    host.legacy_database.chmod(0o400)
+    host.legacy_config.write_text("state = 'after'\n", encoding="utf-8")
+    host.legacy_config.chmod(0o400)
+    Path(f"{host.legacy_database}-wal").write_bytes(b"stale")
+    Path(f"{host.legacy_database}-shm").write_bytes(b"stale")
+
+    phase6e.restore_legacy_sources(inventory, backup, host)
+
+    with sqlite3.connect(host.legacy_database) as connection:
+        value = connection.execute("SELECT value FROM values_table").fetchone()[0]
+    assert value == "before"
+    assert host.legacy_config.read_text(encoding="utf-8") == "state = 'before'\n"
+    assert stat.S_IMODE(host.legacy_database.stat().st_mode) == 0o600
+    assert stat.S_IMODE(host.legacy_config.stat().st_mode) == 0o640
+    assert not Path(f"{host.legacy_database}-wal").exists()
+    assert not Path(f"{host.legacy_database}-shm").exists()
+
+
+def test_backup_optional_file_records_mode_without_weakening_backup(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "settings.json"
+    source.write_text("{}\n", encoding="utf-8")
+    source.chmod(0o644)
+    target = tmp_path / "backup.json"
+
+    record = phase6e.backup_optional_file(source, target)
+
+    assert record["mode"] == 0o644
+    assert stat.S_IMODE(target.stat().st_mode) == 0o400
+
+
 @pytest.mark.parametrize(
     ("active", "sub", "main", "control"),
     (("inactive", "dead", "0", "0"), ("failed", "failed", "0", "0")),
@@ -244,6 +357,112 @@ def test_dms_stopped_rejects_live_or_transitioning_processes(
             "ControlPID": control,
         }
     )
+
+
+def test_wait_for_dms_state_observes_debounced_and_changed_cache(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    first = iter(
+        (
+            phase6e.CutoverFailure("new DMS cache key was not created"),
+            (b"cold", {"cache": "cold"}),
+        )
+    )
+
+    def initial(_path: Path):
+        value = next(first)
+        if isinstance(value, Exception):
+            raise value
+        return value
+
+    monkeypatch.setattr(phase6e, "dms_state_value", initial)
+    monkeypatch.setattr(phase6e.time, "sleep", lambda _seconds: None)
+    assert phase6e.wait_for_dms_state(tmp_path / "state.json") == (
+        b"cold",
+        {"cache": "cold"},
+    )
+
+    changed = iter(((b"cold", {}), (b"warm", {"cache": "warm"})))
+    monkeypatch.setattr(phase6e, "dms_state_value", lambda _path: next(changed))
+    assert phase6e.wait_for_dms_state(
+        tmp_path / "state.json", different_from=b"cold"
+    ) == (b"warm", {"cache": "warm"})
+
+
+def test_wait_for_dms_retries_enable_until_plugin_is_discovered(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[str, ...]] = []
+    statuses = iter(
+        (
+            {"adapterVersion": "missing"},
+            {
+                "adapterVersion": "0.5.0",
+                "bridgeVersion": 1,
+                "modelVersion": 1,
+                "idle": True,
+                "hasModel": True,
+                "fresh": True,
+                "runGeneration": 1,
+            },
+        )
+    )
+
+    def fake_run(argv, **_kwargs):
+        calls.append(tuple(argv))
+        stdout = phase6e.canonical(next(statuses)) if argv[-1] == "status" else b""
+        return subprocess.CompletedProcess(argv, 0, stdout, b"")
+
+    monkeypatch.setattr(phase6e, "run", fake_run)
+    monkeypatch.setattr(phase6e.time, "monotonic", lambda: 0.0)
+    monkeypatch.setattr(phase6e.time, "sleep", lambda _seconds: None)
+
+    result = phase6e.wait_for_dms(ensure_enabled=True)
+
+    assert result["adapterVersion"] == "0.5.0"
+    assert calls.count(("dms", "ipc", "call", "plugin-scan", "rescan")) == 1
+    assert calls.count(("dms", "ipc", "call", "plugins", "enable", "switchboard")) == 2
+
+
+def test_wait_for_dms_retries_rescan_until_ipc_is_ready(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[str, ...]] = []
+    scan_attempts = 0
+    statuses = iter(
+        (
+            {},
+            {
+                "adapterVersion": "0.5.0",
+                "bridgeVersion": 1,
+                "modelVersion": 1,
+                "idle": True,
+                "hasModel": True,
+                "fresh": True,
+                "runGeneration": 1,
+            },
+        )
+    )
+
+    def fake_run(argv, **_kwargs):
+        nonlocal scan_attempts
+        calls.append(tuple(argv))
+        if argv[-1] == "rescan":
+            scan_attempts += 1
+            return subprocess.CompletedProcess(
+                argv, 1 if scan_attempts == 1 else 0, b"", b""
+            )
+        stdout = phase6e.canonical(next(statuses)) if argv[-1] == "status" else b""
+        return subprocess.CompletedProcess(argv, 0, stdout, b"")
+
+    monkeypatch.setattr(phase6e, "run", fake_run)
+    monkeypatch.setattr(phase6e.time, "monotonic", lambda: 0.0)
+    monkeypatch.setattr(phase6e.time, "sleep", lambda _seconds: None)
+
+    result = phase6e.wait_for_dms(ensure_enabled=True)
+
+    assert result["adapterVersion"] == "0.5.0"
+    assert calls.count(("dms", "ipc", "call", "plugin-scan", "rescan")) == 2
 
 
 def test_rehome_console_script_repairs_relocated_venv_entrypoint(
