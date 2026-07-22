@@ -10,6 +10,7 @@ import subprocess
 import tempfile
 import time
 from collections.abc import Mapping
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
@@ -176,8 +177,10 @@ def _latency_probe(
             )
             assert process.stdin is not None
             try:
-                process.stdin.write(payload)
-                process.stdin.close()
+                with suppress(BrokenPipeError):
+                    process.stdin.write(payload)
+                with suppress(BrokenPipeError):
+                    process.stdin.close()
                 while process.poll() is None:
                     remaining = deadline - time.monotonic()
                     if remaining <= 0:
