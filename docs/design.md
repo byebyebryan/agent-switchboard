@@ -245,7 +245,10 @@ argv, credentials, or unrestricted filesystem data.
 
 `NavigatorState v1` aggregates individually validated HostState records and
 projects only views, project entry routes, navigable frame summaries, recovery,
-reachability/staleness, warnings, and truncation.
+reachability/staleness, warnings, and truncation. Its top-level generation ID is
+the local cache provenance; each host row retains its owner generation ID and
+stale bit. Core authors view titles, breadcrumbs, activity, attention,
+transition/control state, and last-activity summaries.
 
 `PresentationDirective v1` replaces the proposed `ViewAction v1`. Core commits
 or revalidates semantic navigation, then returns `focus`, `attach`, or `blocked`
@@ -258,7 +261,11 @@ The replacement public command tree is:
 swbctl state host --json
 swbctl state navigator [--refresh] --json
 
-swbctl view list|show|open|focus|attach|mode|retire|recover
+swbctl view open --host HOST (--view VIEW | --project PROJECT) --request-id UUID \
+  [--can-focus-desktop] [--can-launch-terminal] --json
+swbctl view recover --host HOST --recovery RECOVERY --request-id UUID --json
+swbctl view attach --host HOST --view VIEW --request-id UUID --json
+swbctl view list|show|focus|mode|retire
 swbctl frame list|show|push|back|complete|close|reopen
 swbctl project ...
 swbctl session show|stop ...
@@ -326,6 +333,10 @@ fixed SSH argv and retains last-good state with explicit stale/offline markers.
 Every mutation routes to the owner and revalidates live state. Selecting a
 remote project/view opens or focuses a separate SSH-backed host-local view; a
 local view never swaps a remote pane.
+
+Remote collection and owner routing use configured host IDs mapped to fixed SSH
+endpoints. Reads are bounded and concurrent, with validated last-good caches;
+mutation commands are fixed argv and never derive an endpoint from UI data.
 
 ## Registry and Configuration Baseline
 

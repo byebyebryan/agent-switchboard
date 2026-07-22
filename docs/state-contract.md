@@ -517,11 +517,19 @@ tmux socket/pane/process locators, capability material, provider argv, paths,
 brief and handoff bodies, prompts, transcripts, and credentials.
 
 `NavigatorState v1` contains `schemaVersion`, `protocolVersion`,
-`navigatorVersion`, `generatedAt`, `localHostId`, `hosts`, `views`, `projects`,
-`recoveries`, `warnings`, and `truncation`. It combines one live local
-HostState with individually validated cached remote states. Structural arrays
+`navigatorVersion`, `generationId`, `generatedAt`, `localHostId`, `hosts`,
+`views`, `projects`, `recoveries`, `warnings`, and `truncation`. It combines one
+live local HostState with individually validated cached remote states. Structural arrays
 are ordered by host ID then stable entity ID. Cached/remote state never grants
-mutation authority.
+mutation authority. Every host row carries its owner generation ID and an
+explicit `stale` boolean in addition to reachability. The top-level generation
+is always the local generation and is the only valid DMS cache provenance.
+
+View rows are presentation-ready summaries authored by core. In addition to
+identity, mode, state, revision, and active frame/project IDs, they carry title,
+breadcrumb, activity, attention, transition/control state, and last activity.
+DMS does not re-derive any of these fields and NavigatorState never contains a
+desktop token.
 
 Both envelopes retain the existing safety ceilings: 8 MiB encoded JSON, depth
 32, 64 KiB per string, 100,000 array items, and 256 object keys. Bounded
@@ -585,7 +593,16 @@ the pending handoff and the next normal parent turn may claim it.
 
 `control_turns.transport` is host-wide `live_first | resume_only`.
 `live_first` uses the fenced live path only when every prerequisite is proven,
-otherwise exact UUID resume. It never weakens to uncertain live input.
+otherwise exact UUID resume. `resume_only` never attempts live input. Live
+submission requires a verified idle owned pane; stop/resume requires a verified
+idle owned parent. Active or ambiguous ownership blocks instead of guessing.
+Submitted turns are generation-bound and receive one short bounded settlement
+watchdog; reconciliation marks overdue turns uncertain and never resubmits.
+
+Provider version output is strict input and retained as telemetry, not an
+allowlist. Missing executables, malformed version output, unsupported command
+shape, identity mismatch, or observed behavior mismatch fail closed. A newer
+Codex or Claude version holding the same tested contract is accepted.
 
 Config v3 also carries providers, remotes, projects, repositories, checkouts,
 tmux, hooks, and optional memory configuration. It has no working-directory or

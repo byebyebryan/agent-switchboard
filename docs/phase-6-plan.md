@@ -285,10 +285,16 @@ and no duplicate prompt or runtime.
 ### Phase 6E: coordinated activation
 
 - Freeze `0.2` writes, export, back up, and rehearse from a plain shell.
+- Build and accept exact paired commits on temporary `phase6e` branches; version
+  observations are recorded evidence rather than provider allowlists.
 - Disable and close the old DMS before installing either replacement.
 - Install paired core/DMS artifacts inactive, import a staged generation, and
   cold-start DMS; plugin reload is not accepted activation evidence.
 - Validate local, DMS, and remote state reads while every mutation is blocked.
+- Collect `CutoverEvidence v1`: exact core/DMS commits, artifact hashes,
+  observed provider versions, local and remote generation IDs, cold-start
+  identity, staged read hashes, and named acceptance checks. Boolean attestations
+  are not sufficient.
 - Commit the paired generation, reinstall trusted hooks, then open the first
   view and resume one exact known provider UUID.
 - Delete old active modules/tests/fixtures/packaging and release core `0.3.0`
@@ -355,6 +361,13 @@ Run from a plain shell outside every managed provider pane:
 Any failure before step 7 uses `cutover rollback`. Any failure after step 7 is
 forward recovery unless the operator explicitly chooses a full offline restore.
 There is no automatic post-commit downgrade.
+
+The one-shot executor prepares both hosts before the first commit and records
+roles `desktop_primary` (local) and `remote_owner` (snap). It commits snap first,
+then local, with hooks and DMS disabled across the distributed boundary. Once
+the first host commits, recovery is forward-only. The operator launches the
+executor from a plain shell after exiting managed providers; it finally opens
+an empty workspace frame and resumes the captured exact session UUID.
 
 ## Acceptance Matrix
 
