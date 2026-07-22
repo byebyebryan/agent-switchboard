@@ -11,13 +11,16 @@ from test_v3_cutover import (
     GENERATION,
     HOST,
     PROJECT,
+    SESSION_KEY,
+    cutover_evidence,
     export_legacy,
     roots,
     seeded_legacy,
 )
 
 from agent_switchboard._v3.cli import main as v3_main
-from agent_switchboard._v3.domain import ViewId, ViewMode
+from agent_switchboard._v3.domain import ProviderId, ViewId, ViewMode
+from agent_switchboard._v3.provider_runtime import ProviderContract
 from agent_switchboard._v3.tmux_view import TmuxExecutor
 
 pytestmark = pytest.mark.skipif(shutil.which("tmux") is None, reason="tmux required")
@@ -81,14 +84,18 @@ def test_private_cli_runs_staged_reads_then_committed_view_workflow(
         )
         assert json.loads(capsys.readouterr().out)["error"]["code"] == "cutover_staged"
 
+        evidence_path = tmp_path / "evidence.json"
+        evidence_path.write_bytes(
+            cutover_evidence(GENERATION, captured_at=102).to_json()
+        )
         assert (
             v3_main(
                 [
                     *base,
                     "cutover",
                     "commit",
-                    "--dms-cold-started",
-                    "--staged-reads-validated",
+                    "--evidence",
+                    str(evidence_path),
                     "--at",
                     "103",
                 ]
@@ -119,6 +126,49 @@ def test_private_cli_runs_staged_reads_then_committed_view_workflow(
         opened = json.loads(capsys.readouterr().out)
         view_id = ViewId(opened["viewId"])
         assert opened["kind"] == "attach"
+
+        assert v3_main([*base, "frame", "list", "--at", "104"]) == 0
+        frames = json.loads(capsys.readouterr().out)
+        assert len(frames) == 1
+        frame_id = frames[0]["frameId"]
+        fake = tmp_path / "fake-codex"
+        fake.write_text(
+            "#!/usr/bin/env python3\nimport time\ntime.sleep(60)\n",
+            encoding="utf-8",
+        )
+        fake.chmod(0o700)
+        monkeypatch.setattr(
+            "agent_switchboard._v3.workflow.probe_contract",
+            lambda provider, executable: ProviderContract(
+                ProviderId(provider), str(fake), "99.0.0"
+            ),
+        )
+        assert (
+            v3_main(
+                [
+                    *base,
+                    "frame",
+                    "reopen",
+                    "--host",
+                    HOST,
+                    "--frame",
+                    frame_id,
+                    "--session",
+                    SESSION_KEY,
+                    "--request-id",
+                    "aaaaaaaa-1212-4212-8212-121212121212",
+                    "--at",
+                    "104",
+                ]
+            )
+            == 0
+        )
+        reopened = json.loads(capsys.readouterr().out)
+        assert reopened == {
+            "frameId": frame_id,
+            "runtimePresence": "live",
+            "sessionKey": SESSION_KEY,
+        }
 
         assert (
             v3_main(
@@ -176,6 +226,22 @@ def test_private_cli_runs_staged_reads_then_committed_view_workflow(
                 ]
             )
         assert captured[-1].endswith(":main")
+        assert (
+            v3_main(
+                [
+                    *base,
+                    "session",
+                    "stop",
+                    "--session",
+                    SESSION_KEY,
+                    "--at",
+                    "107",
+                ]
+            )
+            == 0
+        )
+        stopped = json.loads(capsys.readouterr().out)
+        assert stopped["runtimePresence"] == "stopped"
     finally:
         subprocess.run(
             ["tmux", "-S", str(socket), "kill-server"],

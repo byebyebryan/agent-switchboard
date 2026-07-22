@@ -21,10 +21,6 @@ from typing import Any, Final, Never
 from urllib.parse import quote
 from uuid import UUID, uuid4
 
-from ..config import ConfigError as LegacyConfigError
-from ..config import parse_config as parse_legacy_config
-from ..domain import HostId as LegacyHostId
-from ..storage import handoff_content_hash as legacy_handoff_content_hash
 from .config import (
     AutomationConfig,
     ControlTurnsConfig,
@@ -70,6 +66,7 @@ from .domain import (
     canonical_json,
     content_hash,
 )
+from .legacy_v2 import LegacyConfigError, parse_legacy_config
 
 BUNDLE_VERSION: Final = 1
 LEGACY_SCHEMA_VERSION: Final = 10
@@ -101,6 +98,20 @@ def _fail(code: str, message: str) -> Never:
 
 def _sha256(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()
+
+
+def _legacy_handoff_content_hash(summary: str, next_action: str) -> str:
+    return _sha256(
+        json.dumps(
+            {
+                "nextAction": unicodedata.normalize("NFC", next_action).strip(),
+                "summary": unicodedata.normalize("NFC", summary).strip(),
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode()
+    )
 
 
 def _canonical_bytes(value: Mapping[str, Any]) -> bytes:
@@ -1141,7 +1152,7 @@ def export_legacy(
             host = hosts[0]
             try:
                 legacy = parse_legacy_config(
-                    config_data, host_id=LegacyHostId(host["host_id"])
+                    config_data, host_id=HostId(host["host_id"])
                 )
             except LegacyConfigError as error:
                 raise CutoverError("source_config_invalid", str(error)) from error
@@ -1332,7 +1343,7 @@ def export_legacy(
             ]
             if any(
                 row["content_hash"]
-                != legacy_handoff_content_hash(row["summary"], row["next_action"])
+                != _legacy_handoff_content_hash(row["summary"], row["next_action"])
                 for row in handoffs
             ):
                 _fail("source_corrupt", "legacy handoff content hash mismatch")

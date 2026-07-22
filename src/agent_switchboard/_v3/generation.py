@@ -23,13 +23,31 @@ from uuid import uuid4
 
 from .config import SwitchboardConfig, parse_config, render_config
 from .cutover import CutoverBundle, CutoverError
-from .domain import ActivationState, GenerationId, canonical_json
+from .domain import ActivationState, GenerationId, HostId, canonical_json
 from .storage import Registry
 
 CORE_TARGET_VERSION: Final = "0.3.0"
 DMS_TARGET_VERSION: Final = "0.5.0"
 MANIFEST_VERSION: Final = 1
+EVIDENCE_VERSION: Final = 1
 _POINTER_TARGET_PARTS: Final = 2
+_SHA256_LENGTH: Final = 64
+_GIT_COMMIT_LENGTH: Final = 40
+_HOST_ROLES: Final = frozenset({"desktop_primary", "remote_owner"})
+_REQUIRED_ACCEPTANCE_CHECKS: Final = frozenset(
+    {
+        "coreDoctor",
+        "reconciliation",
+        "stagedMutationBlock",
+        "hostState",
+        "navigatorState",
+        "dmsModel",
+        "dmsColdCache",
+        "dmsWarmCache",
+        "remoteOnline",
+        "remoteOffline",
+    }
+)
 
 
 class GenerationError(RuntimeError):
@@ -72,10 +90,258 @@ class GenerationPaths:
 
 @dataclass(frozen=True, slots=True)
 class CutoverEvidence:
-    core_version: str
-    dms_version: str
-    dms_cold_started: bool
-    staged_reads_validated: bool
+    """Strict, canonical evidence for one paired two-host activation."""
+
+    value: Mapping[str, Any]
+
+    @classmethod
+    def from_json(cls, raw: bytes) -> CutoverEvidence:
+        try:
+            value = json.loads(raw)
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise GenerationError("cutover_evidence_invalid", str(error)) from error
+        return cls.from_dict(value)
+
+    @classmethod
+    def from_dict(cls, value: object) -> CutoverEvidence:
+        if not isinstance(value, dict):
+            raise GenerationError(
+                "cutover_evidence_invalid", "evidence must be an object"
+            )
+        _exact_fields(
+            value,
+            {
+                "evidenceVersion",
+                "capturedAt",
+                "core",
+                "dms",
+                "hosts",
+                "dmsColdStart",
+                "checks",
+            },
+            "evidence",
+        )
+        if value["evidenceVersion"] != EVIDENCE_VERSION:
+            raise GenerationError(
+                "cutover_evidence_invalid", "evidence version is incompatible"
+            )
+        _timestamp_value(value["capturedAt"], "capturedAt")
+        core = _artifact_evidence(value["core"], "core", CORE_TARGET_VERSION)
+        dms = _artifact_evidence(value["dms"], "dms", DMS_TARGET_VERSION)
+        hosts_raw = value["hosts"]
+        if not isinstance(hosts_raw, list) or len(hosts_raw) != 2:
+            raise GenerationError(
+                "cutover_evidence_invalid", "hosts must contain exactly two records"
+            )
+        hosts = [_host_evidence(item) for item in hosts_raw]
+        roles = {item["role"] for item in hosts}
+        if roles != _HOST_ROLES or len({item["hostId"] for item in hosts}) != 2:
+            raise GenerationError(
+                "cutover_evidence_invalid",
+                "host roles and identities must be exact and distinct",
+            )
+        if len({item["generationId"] for item in hosts}) != 2:
+            raise GenerationError(
+                "cutover_evidence_invalid", "host generations must be distinct"
+            )
+        cold = _cold_start_evidence(value["dmsColdStart"])
+        desktop = next(item for item in hosts if item["role"] == "desktop_primary")
+        if cold["hostId"] != desktop["hostId"]:
+            raise GenerationError(
+                "cutover_evidence_invalid",
+                "DMS cold start must belong to desktop_primary",
+            )
+        checks_raw = value["checks"]
+        if (
+            not isinstance(checks_raw, dict)
+            or set(checks_raw) != _REQUIRED_ACCEPTANCE_CHECKS
+        ):
+            raise GenerationError(
+                "cutover_evidence_invalid", "named acceptance checks are incomplete"
+            )
+        checks = {
+            key: _sha256(value, f"checks.{key}") for key, value in checks_raw.items()
+        }
+        normalized = {
+            "evidenceVersion": EVIDENCE_VERSION,
+            "capturedAt": value["capturedAt"],
+            "core": core,
+            "dms": dms,
+            "hosts": sorted(hosts, key=lambda item: item["role"]),
+            "dmsColdStart": cold,
+            "checks": dict(sorted(checks.items())),
+        }
+        return cls(normalized)
+
+    def to_json(self) -> bytes:
+        return canonical_json(dict(self.value)).encode()
+
+    @property
+    def captured_at(self) -> int:
+        return int(self.value["capturedAt"])
+
+    def includes_generation(self, generation_id: GenerationId) -> bool:
+        return any(
+            item["generationId"] == str(generation_id) for item in self.value["hosts"]
+        )
+
+    @property
+    def sha256(self) -> str:
+        return hashlib.sha256(self.to_json()).hexdigest()
+
+
+def _exact_fields(value: Mapping[str, Any], expected: set[str], label: str) -> None:
+    if set(value) != expected:
+        raise GenerationError(
+            "cutover_evidence_invalid", f"{label} fields are incompatible"
+        )
+
+
+def _timestamp_value(value: object, label: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise GenerationError("cutover_evidence_invalid", f"{label} is invalid")
+    return value
+
+
+def _bounded_text(value: object, label: str, *, maximum: int = 256) -> str:
+    if (
+        not isinstance(value, str)
+        or not value
+        or len(value.encode()) > maximum
+        or "\x00" in value
+    ):
+        raise GenerationError("cutover_evidence_invalid", f"{label} is invalid")
+    return value
+
+
+def _sha256(value: object, label: str) -> str:
+    text = _bounded_text(value, label, maximum=_SHA256_LENGTH)
+    if len(text) != _SHA256_LENGTH or any(
+        character not in "0123456789abcdef" for character in text
+    ):
+        raise GenerationError(
+            "cutover_evidence_invalid", f"{label} is not a lowercase SHA-256"
+        )
+    return text
+
+
+def _artifact_evidence(
+    value: object, label: str, target_version: str
+) -> dict[str, str]:
+    if not isinstance(value, dict):
+        raise GenerationError("cutover_evidence_invalid", f"{label} must be an object")
+    _exact_fields(value, {"version", "commit", "artifactSha256"}, label)
+    version = _bounded_text(value["version"], f"{label}.version")
+    commit_hash = _bounded_text(
+        value["commit"], f"{label}.commit", maximum=_GIT_COMMIT_LENGTH
+    )
+    if version != target_version:
+        raise GenerationError(
+            "cutover_evidence_invalid", f"{label} version is incompatible"
+        )
+    if len(commit_hash) != _GIT_COMMIT_LENGTH or any(
+        character not in "0123456789abcdef" for character in commit_hash
+    ):
+        raise GenerationError(
+            "cutover_evidence_invalid", f"{label} commit is not an exact Git object"
+        )
+    return {
+        "version": version,
+        "commit": commit_hash,
+        "artifactSha256": _sha256(value["artifactSha256"], f"{label}.artifactSha256"),
+    }
+
+
+def _host_evidence(value: object) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise GenerationError(
+            "cutover_evidence_invalid", "host evidence must be an object"
+        )
+    _exact_fields(
+        value,
+        {"role", "hostId", "generationId", "providerVersions", "stagedReads"},
+        "host",
+    )
+    role = _bounded_text(value["role"], "host.role")
+    if role not in _HOST_ROLES:
+        raise GenerationError("cutover_evidence_invalid", "host role is incompatible")
+    try:
+        host_id = str(HostId(value["hostId"]))
+        generation_id = str(GenerationId(value["generationId"]))
+    except Exception as error:
+        raise GenerationError(
+            "cutover_evidence_invalid", "host identity is invalid"
+        ) from error
+    providers = value["providerVersions"]
+    if (
+        not isinstance(providers, dict)
+        or not providers
+        or not set(providers) <= {"codex", "claude"}
+    ):
+        raise GenerationError(
+            "cutover_evidence_invalid", "provider observations are invalid"
+        )
+    provider_versions = {
+        key: _bounded_text(item, f"providerVersions.{key}")
+        for key, item in providers.items()
+    }
+    reads = value["stagedReads"]
+    if not isinstance(reads, dict):
+        raise GenerationError(
+            "cutover_evidence_invalid", "staged reads must be an object"
+        )
+    _exact_fields(reads, {"hostStateSha256", "navigatorStateSha256"}, "stagedReads")
+    return {
+        "role": role,
+        "hostId": host_id,
+        "generationId": generation_id,
+        "providerVersions": dict(sorted(provider_versions.items())),
+        "stagedReads": {
+            "hostStateSha256": _sha256(
+                reads["hostStateSha256"], "stagedReads.hostStateSha256"
+            ),
+            "navigatorStateSha256": _sha256(
+                reads["navigatorStateSha256"], "stagedReads.navigatorStateSha256"
+            ),
+        },
+    }
+
+
+def _cold_start_evidence(value: object) -> dict[str, str]:
+    if not isinstance(value, dict):
+        raise GenerationError(
+            "cutover_evidence_invalid", "DMS cold start must be an object"
+        )
+    _exact_fields(
+        value,
+        {
+            "hostId",
+            "processStartId",
+            "modelSha256",
+            "coldCacheSha256",
+            "warmCacheSha256",
+        },
+        "dmsColdStart",
+    )
+    try:
+        host_id = str(HostId(value["hostId"]))
+    except Exception as error:
+        raise GenerationError(
+            "cutover_evidence_invalid", "DMS cold-start host is invalid"
+        ) from error
+    return {
+        "hostId": host_id,
+        "processStartId": _bounded_text(
+            value["processStartId"], "dmsColdStart.processStartId"
+        ),
+        "modelSha256": _sha256(value["modelSha256"], "dmsColdStart.modelSha256"),
+        "coldCacheSha256": _sha256(
+            value["coldCacheSha256"], "dmsColdStart.coldCacheSha256"
+        ),
+        "warmCacheSha256": _sha256(
+            value["warmCacheSha256"], "dmsColdStart.warmCacheSha256"
+        ),
+    }
 
 
 @dataclass(frozen=True, slots=True)
@@ -86,6 +352,7 @@ class GenerationStatus:
     bundle_hash: str
     created_at: int
     committed_at: int | None
+    evidence_sha256: str | None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -99,6 +366,7 @@ class GenerationStatus:
             "bundleHash": self.bundle_hash,
             "createdAt": self.created_at,
             "committedAt": self.committed_at,
+            "evidenceSha256": self.evidence_sha256,
         }
 
 
@@ -248,6 +516,10 @@ def _switch_pointer(paths: GenerationPaths, generation_id: GenerationId | None) 
 
 def _manifest_path(paths: GenerationPaths, generation_id: GenerationId) -> Path:
     return paths.state_generation(generation_id) / "cutover-manifest.json"
+
+
+def _evidence_path(paths: GenerationPaths, generation_id: GenerationId) -> Path:
+    return paths.state_generation(generation_id) / "cutover-evidence.json"
 
 
 def _read_manifest(
@@ -487,9 +759,31 @@ def status(paths: GenerationPaths) -> GenerationStatus:
         )
     previous_raw = manifest["previousGenerationId"]
     previous = None if previous_raw is None else GenerationId(previous_raw)
+    evidence_path = _evidence_path(paths, generation_id)
+    evidence_sha256: str | None = None
+    if evidence_path.exists():
+        _validate_regular_private_file(evidence_path)
+        try:
+            evidence = CutoverEvidence.from_json(evidence_path.read_bytes())
+        except OSError as error:
+            raise GenerationError("cutover_evidence_invalid", str(error)) from error
+        if not evidence.includes_generation(generation_id):
+            raise GenerationError(
+                "cutover_evidence_invalid",
+                "stored evidence does not include the active generation",
+            )
+        evidence_sha256 = evidence.sha256
     with open_generation(paths, generation_id) as opened:
         metadata = opened.registry.metadata()
         committed_at = metadata["committed_at"]
+        if (
+            opened.activation_state is ActivationState.COMMITTED
+            and evidence_sha256 is None
+        ):
+            raise GenerationError(
+                "cutover_evidence_missing",
+                "committed generation has no exact cutover evidence",
+            )
         return GenerationStatus(
             generation_id,
             opened.activation_state,
@@ -497,6 +791,7 @@ def status(paths: GenerationPaths) -> GenerationStatus:
             str(manifest["bundleHash"]),
             int(manifest["createdAt"]),
             None if committed_at is None else int(committed_at),
+            evidence_sha256,
         )
 
 
@@ -508,15 +803,9 @@ def commit(
 ) -> GenerationStatus:
     """Cross the irreversible boundary after exact paired cold-start evidence."""
 
-    if (
-        evidence.core_version != CORE_TARGET_VERSION
-        or evidence.dms_version != DMS_TARGET_VERSION
-        or not evidence.dms_cold_started
-        or not evidence.staged_reads_validated
-    ):
+    if not isinstance(evidence, CutoverEvidence):
         raise GenerationError(
-            "cutover_evidence_missing",
-            "paired versions, DMS cold start, and staged reads must be proven",
+            "cutover_evidence_invalid", "evidence has the wrong runtime type"
         )
     if isinstance(committed_at, bool) or committed_at < 0:
         raise GenerationError("cutover_time_invalid", "commit time is invalid")
@@ -524,13 +813,34 @@ def commit(
         generation_id = resolve_current(paths)
         with open_generation(paths, generation_id) as opened:
             metadata = opened.registry.metadata()
+            created_at = int(metadata["created_at"])
+            if not evidence.includes_generation(generation_id):
+                raise GenerationError(
+                    "cutover_evidence_invalid",
+                    "evidence does not include the active generation",
+                )
+            if evidence.captured_at < created_at or committed_at < evidence.captured_at:
+                raise GenerationError(
+                    "cutover_time_invalid",
+                    "evidence or commit precedes generation creation",
+                )
+            evidence_path = _evidence_path(paths, generation_id)
+            payload = evidence.to_json()
+            try:
+                existing = evidence_path.read_bytes()
+            except FileNotFoundError:
+                _write_file(evidence_path, payload, mode=0o400)
+                _fsync_directory(evidence_path.parent)
+            except OSError as error:
+                raise GenerationError("cutover_evidence_invalid", str(error)) from error
+            else:
+                if existing != payload:
+                    raise GenerationError(
+                        "cutover_evidence_conflict",
+                        "generation is already bound to different evidence",
+                    )
             if opened.activation_state is ActivationState.COMMITTED:
                 return status(paths)
-            created_at = int(metadata["created_at"])
-            if committed_at < created_at:
-                raise GenerationError(
-                    "cutover_time_invalid", "commit precedes generation creation"
-                )
             with opened.registry.transaction(immediate=True) as connection:
                 changed = connection.execute(
                     "UPDATE registry_metadata "
@@ -647,6 +957,7 @@ def bundle_file_hash(paths: GenerationPaths, generation_id: GenerationId) -> str
 __all__ = [
     "CORE_TARGET_VERSION",
     "DMS_TARGET_VERSION",
+    "EVIDENCE_VERSION",
     "CutoverEvidence",
     "GenerationError",
     "GenerationPaths",

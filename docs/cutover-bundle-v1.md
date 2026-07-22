@@ -78,10 +78,22 @@ An imported generation is `cutover_staged`. Host/Navigator state and discovery
 may be inspected, while view/frame mutation, provider work, hooks, agent tools,
 and desktop actions return `cutover_staged`.
 
-`commit` requires exact core `0.3.0`, DMS `0.5.0`, DMS cold-start, and staged
-read-validation evidence. It is idempotent and irreversible. `rollback` may
-restore the previous pointer only before commit. After commit, recovery is
-forward-only unless the operator performs a separate offline restore.
+`commit --evidence PATH` accepts only canonical `CutoverEvidence v1`. The
+document records the exact core `0.3.0` and DMS `0.5.0` Git commits and artifact
+hashes; distinct `desktop_primary` and `remote_owner` host/generation IDs;
+strict provider-version observations; HostState and NavigatorState hashes from
+both staged generations; the desktop DMS process-start identity and cold/model/
+warm-cache hashes; and evidence hashes for every named acceptance check. The
+active generation must be one of the two recorded generations, capture must
+follow generation creation, and commit must follow capture.
+
+The accepted canonical document is stored privately as
+`cutover-evidence.json` beside the registry before the database crosses to
+`committed`. A retry must supply byte-identical evidence. Conflicting evidence
+fails closed; a committed generation without its evidence file is invalid.
+Commit is idempotent and irreversible. `rollback` may restore the previous
+pointer only before commit. After commit, recovery is forward-only unless the
+operator performs a separate offline restore.
 
 Crash recovery is deterministic at four publication boundaries:
 

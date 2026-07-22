@@ -12,8 +12,7 @@ from hashlib import sha256
 from typing import Protocol
 from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
-from agent_switchboard.providers.codex import CodexProvider
-
+from .codex_app_server import delete_empty_session, reserve_named_session
 from .domain import (
     Activity,
     ActivityReason,
@@ -100,7 +99,7 @@ def spawn_control_watchdog(
         (
             sys.executable,
             "-m",
-            "agent_switchboard._v3",
+            "agent_switchboard",
             "--config-root",
             str(paths.config_root),
             "--state-root",
@@ -146,17 +145,14 @@ class NativeSessionAllocator:
         self, provider: ProviderId, title: str, contract: ProviderContract
     ) -> UUID:
         if provider is ProviderId.CODEX:
-            adapter = CodexProvider(executable=contract.executable)
-            return adapter.precreate_named_session(title)
+            return reserve_named_session(contract.executable, title)
         return uuid4()
 
     def cleanup(
         self, provider: ProviderId, session_id: UUID, contract: ProviderContract
     ) -> None:
         if provider is ProviderId.CODEX:
-            CodexProvider(executable=contract.executable).delete_empty_session(
-                session_id
-            )
+            delete_empty_session(contract.executable, session_id)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1240,9 +1236,7 @@ class WorkflowRuntime:
             "SWB_V3_SESSION_KEY": str(session_key),
             "SWB_V3_CONFIG_ROOT": str(self.paths.config_root),
             "SWB_V3_STATE_ROOT": str(self.paths.state_root),
-            "SWB_V3_MCP_COMMAND": (
-                f"{sys.executable} -m agent_switchboard._v3 agent-mcp"
-            ),
+            "SWB_V3_MCP_COMMAND": (f"{sys.executable} -m agent_switchboard agent-mcp"),
         }
 
     def _launch_child(
@@ -1282,7 +1276,7 @@ class WorkflowRuntime:
             mcp_command=(
                 sys.executable,
                 "-m",
-                "agent_switchboard._v3",
+                "agent_switchboard",
                 "agent-mcp",
             ),
         )
@@ -1503,7 +1497,7 @@ class WorkflowRuntime:
             mcp_command=(
                 sys.executable,
                 "-m",
-                "agent_switchboard._v3",
+                "agent_switchboard",
                 "agent-mcp",
             ),
         )
@@ -2019,9 +2013,279 @@ class WorkflowRuntime:
             mcp_command=(
                 sys.executable,
                 "-m",
-                "agent_switchboard._v3",
+                "agent_switchboard",
                 "agent-mcp",
             ),
+        )
+
+    def reopen_imported_session(
+        self,
+        frame_id: FrameId,
+        session_key: SessionKey,
+        *,
+        request_id: RequestId,
+        now: int,
+    ) -> ProviderSession:
+        """Resume one exact imported UUID into an otherwise empty workspace."""
+
+        self._require_mutation("frame reopen")
+        frame = self.registry.get_frame(FrameId(frame_id))
+        session = self.registry.get_provider_session(SessionKey.parse(str(session_key)))
+        context = self.registry.get_work_context(frame.work_context_id)
+        if (
+            frame.role is not FrameRole.WORKSPACE
+            or frame.current_session_key is not None
+            or session.project_id != frame.project_id
+            or session.checkout_id != context.checkout_id
+            or session.runtime_presence is not RuntimePresence.STOPPED
+            or session.resumability is not Resumability.RESUMABLE
+        ):
+            raise WorkflowError(
+                "reopen_precondition",
+                "frame is not empty or imported session identity is incompatible",
+            )
+        placements = [
+            item
+            for item in self.registry.list_placements()
+            if item.frame_id == frame.frame_id
+            and item.state is PlacementState.ACTIVE
+            and item.surface_id is None
+        ]
+        if len(placements) != 1:
+            raise WorkflowError(
+                "reopen_placement", "frame has no single empty active placement"
+            )
+        placement = placements[0]
+        view = self.registry.get_view(placement.view_id)
+        if view.active_frame_id != frame.frame_id:
+            raise WorkflowError("reopen_view", "frame is not the view foreground")
+        self.registry.append_frame_session(
+            FrameSession(
+                _stable_id(FrameSessionId, frame.frame_id, session.session_key),
+                frame.frame_id,
+                session.session_key,
+                1,
+                MembershipReason.CUTOVER,
+                now,
+            )
+        )
+        self.registry.advance_placement(
+            placement.placement_id,
+            placement.generation,
+            PlacementState.STOPPED_AFFINITY,
+            now=now,
+        )
+        self._stage_parent_resume(
+            frame.frame_id, view.view_id, RequestId(request_id), now=now
+        )
+        placement = next(
+            item
+            for item in self.registry.list_placements(view_id=view.view_id)
+            if item.frame_id == frame.frame_id
+        )
+        if placement.surface_id is None or placement.state is not PlacementState.STAGED:
+            raise WorkflowError("reopen_surface", "exact resume surface was not staged")
+        surface = self.registry.get_surface(placement.surface_id)
+        launch = self.registry.get_launch(surface.launch_id)
+        _view, executor = self._tmux_for_view(view.view_id)
+        panes = [
+            item
+            for item in executor.panes()
+            if item.surface_id == str(surface.surface_id)
+            and item.view_id == str(view.view_id)
+            and item.generation_id == str(self.generation_id)
+        ]
+        if len(panes) != 1:
+            raise WorkflowError("reopen_pane", "exact resume pane is ambiguous")
+        pane = panes[0]
+        raw = self.capability_factory()
+        if not raw or "\x00" in raw:
+            raise WorkflowError(
+                "capability_generation_failed",
+                "capability generator returned invalid data",
+            )
+        contract = self._provider_contract(session.provider)
+        command = build_resume_command(
+            contract,
+            cwd=self.registry.checkout_path(context.checkout_id),
+            session_id=session.provider_session_id,
+            prompt=None,
+            injected_environment={
+                "AGENT_SWITCHBOARD_CAPABILITY": raw,
+                "AGENT_SWITCHBOARD_LAUNCH_ID": str(surface.launch_id),
+                "AGENT_SWITCHBOARD_SURFACE_ID": str(surface.surface_id),
+                "SWB_V3_SESSION_KEY": str(session.session_key),
+                "SWB_V3_CONFIG_ROOT": str(self.paths.config_root),
+                "SWB_V3_STATE_ROOT": str(self.paths.state_root),
+                "SWB_V3_MCP_COMMAND": (
+                    f"{sys.executable} -m agent_switchboard agent-mcp"
+                ),
+            },
+            mcp_command=(sys.executable, "-m", "agent_switchboard", "agent-mcp"),
+        )
+        self.registry.advance_launch(
+            launch.launch_id, LaunchState.PLANNED, LaunchState.AUTHORIZED, now=now
+        )
+        observed = executor.launch_surface(
+            generation_id=self.generation_id,
+            view_id=view.view_id,
+            frame_id=str(frame.frame_id),
+            surface_id=str(surface.surface_id),
+            pane_id=pane.pane_id,
+            command=command.argv,
+            cwd=command.cwd,
+            environment=command.environment,
+        )
+        assert view.tmux_server_id is not None
+        surface = self.registry.publish_surface(
+            surface.surface_id,
+            surface.metadata_generation,
+            view.tmux_server_id,
+            pane.pane_id,
+            process_id=observed.process_id,
+            now=now,
+        )
+        self.registry.advance_launch(
+            launch.launch_id, LaunchState.AUTHORIZED, LaunchState.STARTED, now=now
+        )
+        self.registry.bind_surface_session(
+            surface.surface_id,
+            surface.metadata_generation,
+            session.session_key,
+            now=now,
+        )
+        placement = self.registry.advance_placement(
+            placement.placement_id,
+            placement.generation,
+            PlacementState.ACTIVE,
+            now=now,
+        )
+        session = self.registry.upsert_provider_session(
+            ProviderSession(
+                session.session_key,
+                session.host_id,
+                session.provider,
+                session.provider_session_id,
+                session.project_id,
+                session.checkout_id,
+                session.name,
+                session.purpose,
+                session.pinned,
+                RuntimePresence.LIVE,
+                session.resumability,
+                Activity.READY,
+                ActivityReason.TURN_COMPLETE,
+                session.created_at,
+                now,
+                now,
+                now,
+            )
+        )
+        self.registry.issue_capability(
+            AgentCapability(
+                CapabilityId(uuid4()),
+                sha256(raw.encode()).hexdigest(),
+                self.host_id,
+                view.view_id,
+                frame.frame_id,
+                session.session_key,
+                surface.surface_id,
+                surface.launch_id,
+                surface.tmux_server_id,
+                surface.pane_id,
+                placement.generation,
+                now,
+                now + CAPABILITY_TTL_MS,
+                None,
+            )
+        )
+        executor.set_pane_input(
+            generation_id=self.generation_id,
+            view_id=view.view_id,
+            pane_id=pane.pane_id,
+            enabled=True,
+        )
+        return session
+
+    def stop_session(self, session_key: SessionKey, *, now: int) -> ProviderSession:
+        """Stop one exact verified-idle owned session without guessing."""
+
+        self._require_mutation("session stop")
+        session = self.registry.get_provider_session(SessionKey.parse(str(session_key)))
+        if (
+            session.runtime_presence is not RuntimePresence.LIVE
+            or session.resumability is not Resumability.RESUMABLE
+            or session.activity is not Activity.READY
+            or session.activity_reason is not ActivityReason.TURN_COMPLETE
+        ):
+            raise WorkflowError(
+                "session_stop_unready", "session is not at a verified idle boundary"
+            )
+        surfaces = [
+            item
+            for item in self.registry.list_surfaces(live_only=True)
+            if item.session_key == session.session_key and item.pane_id is not None
+        ]
+        if len(surfaces) != 1:
+            raise WorkflowError(
+                "session_stop_ambiguous", "session has no single owned live surface"
+            )
+        surface = surfaces[0]
+        placements = [
+            item
+            for item in self.registry.list_placements()
+            if item.surface_id == surface.surface_id
+            and item.state in {PlacementState.ACTIVE, PlacementState.PARKED}
+        ]
+        if len(placements) != 1:
+            raise WorkflowError(
+                "session_stop_ambiguous", "session has no single owned placement"
+            )
+        placement = placements[0]
+        if self.registry.nonterminal_transition_for_view(placement.view_id) is not None:
+            raise WorkflowError(
+                "session_stop_transition", "session view has an active transition"
+            )
+        _view, executor = self._tmux_for_view(placement.view_id)
+        assert surface.pane_id is not None
+        executor.stop_surface(
+            generation_id=self.generation_id,
+            view_id=placement.view_id,
+            surface_id=str(surface.surface_id),
+            pane_id=surface.pane_id,
+        )
+        self.registry.advance_surface_state(
+            surface.surface_id,
+            surface.metadata_generation,
+            SurfaceState.DEAD,
+            now=now,
+        )
+        self.registry.advance_placement(
+            placement.placement_id,
+            placement.generation,
+            PlacementState.STOPPED_AFFINITY,
+            now=now,
+        )
+        return self.registry.upsert_provider_session(
+            ProviderSession(
+                session.session_key,
+                session.host_id,
+                session.provider,
+                session.provider_session_id,
+                session.project_id,
+                session.checkout_id,
+                session.name,
+                session.purpose,
+                session.pinned,
+                RuntimePresence.STOPPED,
+                session.resumability,
+                session.activity,
+                session.activity_reason,
+                session.created_at,
+                session.provider_updated_at,
+                now,
+                now,
+            )
         )
 
 

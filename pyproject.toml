@@ -4,16 +4,13 @@ build-backend = "hatchling.build"
 
 [project]
 name = "agent-switchboard"
-version = "0.2.0"
+version = "0.3.0"
 description = "A local session router for coding agents"
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]
 requires-python = ">=3.12"
-dependencies = []
-
-[project.optional-dependencies]
-tui = ["textual>=8.2.8,<9"]
+dependencies = ["textual>=8.2.8,<9"]
 
 [project.scripts]
 swbctl = "agent_switchboard.cli:main"
@@ -23,11 +20,14 @@ reproducible = true
 skip-excluded-dirs = true
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/agent_switchboard"]
+packages = ["src/agent_switchboard/_v3"]
+
+[tool.hatch.build.targets.wheel.sources]
+"src/agent_switchboard/_v3" = "agent_switchboard"
 
 [tool.hatch.build.targets.sdist]
 only-include = [
-  "src/agent_switchboard",
+  "src/agent_switchboard/_v3",
   "docs/design.md",
   "docs/state-contract.md",
   "docs/view-workflow.md",
@@ -35,12 +35,15 @@ only-include = [
   "docs/cutover-bundle-v1.md",
   "docs/phase-6c-acceptance.md",
   "docs/phase-6d-acceptance.md",
+  "requirements-offline.txt",
+  "scripts/build_offline_bundle.py",
 ]
 
 [tool.pytest.ini_options]
 addopts = "-ra"
 pythonpath = ["src"]
 testpaths = ["tests"]
+python_files = ["test_v3_*.py"]
 
 [tool.ruff]
 target-version = "py312"

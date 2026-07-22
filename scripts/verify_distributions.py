@@ -100,10 +100,12 @@ def sdist_files(path: Path) -> tuple[str, dict[str, bytes]]:
 
 
 def expected_source_files() -> dict[str, bytes]:
-    source_root = ROOT / "src" / "agent_switchboard"
+    source_root = ROOT / "src" / "agent_switchboard" / "_v3"
     result: dict[str, bytes] = {}
     for path in sorted(source_root.rglob("*.py")):
-        relative = path.relative_to(ROOT / "src").as_posix()
+        relative = (
+            PurePosixPath("agent_switchboard") / path.relative_to(source_root)
+        ).as_posix()
         result[relative] = path.read_bytes()
     if not result:
         raise DistributionError("no package source files found")
@@ -126,11 +128,13 @@ def audit_contents(wheel: Path, sdist: Path) -> dict[str, object]:
             "docs/phase-6c-acceptance.md",
             "docs/phase-6d-acceptance.md",
             "pyproject.toml",
+            "requirements-offline.txt",
+            "scripts/build_offline_bundle.py",
         )
     }
     wheel_content = wheel_files(wheel)
     sdist_root, sdist_content = sdist_files(sdist)
-    dist_info = "agent_switchboard-0.2.0.dist-info"
+    dist_info = "agent_switchboard-0.3.0.dist-info"
     expected_wheel = set(package_files) | {
         f"{dist_info}/METADATA",
         f"{dist_info}/RECORD",
@@ -148,7 +152,11 @@ def audit_contents(wheel: Path, sdist: Path) -> dict[str, object]:
     expected_sdist = {
         f"{sdist_root}/PKG-INFO",
         *(f"{sdist_root}/{relative}" for relative in project_files),
-        *(f"{sdist_root}/src/{relative}" for relative in package_files),
+        *(
+            f"{sdist_root}/src/agent_switchboard/_v3/"
+            f"{PurePosixPath(relative).relative_to('agent_switchboard')}"
+            for relative in package_files
+        ),
     }
     if set(sdist_content) != expected_sdist:
         raise DistributionError(
@@ -160,7 +168,10 @@ def audit_contents(wheel: Path, sdist: Path) -> dict[str, object]:
     for relative, source in package_files.items():
         if wheel_content[relative] != source:
             raise DistributionError(f"wheel source differs from checkout: {relative}")
-        sdist_name = f"{sdist_root}/src/{relative}"
+        sdist_name = (
+            f"{sdist_root}/src/agent_switchboard/_v3/"
+            f"{PurePosixPath(relative).relative_to('agent_switchboard')}"
+        )
         if sdist_content[sdist_name] != source:
             raise DistributionError(f"sdist source differs from checkout: {relative}")
     for relative, source in project_files.items():
@@ -175,7 +186,7 @@ def audit_contents(wheel: Path, sdist: Path) -> dict[str, object]:
     metadata = wheel_content[f"{dist_info}/METADATA"].decode("utf-8")
     for expected in (
         "Name: agent-switchboard",
-        "Version: 0.2.0",
+        "Version: 0.3.0",
         "License-Expression: MIT",
         "License-File: LICENSE",
         "Requires-Python: >=3.12",
@@ -192,19 +203,19 @@ def audit_contents(wheel: Path, sdist: Path) -> dict[str, object]:
 
     required_migrations = {
         "agent_switchboard/migrations/__init__.py",
-        "agent_switchboard/migrations/v0001_initial.py",
-        "agent_switchboard/migrations/v0002_remote_cache.py",
-        "agent_switchboard/migrations/v0003_name_provenance_runtime_index.py",
-        "agent_switchboard/migrations/v0004_runtime_truth_ordering.py",
-        "agent_switchboard/migrations/v0005_history_launch.py",
-        "agent_switchboard/migrations/v0006_agent_tools.py",
-        "agent_switchboard/migrations/v0007_repository_checkouts.py",
-        "agent_switchboard/migrations/v0008_tasks.py",
-        "agent_switchboard/migrations/v0009_imported_task_handoffs.py",
-        "agent_switchboard/migrations/v0010_runtime_worktree_claims.py",
+        "agent_switchboard/migrations/v0001_baseline.py",
     }
     if not required_migrations <= set(wheel_content):
         raise DistributionError("wheel is missing migration modules")
+    removed = {
+        "agent_switchboard/snapshot.py",
+        "agent_switchboard/task_actions.py",
+        "agent_switchboard/tui_gateway.py",
+        "agent_switchboard/providers/codex.py",
+        "agent_switchboard/migrations/v0010_runtime_worktree_claims.py",
+    }
+    if removed & set(wheel_content):
+        raise DistributionError("wheel contains removed 0.2 modules")
 
     return {
         "wheelFiles": len(wheel_content),

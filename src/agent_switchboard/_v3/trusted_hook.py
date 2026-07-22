@@ -2,16 +2,14 @@
 
 from __future__ import annotations
 
+import json
+import unicodedata
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any
-
-from agent_switchboard.hooks import (
-    HookInputError,
-    normalize_claude_event,
-    normalize_codex_event,
-)
-from agent_switchboard.state import HookEvent
+from enum import StrEnum
+from pathlib import Path
+from typing import Any, BinaryIO, Final
+from uuid import UUID
 
 from .domain import (
     Activity,
@@ -22,6 +20,117 @@ from .domain import (
     SessionKey,
 )
 from .workflow import StopResult, WorkflowError, WorkflowRuntime
+
+MAX_HOOK_INPUT_BYTES: Final = 8 * 1024 * 1024
+MAX_HOOK_JSON_DEPTH: Final = 32
+
+
+class HookInputError(ValueError):
+    """A provider hook is malformed or lacks exact managed authority."""
+
+
+class HookEvent(StrEnum):
+    SESSION_START = "SessionStart"
+    USER_PROMPT_SUBMIT = "UserPromptSubmit"
+    PERMISSION_REQUEST = "PermissionRequest"
+    POST_TOOL_USE = "PostToolUse"
+    STOP = "Stop"
+    SESSION_END = "SessionEnd"
+
+
+@dataclass(frozen=True, slots=True)
+class NormalizedHookEvent:
+    provider_session_id: str
+    event_kind: HookEvent
+    provider_turn_id: str | None
+
+
+def _json_depth(value: object) -> int:
+    maximum = 1
+    stack: list[tuple[object, int]] = [(value, 1)]
+    while stack:
+        candidate, depth = stack.pop()
+        maximum = max(maximum, depth)
+        if maximum > MAX_HOOK_JSON_DEPTH:
+            return maximum
+        if isinstance(candidate, Mapping):
+            stack.extend((nested, depth + 1) for nested in candidate.values())
+        elif isinstance(candidate, list):
+            stack.extend((nested, depth + 1) for nested in candidate)
+    return maximum
+
+
+def read_hook_json(stream: BinaryIO) -> Mapping[str, Any]:
+    raw = stream.read(MAX_HOOK_INPUT_BYTES + 1)
+    if len(raw) > MAX_HOOK_INPUT_BYTES:
+        raise HookInputError("hook input exceeds the 8 MiB limit")
+    try:
+        value = json.loads(raw)
+    except (UnicodeDecodeError, json.JSONDecodeError, RecursionError) as error:
+        raise HookInputError("hook input is not valid bounded JSON") from error
+    finally:
+        del raw
+    if not isinstance(value, Mapping) or _json_depth(value) > MAX_HOOK_JSON_DEPTH:
+        raise HookInputError("hook input must be one bounded JSON object")
+    return value
+
+
+def _text(payload: Mapping[str, Any], field: str, *, maximum: int) -> str:
+    value = payload.get(field)
+    if (
+        not isinstance(value, str)
+        or not value
+        or len(value.encode()) > maximum
+        or any(unicodedata.category(character) == "Cc" for character in value)
+    ):
+        raise HookInputError(f"hook field {field!r} must be bounded text")
+    return value
+
+
+def _uuid(payload: Mapping[str, Any], field: str) -> str:
+    value = _text(payload, field, maximum=36)
+    try:
+        parsed = UUID(value)
+    except ValueError as error:
+        raise HookInputError(f"hook field {field!r} must be a UUID") from error
+    if parsed.int == 0 or str(parsed) != value:
+        raise HookInputError(f"hook field {field!r} must be canonical")
+    return value
+
+
+def _normalize_event(
+    provider: ProviderId, payload: Mapping[str, Any]
+) -> NormalizedHookEvent:
+    try:
+        event = HookEvent(_text(payload, "hook_event_name", maximum=64))
+    except ValueError as error:
+        raise HookInputError("unsupported provider hook event") from error
+    supported = {
+        HookEvent.SESSION_START,
+        HookEvent.USER_PROMPT_SUBMIT,
+        HookEvent.PERMISSION_REQUEST,
+        HookEvent.POST_TOOL_USE,
+        HookEvent.STOP,
+    }
+    if event not in supported:
+        raise HookInputError("unsupported provider hook event")
+    session_id = _uuid(payload, "session_id")
+    cwd = Path(_text(payload, "cwd", maximum=4_096))
+    if not cwd.is_absolute():
+        raise HookInputError("hook cwd must be absolute")
+    turn_id = None
+    if event in {
+        HookEvent.USER_PROMPT_SUBMIT,
+        HookEvent.PERMISSION_REQUEST,
+        HookEvent.POST_TOOL_USE,
+        HookEvent.STOP,
+    }:
+        turn_id = (
+            _text(payload, "turn_id", maximum=256)
+            if provider is ProviderId.CODEX
+            else _uuid(payload, "prompt_id")
+        )
+    return NormalizedHookEvent(session_id, event, turn_id)
 
 
 @dataclass(frozen=True, slots=True)
@@ -73,11 +182,7 @@ def handle_trusted_event(
 ) -> HookResult:
     """Normalize, bind to exact environment authority, and route one hook."""
 
-    normalized = (
-        normalize_codex_event(payload, environment, observed_at=now)
-        if provider is ProviderId.CODEX
-        else normalize_claude_event(payload, environment, observed_at=now)
-    )
+    normalized = _normalize_event(provider, payload)
     raw_capability = environment.get("AGENT_SWITCHBOARD_CAPABILITY")
     raw_session_key = environment.get("SWB_V3_SESSION_KEY")
     if not raw_capability or not raw_session_key:
@@ -142,4 +247,10 @@ def handle_trusted_event(
     return HookResult(normalized.event_kind.value, "ignored")
 
 
-__all__ = ["HookResult", "WorkflowError", "handle_trusted_event"]
+__all__ = [
+    "HookInputError",
+    "HookResult",
+    "WorkflowError",
+    "handle_trusted_event",
+    "read_hook_json",
+]

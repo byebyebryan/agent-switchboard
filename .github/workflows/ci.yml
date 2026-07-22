@@ -9,7 +9,6 @@ permissions:
 
 jobs:
   quality:
-    name: Python ${{ matrix.python-version }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -23,15 +22,15 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
           cache: pip
-      - name: Install package and verification tools
-        run: python -m pip install --upgrade pip build pytest ruff '.[tui]'
-      - name: Compile Python sources
-        run: python -m compileall -q src tests spikes scripts
+      - name: Install runtime and verification tools
+        run: python -m pip install --upgrade pip build pytest ruff .
+      - name: Compile replacement generation
+        run: python -m compileall -q src/agent_switchboard/_v3 tests
       - name: Check formatting
         run: ruff format --check .
       - name: Lint
         run: ruff check .
-      - name: Test
+      - name: Test replacement generation
         run: pytest
       - name: Check pull-request whitespace
         if: ${{ matrix.python-version == '3.12' && github.event_name == 'pull_request' }}
@@ -41,7 +40,6 @@ jobs:
         run: git diff-tree --check --no-commit-id -r HEAD
 
   distributions:
-    name: Reproducible distributions and installed CLI
     needs: quality
     runs-on: ubuntu-latest
     env:
@@ -52,173 +50,52 @@ jobs:
         with:
           python-version: "3.12"
           cache: pip
-      - name: Install PEP 517 frontend
-        run: python -m pip install --upgrade pip build
-      - name: Build first isolated artifact set
-        run: python -m build --outdir /tmp/switchboard-build-a
-      - name: Build second isolated artifact set
-        run: python -m build --outdir /tmp/switchboard-build-b
-      - name: Compare and audit artifact contents
+      - name: Build reproducible artifact pairs
+        run: |
+          python -m pip install --upgrade pip build
+          python -m build --outdir /tmp/switchboard-build-a
+          python -m build --outdir /tmp/switchboard-build-b
+      - name: Compare and audit clean-break contents
         run: >-
           python scripts/verify_distributions.py
           /tmp/switchboard-build-a /tmp/switchboard-build-b
-      - name: Install wheel in a fresh environment
+      - name: Install artifact in a clean environment
         run: |
           python -m venv /tmp/switchboard-wheel-smoke
           /tmp/switchboard-wheel-smoke/bin/python -m pip install \
-            --no-deps /tmp/switchboard-build-a/*.whl
+            /tmp/switchboard-build-a/*.whl
           /tmp/switchboard-wheel-smoke/bin/python -m pip check
-      - name: Install source distribution in a fresh environment
-        run: |
-          python -m venv /tmp/switchboard-sdist-smoke
-          /tmp/switchboard-sdist-smoke/bin/python -m pip install \
-            --no-deps /tmp/switchboard-build-a/*.tar.gz
-          /tmp/switchboard-sdist-smoke/bin/python -m pip check
-      - name: Smoke installed packages and migrations
+      - name: Smoke public package and reject old modules
         working-directory: /tmp
         run: |
-          for python in \
-            /tmp/switchboard-wheel-smoke/bin/python \
-            /tmp/switchboard-sdist-smoke/bin/python
-          do
+          python=/tmp/switchboard-wheel-smoke/bin/python
+          swbctl=/tmp/switchboard-wheel-smoke/bin/swbctl
+          test "$("$swbctl" --version)" = "swbctl 0.3.0"
+          "$swbctl" --help | grep -F "persistent project and task views"
+          "$swbctl" state navigator --help | grep -F -- "--refresh"
+          "$swbctl" view open --help | grep -F -- "--can-focus-desktop"
           "$python" -I - <<'PY'
+          from importlib import util
           from importlib.metadata import version
           from importlib.resources import files
-          from pathlib import Path
-          from tempfile import TemporaryDirectory
 
           import agent_switchboard
-          import agent_switchboard._v3.agent_mcp
-          import agent_switchboard._v3.cli
-          import agent_switchboard._v3.navigator
-          import agent_switchboard._v3.provider_runtime
-          import agent_switchboard._v3.trusted_hook
-          import agent_switchboard._v3.workflow
-          import agent_switchboard.agent_tools
+          import agent_switchboard.agent_mcp
           import agent_switchboard.cli
           import agent_switchboard.config
-          import agent_switchboard.curation
-          import agent_switchboard.doctor
-          import agent_switchboard.domain
-          import agent_switchboard.executable
-          import agent_switchboard.hook_config
-          import agent_switchboard.hooks
-          import agent_switchboard.local
-          import agent_switchboard.local_events
-          import agent_switchboard.live
-          import agent_switchboard.mcp_server
-          import agent_switchboard.memory
-          import agent_switchboard.paths
-          import agent_switchboard.protocol
-          import agent_switchboard.providers.codex
-          import agent_switchboard.providers.claude
-          import agent_switchboard.reconcile
-          import agent_switchboard.repository_discovery
-          import agent_switchboard.snapshot
-          import agent_switchboard.state
-          import agent_switchboard.task_actions
-          import agent_switchboard.tui_gateway
-          import agent_switchboard.tui_model
-          from agent_switchboard.migrations import CURRENT_SCHEMA_VERSION
-          from agent_switchboard.storage import Registry
+          import agent_switchboard.cutover
+          import agent_switchboard.navigator
+          import agent_switchboard.provider_runtime
+          import agent_switchboard.trusted_hook
+          import agent_switchboard.workflow
 
-          assert version("agent-switchboard") == agent_switchboard.__version__
-          package = files("agent_switchboard")
-          for migration in (
-              "migrations/__init__.py",
-              "migrations/v0001_initial.py",
-              "migrations/v0002_remote_cache.py",
-              "migrations/v0003_name_provenance_runtime_index.py",
-              "migrations/v0004_runtime_truth_ordering.py",
-              "migrations/v0005_history_launch.py",
-              "migrations/v0006_agent_tools.py",
-              "migrations/v0007_repository_checkouts.py",
-              "migrations/v0008_tasks.py",
-              "migrations/v0009_imported_task_handoffs.py",
-              "migrations/v0010_runtime_worktree_claims.py",
-          ):
-              assert package.joinpath(migration).is_file()
-          with TemporaryDirectory() as directory:
-              with Registry(Path(directory) / "switchboard.db") as registry:
-                  assert int(registry.metadata()["schema_version"]) == CURRENT_SCHEMA_VERSION
+          assert version("agent-switchboard") == agent_switchboard.__version__ == "0.3.0"
+          assert files("agent_switchboard").joinpath(
+              "migrations/v0001_baseline.py"
+          ).is_file()
+          for removed in ("snapshot", "task_actions", "tui_gateway", "providers"):
+              assert util.find_spec(f"agent_switchboard.{removed}") is None
           PY
-          done
-      - name: Smoke installed swbctl entry points
-        working-directory: /tmp
-        run: |
-          for environment in \
-            /tmp/switchboard-wheel-smoke \
-            /tmp/switchboard-sdist-smoke
-          do
-            python="$environment/bin/python"
-            swbctl="$environment/bin/swbctl"
-            test "$("$swbctl" --version)" = "swbctl 0.2.0"
-            "$swbctl" --help | \
-              grep -F "Inspect and route provider-native coding-agent sessions."
-            "$swbctl" snapshot --help | grep -F -- "--reconcile {none,live,full}"
-            "$swbctl" list --help | grep -F -- "--refresh"
-            "$swbctl" show --help | grep -F -- "--handoff-limit"
-            "$swbctl" current --help | grep -F -- "--handoff-limit"
-            "$swbctl" session --help | grep -F "usage: swbctl session"
-            "$swbctl" agent --help | grep -F "usage: swbctl agent"
-            "$swbctl" agent context --help | grep -F -- "--json"
-            "$swbctl" agent tasks --help | grep -F -- "--json"
-            "$swbctl" agent task --help | grep -F -- "--json"
-            "$swbctl" agent search --help | grep -F -- "--limit LIMIT"
-            "$swbctl" agent memory --help | grep -F -- "--limit LIMIT"
-            "$swbctl" agent-mcp --help | grep -F "usage: swbctl agent-mcp"
-            "$swbctl" task --help | grep -F "usage: swbctl task"
-            "$swbctl" project --help | grep -F "usage: swbctl project"
-            "$swbctl" prepare-task --help | grep -F -- "--create"
-            "$swbctl" hooks install --help | grep -F -- "--dry-run"
-            "$swbctl" hooks uninstall --help | grep -F -- "--dry-run"
-            "$swbctl" doctor --help | grep -F "usage: swbctl doctor"
-            "$swbctl" tui --help | grep -F "usage: swbctl tui"
-            "$swbctl" tui --help | \
-              grep -F -- "--view {open,inbox,closed,projects}"
-
-            smoke_root="/tmp/$(basename "$environment")-xdg"
-            rm -rf "$smoke_root"
-            mkdir -p "$smoke_root/config" "$smoke_root/state" "$smoke_root/home"
-            export XDG_CONFIG_HOME="$smoke_root/config"
-            export XDG_STATE_HOME="$smoke_root/state"
-            export HOME="$smoke_root/home"
-            if "$swbctl" tui \
-              > "$smoke_root/tui.stdout" 2> "$smoke_root/tui.stderr"
-            then
-              exit 1
-            fi
-            test ! -s "$smoke_root/tui.stdout"
-            grep -F "pip install 'agent-switchboard[tui]'" \
-              "$smoke_root/tui.stderr"
-            if "$swbctl" agent current --json \
-              > "$smoke_root/agent.stdout" 2> "$smoke_root/agent.stderr"
-            then
-              exit 1
-            fi
-            test ! -s "$smoke_root/agent.stdout"
-            grep -F "agent authorization failed" "$smoke_root/agent.stderr"
-            "$swbctl" snapshot --json > "$smoke_root/snapshot.json"
-            "$swbctl" list --json > "$smoke_root/list.json"
-            "$swbctl" project list --json > "$smoke_root/catalog.json"
-            "$python" -I - \
-              "$smoke_root/snapshot.json" "$smoke_root/list.json" \
-              "$smoke_root/catalog.json" <<'PY'
-          import json
-          import sys
-          from pathlib import Path
-
-          from agent_switchboard.protocol import SnapshotEnvelope
-
-          snapshot = SnapshotEnvelope.from_json(Path(sys.argv[1]).read_bytes())
-          listed = SnapshotEnvelope.from_json(Path(sys.argv[2]).read_bytes())
-          catalog = json.loads(Path(sys.argv[3]).read_bytes())
-          assert snapshot.host.host_id == listed.host.host_id
-          assert snapshot.sessions == listed.sessions == ()
-          assert catalog["catalogVersion"] == 1
-          assert catalog["projects"] == []
-          PY
-          done
       - uses: actions/upload-artifact@v7
         with:
           name: agent-switchboard-distributions

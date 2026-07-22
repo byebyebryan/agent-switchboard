@@ -11,14 +11,14 @@ import argparse
 import asyncio
 import json
 import os
+import shutil
 import sys
 import time
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from agent_switchboard.hooks import HookInputError, read_hook_json
-
+from . import __version__
 from .agent_mcp import AgentToolService, run_mcp_server
 from .cutover import CutoverBundle, CutoverError, export_artifacts
 from .domain import (
@@ -32,6 +32,7 @@ from .domain import (
     RecoveryId,
     RecoveryState,
     RequestId,
+    SessionKey,
     TransitionId,
     ViewId,
     ViewMode,
@@ -46,16 +47,18 @@ from .generation import (
     rollback,
     status,
 )
+from .hook_config import HookConfigError, edit_hooks
 from .protocol import (
     DirectiveKind,
     PresentationDirective,
     build_host_state,
     build_navigator_from_registry,
 )
+from .provider_runtime import ProviderRuntimeError, probe_contract
 from .remote import RemoteError, RemoteRuntime
 from .storage import ConflictError
 from .tmux_view import TmuxExecutor, TmuxViewError
-from .trusted_hook import handle_trusted_event
+from .trusted_hook import HookInputError, handle_trusted_event, read_hook_json
 from .views import ViewRuntime, ViewRuntimeError
 from .workflow import WorkflowError, WorkflowRuntime, spawn_control_watchdog
 
@@ -191,14 +194,13 @@ def _cutover(arguments: argparse.Namespace) -> int:
     elif arguments.cutover_command == "status":
         _print(status(paths))
     elif arguments.cutover_command == "commit":
+        try:
+            evidence = CutoverEvidence.from_json(arguments.evidence.read_bytes())
+        except OSError as error:
+            raise GenerationError("cutover_evidence_invalid", str(error)) from error
         result = commit(
             paths,
-            CutoverEvidence(
-                arguments.core_version,
-                arguments.dms_version,
-                arguments.dms_cold_started,
-                arguments.staged_reads_validated,
-            ),
+            evidence,
             committed_at=_timestamp(arguments.at),
         )
         _print(result)
@@ -506,8 +508,196 @@ def _reconcile(arguments: argparse.Namespace) -> int:
         opened.close()
 
 
+def _frame(arguments: argparse.Namespace) -> int:
+    opened, workflow = _open_workflow(arguments)
+    try:
+        timestamp = _timestamp(arguments.at)
+        state = build_host_state(opened.registry, generated_at=timestamp).to_dict()
+        frames = list(state["frames"])
+        if arguments.frame_command == "list":
+            _print(frames)
+            return 0
+        if arguments.frame_command == "show":
+            match = next(
+                (item for item in frames if item["frameId"] == arguments.frame), None
+            )
+            if match is None:
+                raise ConflictError("not_found", "frame does not exist")
+            _print(match)
+            return 0
+        if arguments.frame_command == "reopen":
+            host_id = HostId(arguments.host)
+            if host_id != opened.config.host.host_id:
+                raise WorkflowError(
+                    "remote_reopen_unavailable",
+                    "frame reopen must execute directly on the owner host",
+                )
+            session = workflow.reopen_imported_session(
+                FrameId(arguments.frame),
+                SessionKey.parse(arguments.session),
+                request_id=RequestId(arguments.request_id),
+                now=timestamp,
+            )
+            _print(
+                {
+                    "frameId": arguments.frame,
+                    "sessionKey": str(session.session_key),
+                    "runtimePresence": session.runtime_presence.value,
+                }
+            )
+            return 0
+        raise WorkflowError(
+            "agent_authority_required",
+            f"frame {arguments.frame_command} must be requested through agent tools",
+        )
+    finally:
+        opened.close()
+
+
+def _project(arguments: argparse.Namespace) -> int:
+    with open_generation(_paths(arguments)) as opened:
+        projects = [
+            {
+                "hostId": str(opened.config.host.host_id),
+                "projectId": str(item.project_id),
+                "name": item.name,
+                "aliases": list(item.aliases),
+            }
+            for item in opened.config.projects
+        ]
+        if arguments.project_command == "list":
+            _print(projects)
+        else:
+            match = next(
+                (item for item in projects if item["projectId"] == arguments.project),
+                None,
+            )
+            if match is None:
+                raise ConflictError("not_found", "project does not exist")
+            _print(match)
+    return 0
+
+
+def _session(arguments: argparse.Namespace) -> int:
+    opened, workflow = _open_workflow(arguments)
+    try:
+        session_key = SessionKey.parse(arguments.session)
+        if session_key.host_id != opened.config.host.host_id:
+            raise WorkflowError(
+                "remote_session_action_unavailable",
+                "session action must execute directly on the owner host",
+            )
+        session = (
+            workflow.stop_session(session_key, now=_timestamp(arguments.at))
+            if arguments.session_command == "stop"
+            else opened.registry.get_provider_session(session_key)
+        )
+        _print(
+            {
+                "sessionKey": str(session.session_key),
+                "hostId": str(session.host_id),
+                "provider": session.provider.value,
+                "providerSessionId": str(session.provider_session_id),
+                "projectId": (
+                    None if session.project_id is None else str(session.project_id)
+                ),
+                "runtimePresence": session.runtime_presence.value,
+                "resumability": session.resumability.value,
+                "activity": session.activity.value,
+            }
+        )
+        return 0
+    finally:
+        opened.close()
+
+
+def _hooks(arguments: argparse.Namespace) -> int:
+    executable = arguments.executable
+    if executable is None:
+        discovered = shutil.which("swbctl")
+        if discovered is None:
+            raise HookConfigError("installed swbctl executable was not found")
+        executable = Path(discovered)
+    result = edit_hooks(
+        arguments.hooks_command,
+        arguments.provider,
+        executable=executable,
+        timeout_seconds=arguments.timeout,
+        dry_run=arguments.dry_run,
+    )
+    _print(
+        {
+            "path": str(result.path),
+            "changed": result.changed,
+            "removedHandlers": result.removed_handlers,
+            "installedHandlers": result.installed_handlers,
+            "dryRun": result.dry_run,
+        }
+    )
+    return 0
+
+
+def _doctor(arguments: argparse.Namespace) -> int:
+    paths = _paths(arguments)
+    with open_generation(paths) as opened:
+        providers: list[dict[str, Any]] = []
+        for configured in opened.config.providers:
+            if not configured.enabled:
+                providers.append(
+                    {"provider": configured.provider.value, "enabled": False}
+                )
+                continue
+            try:
+                contract = probe_contract(
+                    configured.provider, executable=configured.executable
+                )
+                providers.append(
+                    {
+                        "provider": contract.provider.value,
+                        "enabled": True,
+                        "available": True,
+                        "version": contract.version,
+                        "knownGoodObservation": contract.known_good,
+                    }
+                )
+            except ProviderRuntimeError as error:
+                providers.append(
+                    {
+                        "provider": configured.provider.value,
+                        "enabled": True,
+                        "available": False,
+                        "error": {"code": error.code, "message": str(error)},
+                    }
+                )
+        _print(
+            {
+                "version": __version__,
+                "generationId": str(opened.generation_id),
+                "activationState": opened.activation_state.value,
+                "hostId": str(opened.config.host.host_id),
+                "providers": providers,
+                "remotes": [
+                    {
+                        "alias": item.alias,
+                        "displayName": item.display_name,
+                        "cached": any(
+                            cached.remote_name == item.alias
+                            for cached in opened.registry.cached_host_states()
+                        ),
+                    }
+                    for item in opened.config.remotes
+                ],
+            }
+        )
+    return 0
+
+
 def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="python -m agent_switchboard._v3.cli")
+    parser = argparse.ArgumentParser(
+        prog="swbctl",
+        description="Own persistent project and task views for coding agents.",
+    )
+    parser.add_argument("--version", action="version", version=f"swbctl {__version__}")
     parser.add_argument("--config-root", type=Path)
     parser.add_argument("--state-root", type=Path)
     root = parser.add_subparsers(dest="command", required=True)
@@ -524,10 +714,7 @@ def _parser() -> argparse.ArgumentParser:
     import_command.add_argument("--generation-id")
     cutover_sub.add_parser("status")
     commit_command = cutover_sub.add_parser("commit")
-    commit_command.add_argument("--core-version", default="0.3.0")
-    commit_command.add_argument("--dms-version", default="0.5.0")
-    commit_command.add_argument("--dms-cold-started", action="store_true")
-    commit_command.add_argument("--staged-reads-validated", action="store_true")
+    commit_command.add_argument("--evidence", type=Path, required=True)
     commit_command.add_argument("--at", type=int)
     cutover_sub.add_parser("rollback")
 
@@ -617,6 +804,47 @@ def _parser() -> argparse.ArgumentParser:
     reconcile = root.add_parser("reconcile")
     reconcile.add_argument("--at", type=int)
     reconcile.add_argument("--json", action="store_true")
+
+    frame = root.add_parser("frame")
+    frame_sub = frame.add_subparsers(dest="frame_command", required=True)
+    frame_sub.add_parser("list").add_argument("--at", type=int)
+    frame_show = frame_sub.add_parser("show")
+    frame_show.add_argument("--frame", required=True)
+    frame_show.add_argument("--at", type=int)
+    frame_reopen = frame_sub.add_parser("reopen")
+    frame_reopen.add_argument("--host", required=True)
+    frame_reopen.add_argument("--frame", required=True)
+    frame_reopen.add_argument("--session", required=True)
+    frame_reopen.add_argument("--request-id", required=True)
+    frame_reopen.add_argument("--at", type=int)
+    for name in ("push", "back", "complete", "close"):
+        command = frame_sub.add_parser(name)
+        command.add_argument("--at", type=int)
+
+    project = root.add_parser("project")
+    project_sub = project.add_subparsers(dest="project_command", required=True)
+    project_sub.add_parser("list")
+    project_show = project_sub.add_parser("show")
+    project_show.add_argument("--project", required=True)
+
+    session = root.add_parser("session")
+    session_sub = session.add_subparsers(dest="session_command", required=True)
+    for name in ("show", "stop"):
+        command = session_sub.add_parser(name)
+        command.add_argument("--session", required=True)
+        command.add_argument("--at", type=int)
+
+    hooks = root.add_parser("hooks")
+    hooks_sub = hooks.add_subparsers(dest="hooks_command", required=True)
+    for name in ("install", "uninstall"):
+        command = hooks_sub.add_parser(name)
+        command.add_argument("--provider", choices=("codex", "claude"), required=True)
+        command.add_argument("--executable", type=Path)
+        command.add_argument("--timeout", type=int, default=1)
+        command.add_argument("--dry-run", action="store_true")
+
+    doctor = root.add_parser("doctor")
+    doctor.add_argument("--json", action="store_true")
     return parser
 
 
@@ -638,10 +866,21 @@ def main(argv: list[str] | None = None) -> int:
             return _control_watchdog(arguments)
         if arguments.command == "reconcile":
             return _reconcile(arguments)
+        if arguments.command == "frame":
+            return _frame(arguments)
+        if arguments.command == "project":
+            return _project(arguments)
+        if arguments.command == "session":
+            return _session(arguments)
+        if arguments.command == "hooks":
+            return _hooks(arguments)
+        if arguments.command == "doctor":
+            return _doctor(arguments)
         raise AssertionError(arguments.command)  # pragma: no cover
     except (
         CutoverError,
         GenerationError,
+        HookConfigError,
         ConflictError,
         TmuxViewError,
         ViewRuntimeError,

@@ -39,6 +39,75 @@ SESSION_KEY = f"{HOST}:codex:{SESSION_ID}"
 HANDOFF = "66666666-6666-4666-8666-666666666666"
 GENERATION = GenerationId("77777777-7777-4777-8777-777777777777")
 GENERATION_2 = GenerationId("88888888-8888-4888-8888-888888888888")
+REMOTE_HOST = "99999999-9999-4999-8999-999999999999"
+REMOTE_GENERATION = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+
+
+def cutover_evidence(
+    generation: GenerationId = GENERATION_2, *, captured_at: int = 109
+) -> CutoverEvidence:
+    digest = "a" * 64
+    checks = {
+        name: digest
+        for name in (
+            "coreDoctor",
+            "reconciliation",
+            "stagedMutationBlock",
+            "hostState",
+            "navigatorState",
+            "dmsModel",
+            "dmsColdCache",
+            "dmsWarmCache",
+            "remoteOnline",
+            "remoteOffline",
+        )
+    }
+    return CutoverEvidence.from_dict(
+        {
+            "evidenceVersion": 1,
+            "capturedAt": captured_at,
+            "core": {
+                "version": "0.3.0",
+                "commit": "b" * 40,
+                "artifactSha256": "c" * 64,
+            },
+            "dms": {
+                "version": "0.5.0",
+                "commit": "d" * 40,
+                "artifactSha256": "e" * 64,
+            },
+            "hosts": [
+                {
+                    "role": "desktop_primary",
+                    "hostId": HOST,
+                    "generationId": str(generation),
+                    "providerVersions": {"codex": "codex-cli 99.0.0"},
+                    "stagedReads": {
+                        "hostStateSha256": "f" * 64,
+                        "navigatorStateSha256": "1" * 64,
+                    },
+                },
+                {
+                    "role": "remote_owner",
+                    "hostId": REMOTE_HOST,
+                    "generationId": REMOTE_GENERATION,
+                    "providerVersions": {"claude": "2.1.216"},
+                    "stagedReads": {
+                        "hostStateSha256": "2" * 64,
+                        "navigatorStateSha256": "3" * 64,
+                    },
+                },
+            ],
+            "dmsColdStart": {
+                "hostId": HOST,
+                "processStartId": "boot-id:1234:5678",
+                "modelSha256": "4" * 64,
+                "coldCacheSha256": "5" * 64,
+                "warmCacheSha256": "6" * 64,
+            },
+            "checks": checks,
+        }
+    )
 
 
 def legacy_config(checkout: Path) -> str:
@@ -264,16 +333,20 @@ def test_precommit_rollback_and_commit_are_exact_boundaries(tmp_path: Path) -> N
     with pytest.raises(GenerationError) as caught:
         commit(
             paths,
-            CutoverEvidence("0.3.0", "0.5.0", False, True),
+            cutover_evidence(GENERATION),
             committed_at=110,
         )
-    assert caught.value.code == "cutover_evidence_missing"
+    assert caught.value.code == "cutover_evidence_invalid"
     committed = commit(
         paths,
-        CutoverEvidence("0.3.0", "0.5.0", True, True),
+        cutover_evidence(),
         committed_at=110,
     )
     assert committed.activation_state is ActivationState.COMMITTED
+    assert committed.evidence_sha256 == cutover_evidence().sha256
+    evidence_path = paths.state_generation(GENERATION_2) / "cutover-evidence.json"
+    assert evidence_path.stat().st_mode & 0o777 == 0o400
+    assert CutoverEvidence.from_json(evidence_path.read_bytes()) == cutover_evidence()
     with open_generation(paths) as opened:
         opened.require_mutation("view open")
     with pytest.raises(GenerationError) as caught:
