@@ -332,3 +332,34 @@ def test_fleet_excludes_conflicting_remote_catalog_without_erasing_cache(
     assert fleet.hosts[1].host_id is None
     assert fleet.hosts[1].error is not None
     assert fleet.hosts[1].error.code == "remote_catalog_conflict"
+
+
+def test_fleet_accepts_matching_catalog_with_host_local_observation_fields(
+    tmp_path,
+) -> None:
+    local = SnapshotEnvelope.from_json(snapshot_bytes(str(LOCAL_HOST), "local", 100))
+    remote_value = json.loads(snapshot_bytes(REMOTE_HOST, "snap", 110))
+    for collection in ("projects", "repositories"):
+        remote_value[collection][0]["createdAt"] = 101
+        remote_value[collection][0]["updatedAt"] = 102
+        remote_value[collection][0]["declared"] = False
+    with Registry(tmp_path / "switchboard.db") as registry:
+        registry.upsert_remote("snap", "snap.lan", "snap", observed_at=100)
+        registry.store_remote_snapshot(
+            "snap",
+            remote_value,
+            remote_host_id=REMOTE_HOST,
+            schema_version=2,
+            protocol_version=2,
+            observed_at=110,
+            received_at=120,
+        )
+        fleet = build_fleet_envelope(
+            local,
+            registry.list_remotes(declared_only=True),
+            generated_at=130,
+            staleness_interval_seconds=120,
+        )
+    assert fleet.hosts[1].host_id == HostId(REMOTE_HOST)
+    assert fleet.hosts[1].snapshot is not None
+    assert fleet.hosts[1].error is None

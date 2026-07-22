@@ -29,6 +29,14 @@ SSH_CONNECT_TIMEOUT_SECONDS = 5
 REMOTE_SNAPSHOT_TIMEOUT_SECONDS = 20.0
 MAX_CONCURRENT_SSH = 4
 REMOTE_ACTION_TIMEOUT_SECONDS = 20.0
+_PROJECT_COMPATIBILITY_FIELDS = (
+    "name",
+    "aliases",
+    "defaultProvider",
+    "defaultTransport",
+)
+_REPOSITORY_COMPATIBILITY_FIELDS = ("name", "kind", "contextSources")
+_MEMBERSHIP_COMPATIBILITY_FIELDS = ("isPrimary",)
 _REMOTE_COMMAND_TOKEN = re.compile(r"[A-Za-z0-9_./:@%+,=-]+\Z")
 _REMOTE_COMMAND_OPTIONS = frozenset(
     {
@@ -511,15 +519,24 @@ def build_fleet_envelope(
     def catalog_conflict(snapshot: SnapshotEnvelope) -> str | None:
         for record in snapshot.projects:
             identity = str(record["projectId"])
-            if identity in projects and projects[identity] != dict(record):
+            if identity in projects and any(
+                projects[identity][field] != record[field]
+                for field in _PROJECT_COMPATIBILITY_FIELDS
+            ):
                 return "A remote project identity conflicts with another host."
         for record in snapshot.repositories:
             identity = str(record["repositoryId"])
-            if identity in repositories and repositories[identity] != dict(record):
+            if identity in repositories and any(
+                repositories[identity][field] != record[field]
+                for field in _REPOSITORY_COMPATIBILITY_FIELDS
+            ):
                 return "A remote repository identity conflicts with another host."
         for record in snapshot.project_repositories:
             identity = (str(record["projectId"]), str(record["repositoryId"]))
-            if identity in memberships and memberships[identity] != dict(record):
+            if identity in memberships and any(
+                memberships[identity][field] != record[field]
+                for field in _MEMBERSHIP_COMPATIBILITY_FIELDS
+            ):
                 return "A remote project membership conflicts with another host."
         if checkout_ids.intersection(
             str(record["checkoutId"]) for record in snapshot.checkouts
