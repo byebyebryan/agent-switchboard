@@ -12,6 +12,7 @@ import os
 import shlex
 import subprocess
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
@@ -566,6 +567,174 @@ class TmuxExecutor:
         )
         self.run("select-pane", "-d", "-t", pane)
         return self._pane(pane)
+
+    def launch_surface(
+        self,
+        *,
+        generation_id: GenerationId,
+        view_id: ViewId,
+        frame_id: str,
+        surface_id: str,
+        pane_id: str,
+        command: tuple[str, ...],
+        cwd: Path,
+        environment: Mapping[str, str],
+    ) -> PaneObservation:
+        """Exec one authorized provider command in an exact presented pane."""
+
+        target = self._pane(pane_id)
+        if (
+            target.view_id != str(view_id)
+            or target.generation_id != str(generation_id)
+            or target.frame_id != frame_id
+            or target.surface_id != surface_id
+        ):
+            raise TmuxViewError(
+                "surface_authority", "provider bootstrap pane authority differs"
+            )
+        if not Path(cwd).is_absolute():
+            raise TmuxViewError("surface_cwd_invalid", "provider cwd is not absolute")
+        arguments = ["respawn-pane", "-k", "-t", pane_id, "-c", str(cwd)]
+        for key, value in sorted(environment.items()):
+            if (
+                not key
+                or "=" in key
+                or "\x00" in key
+                or not isinstance(value, str)
+                or "\x00" in value
+            ):
+                raise TmuxViewError(
+                    "surface_environment_invalid", "provider environment is invalid"
+                )
+            arguments.extend(("-e", f"{key}={value}"))
+        arguments.append(self._command(command))
+        self.run(*arguments)
+        self.run("select-pane", "-e", "-t", pane_id)
+        deadline = time.monotonic() + COMMAND_TIMEOUT_SECONDS
+        while time.monotonic() < deadline:
+            observed = self._pane(pane_id)
+            if not observed.dead and not observed.input_off:
+                return observed
+            time.sleep(0.02)
+        raise TmuxViewError(
+            "surface_start_uncertain", "provider process did not become observable"
+        )
+
+    def set_pane_input(
+        self,
+        *,
+        generation_id: GenerationId,
+        view_id: ViewId,
+        pane_id: str,
+        enabled: bool,
+    ) -> PaneObservation:
+        target = self._pane(pane_id)
+        if target.view_id != str(view_id) or target.generation_id != str(generation_id):
+            raise TmuxViewError("pane_authority", "pane authority differs")
+        self.run("select-pane", "-e" if enabled else "-d", "-t", pane_id)
+        observed = self._pane(pane_id)
+        if observed.input_off == enabled:
+            raise TmuxViewError(
+                "pane_input_uncertain", "pane input fencing did not settle"
+            )
+        return observed
+
+    def submit_control_prompt(
+        self,
+        *,
+        generation_id: GenerationId,
+        view_id: ViewId,
+        pane_id: str,
+        literal: str,
+    ) -> PaneObservation:
+        """Submit one fixed literal in one tmux queue, then input-fence it."""
+
+        target = self._pane(pane_id)
+        if (
+            target.view_id != str(view_id)
+            or target.generation_id != str(generation_id)
+            or target.dead
+            or not target.input_off
+        ):
+            raise TmuxViewError(
+                "control_target_unready", "control target is not exact and fenced"
+            )
+        self.run(
+            "select-pane",
+            "-e",
+            "-t",
+            pane_id,
+            ";",
+            "send-keys",
+            "-t",
+            pane_id,
+            "-l",
+            literal,
+            ";",
+            "send-keys",
+            "-t",
+            pane_id,
+            "Enter",
+            ";",
+            "select-pane",
+            "-d",
+            "-t",
+            pane_id,
+        )
+        observed = self._pane(pane_id)
+        if not observed.input_off:
+            raise TmuxViewError(
+                "control_submit_uncertain", "control target did not remain fenced"
+            )
+        return observed
+
+    def stop_surface(
+        self,
+        *,
+        generation_id: GenerationId,
+        view_id: ViewId,
+        surface_id: str,
+        pane_id: str,
+    ) -> PaneObservation:
+        """Stop only an exact owned provider pane, retaining a dead placeholder."""
+
+        target = self._pane(pane_id)
+        if (
+            target.view_id != str(view_id)
+            or target.generation_id != str(generation_id)
+            or target.surface_id != surface_id
+        ):
+            raise TmuxViewError("surface_authority", "surface pane authority differs")
+        self.run("select-pane", "-d", "-t", pane_id)
+        self.run("respawn-pane", "-k", "-t", pane_id, "/usr/bin/true")
+        self._wait_dead(pane_id)
+        return self._pane(pane_id)
+
+    def discard_staged_surface(
+        self,
+        *,
+        generation_id: GenerationId,
+        view_id: ViewId,
+        surface_id: str,
+        pane_id: str,
+    ) -> None:
+        """Remove only an exact input-fenced staged surface pane."""
+
+        target = self._pane(pane_id)
+        if (
+            target.view_id != str(view_id)
+            or target.generation_id != str(generation_id)
+            or target.surface_id != surface_id
+            or not target.input_off
+        ):
+            raise TmuxViewError(
+                "staged_surface_authority", "staged surface is not an exact target"
+            )
+        self.run("kill-pane", "-t", pane_id)
+        if any(pane.pane_id == pane_id for pane in self.panes()):
+            raise TmuxViewError(
+                "staged_surface_cleanup_uncertain", "staged pane still exists"
+            )
 
     def spawn_placeholder(
         self,

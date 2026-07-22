@@ -5,6 +5,7 @@ import os
 import time
 from pathlib import Path
 from typing import Any
+from uuid import UUID
 
 import pytest
 
@@ -14,6 +15,7 @@ from agent_switchboard.providers.codex import (
     CODEX_0144_SCHEMA_FINGERPRINT,
     CodexDiscoveryResult,
     CodexProvider,
+    CodexSessionMutationError,
     canonical_json_fingerprint,
 )
 
@@ -213,6 +215,85 @@ def test_three_page_scan_uses_exact_contract_and_normalizes_safe_fields(
             "cursor": "opaque-b",
         },
     ]
+
+
+def test_zero_turn_precreate_name_and_cleanup_are_exact_and_guarded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    session_id = UUID("12345678-1234-4234-8234-123456789abc")
+    empty = {
+        "id": str(session_id),
+        "name": "Child task",
+        "turns": [],
+    }
+    provider, log = configured_provider(
+        tmp_path,
+        monkeypatch,
+        {
+            "app": {
+                "methods": {
+                    "thread/start": [
+                        {"result": {"thread": {"id": str(session_id), "turns": []}}}
+                    ],
+                    "thread/name/set": [{"result": {}}],
+                    "thread/read": [{"result": {"thread": empty}}],
+                    "thread/delete": [{"result": {}}],
+                }
+            }
+        },
+    )
+    assert provider.precreate_named_session("Child task") == session_id
+    provider.delete_empty_session(session_id)
+    sent = requests(log)
+    methods = [message["method"] for message in sent]
+    assert methods.count("thread/start") == 1
+    assert methods.count("thread/name/set") == 1
+    assert methods.count("thread/read") == 2
+    assert methods.count("thread/delete") == 1
+
+
+def test_zero_turn_precreate_rejects_unaccepted_provider_version(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    provider, _log = configured_provider(
+        tmp_path,
+        monkeypatch,
+        {"version": {"stdout": "codex-cli 0.145.0\n"}},
+    )
+    with pytest.raises(RuntimeError):
+        provider.precreate_named_session("Child task")
+
+
+def test_zero_turn_precreate_failure_deletes_only_verified_empty_thread(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    session_id = UUID("12345678-1234-4234-8234-123456789abc")
+    provider, log = configured_provider(
+        tmp_path,
+        monkeypatch,
+        {
+            "app": {
+                "methods": {
+                    "thread/start": [
+                        {"result": {"thread": {"id": str(session_id), "turns": []}}}
+                    ],
+                    "thread/name/set": [
+                        {"error": {"code": -32000, "message": "name failed"}}
+                    ],
+                    "thread/read": [
+                        {"result": {"thread": {"id": str(session_id), "turns": []}}}
+                    ],
+                    "thread/delete": [{"result": {}}],
+                }
+            }
+        },
+    )
+    with pytest.raises(CodexSessionMutationError):
+        provider.precreate_named_session("Child task")
+    methods = [message["method"] for message in requests(log)]
+    assert methods.count("thread/start") == 1
+    assert methods.count("thread/read") == 1
+    assert methods.count("thread/delete") == 1
 
 
 def test_notifications_wrong_ids_and_bounded_stderr_are_tolerated(

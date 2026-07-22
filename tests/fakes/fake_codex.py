@@ -108,6 +108,8 @@ def app_server(plan: dict[str, Any]) -> int:
             page += 1
         elif method == "hooks/list":
             actions = app.get("hooks", [{"result": {"data": []}}])
+        elif method in app.get("methods", {}):
+            actions = app["methods"][method]
         else:
             actions = [
                 {"error": {"code": -32601, "message": "unsupported fake method"}}

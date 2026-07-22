@@ -269,6 +269,15 @@ class _ProviderFailure(Exception):
         super().__init__(issue.message)
 
 
+class CodexSessionMutationError(RuntimeError):
+    """A guarded zero-turn Codex session mutation failed safely."""
+
+    def __init__(self, issue: CodexProviderIssue) -> None:
+        self.code = issue.code
+        self.issue = issue
+        super().__init__(issue.message)
+
+
 @dataclass(frozen=True, slots=True)
 class _CommandResult:
     returncode: int
@@ -1503,6 +1512,168 @@ class CodexProvider:
                 (*issues, failure.issue),
             )
         return CodexHooksInspection(True, provider_version, entries, tuple(issues))
+
+    def precreate_named_session(self, title: str) -> UUID:
+        try:
+            return self._precreate_named_session(title)
+        except _ProviderFailure as error:
+            raise CodexSessionMutationError(error.issue) from error
+
+    def _precreate_named_session(self, title: str) -> UUID:
+        """Create one named zero-turn session on the exact accepted contract."""
+
+        normalized = unicodedata.normalize("NFC", title).strip()
+        if (
+            not normalized
+            or len(normalized.encode("utf-8")) > 512
+            or any(unicodedata.category(char) == "Cc" for char in normalized)
+        ):
+            raise ValueError("Codex precreated session title is invalid")
+        version = self._provider_version()
+        if version != CODEX_TESTED_CONTRACT_MIN:
+            raise _failure(
+                "untested_provider_version",
+                "Codex precreation requires the exact tested provider version.",
+                retryable=False,
+                stage="version",
+                feature="precreate_name",
+            )
+        with _AppServer(
+            self.executable,
+            request_timeout=self.request_timeout,
+            total_timeout=self.total_timeout,
+            cleanup_timeout=self.cleanup_timeout,
+            max_line_bytes=self.max_line_bytes,
+            max_stdout_bytes=self.max_stdout_bytes,
+            max_stderr_bytes=self.max_stderr_bytes,
+            max_messages=self.max_messages,
+            feature="precreate_name",
+            environment=self.environment,
+        ) as server:
+            started = server.request("thread/start", {})
+            thread = started.get("thread")
+            if not isinstance(thread, dict) or not isinstance(thread.get("id"), str):
+                raise _failure(
+                    "precreate_identity_invalid",
+                    "Codex precreation returned no exact thread identity.",
+                    retryable=False,
+                    stage="precreate",
+                    feature="precreate_name",
+                )
+            try:
+                session_id = UUID(thread["id"])
+            except (TypeError, ValueError) as error:
+                raise _failure(
+                    "precreate_identity_invalid",
+                    "Codex precreation returned an invalid thread identity.",
+                    retryable=False,
+                    stage="precreate",
+                    feature="precreate_name",
+                ) from error
+            if session_id.int == 0:
+                raise _failure(
+                    "precreate_identity_invalid",
+                    "Codex precreation returned an invalid thread identity.",
+                    retryable=False,
+                    stage="precreate",
+                    feature="precreate_name",
+                )
+            if thread.get("turns") not in (None, []):
+                raise _failure(
+                    "precreate_not_empty",
+                    "Codex precreation unexpectedly returned an existing turn.",
+                    retryable=False,
+                    stage="precreate",
+                    feature="precreate_name",
+                )
+            try:
+                server.request(
+                    "thread/name/set",
+                    {"threadId": str(session_id), "name": normalized},
+                )
+                read = server.request(
+                    "thread/read",
+                    {"threadId": str(session_id), "includeTurns": True},
+                )
+                retained = read.get("thread")
+                if (
+                    not isinstance(retained, dict)
+                    or retained.get("id") != str(session_id)
+                    or retained.get("name") != normalized
+                    or retained.get("turns") != []
+                ):
+                    raise _failure(
+                        "precreate_verification_failed",
+                        "Codex zero-turn session could not be verified.",
+                        retryable=True,
+                        stage="precreate",
+                        feature="precreate_name",
+                    )
+            except _ProviderFailure:
+                # Once thread/start returns an identity, keep failed preparation
+                # zero-turn by deleting only an exact empty thread. Cleanup is
+                # best-effort here; the original bounded failure remains primary.
+                with suppress(_ProviderFailure):
+                    cleanup = server.request(
+                        "thread/read",
+                        {"threadId": str(session_id), "includeTurns": True},
+                    ).get("thread")
+                    if (
+                        isinstance(cleanup, dict)
+                        and cleanup.get("id") == str(session_id)
+                        and cleanup.get("turns") == []
+                    ):
+                        server.request("thread/delete", {"threadId": str(session_id)})
+                raise
+        return session_id
+
+    def delete_empty_session(self, session_id: UUID) -> None:
+        try:
+            self._delete_empty_session(session_id)
+        except _ProviderFailure as error:
+            raise CodexSessionMutationError(error.issue) from error
+
+    def _delete_empty_session(self, session_id: UUID) -> None:
+        """Delete an exact precreated Codex session only while it has no turns."""
+
+        version = self._provider_version()
+        if version != CODEX_TESTED_CONTRACT_MIN:
+            raise _failure(
+                "untested_provider_version",
+                "Codex zero-turn cleanup requires the tested provider version.",
+                retryable=False,
+                stage="version",
+                feature="precreate_delete",
+            )
+        with _AppServer(
+            self.executable,
+            request_timeout=self.request_timeout,
+            total_timeout=self.total_timeout,
+            cleanup_timeout=self.cleanup_timeout,
+            max_line_bytes=self.max_line_bytes,
+            max_stdout_bytes=self.max_stdout_bytes,
+            max_stderr_bytes=self.max_stderr_bytes,
+            max_messages=self.max_messages,
+            feature="precreate_delete",
+            environment=self.environment,
+        ) as server:
+            read = server.request(
+                "thread/read", {"threadId": str(session_id), "includeTurns": True}
+            )
+            thread = read.get("thread")
+            if (
+                not isinstance(thread, dict)
+                or thread.get("id") != str(session_id)
+                or thread.get("turns") != []
+            ):
+                raise _failure(
+                    "precreate_delete_unsafe",
+                    "Codex session is not an exact zero-turn cleanup target.",
+                    retryable=False,
+                    stage="cleanup",
+                    feature="precreate_delete",
+                )
+            server.request("thread/delete", {"threadId": str(session_id)})
 
     def _failed_result(
         self,
