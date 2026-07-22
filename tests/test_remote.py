@@ -94,6 +94,26 @@ def test_remote_action_argv_is_exact_and_rejects_unsafe_tokens() -> None:
         "swbctl",
         *arguments,
     )
+    reopen_arguments = (
+        "prepare-task",
+        "66666666-6666-4666-8666-666666666666",
+        "--reopen",
+        "--request-id",
+        "77777777-7777-4777-8777-777777777777",
+        "--json",
+    )
+    assert action_ssh_argv(remote, reopen_arguments) == (
+        "ssh",
+        "-T",
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        "ConnectTimeout=5",
+        "--",
+        "bryan@snap.lan",
+        "swbctl",
+        *reopen_arguments,
+    )
     assert attach_ssh_argv(
         remote,
         "33333333-3333-4333-8333-333333333333",

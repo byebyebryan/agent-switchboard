@@ -51,6 +51,7 @@ _REMOTE_COMMAND_OPTIONS = frozenset(
         "--json-stdin",
         "--project",
         "--provider",
+        "--reopen",
         "--request-id",
     }
 )
