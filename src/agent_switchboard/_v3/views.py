@@ -100,7 +100,7 @@ class ViewRuntime:
         return (
             sys.executable,
             "-m",
-            "agent_switchboard._v3.navigator",
+            f"{__package__}.navigator",
             "--config-root",
             str(self.paths.config_root),
             "--state-root",

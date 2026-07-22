@@ -108,7 +108,7 @@ def _command_prefix(paths: GenerationPaths) -> list[str]:
     return [
         sys.executable,
         "-m",
-        "agent_switchboard._v3.cli",
+        f"{__package__}.cli",
         "--config-root",
         str(paths.config_root),
         "--state-root",
@@ -363,7 +363,7 @@ def _now() -> int:
 
 
 def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="python -m agent_switchboard._v3.navigator")
+    parser = argparse.ArgumentParser(prog=f"python -m {__package__}.navigator")
     parser.add_argument("--config-root", type=Path, required=True)
     parser.add_argument("--state-root", type=Path, required=True)
     parser.add_argument("--view", required=True)

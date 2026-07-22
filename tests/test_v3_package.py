@@ -39,6 +39,7 @@ def test_replacement_has_no_runtime_import_of_old_active_modules() -> None:
     replacement = ROOT / "src" / "agent_switchboard" / "_v3"
     for source in replacement.rglob("*.py"):
         text = source.read_text()
+        assert '"agent_switchboard._v3' not in text
         assert "from agent_switchboard.providers" not in text
         assert "from agent_switchboard.hooks" not in text
         assert "from agent_switchboard.state" not in text
@@ -63,3 +64,8 @@ def test_public_help_and_version(capsys: pytest.CaptureFixture[str]) -> None:
         .split("options:", 1)[0]
         .split()
     )
+
+
+def test_ci_executes_installed_navigator_module() -> None:
+    workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text()
+    assert '"$python" -m agent_switchboard.navigator --help' in workflow

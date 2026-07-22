@@ -74,6 +74,7 @@ jobs:
           "$swbctl" --help | grep -F "persistent project and task views"
           "$swbctl" state navigator --help | grep -F -- "--refresh"
           "$swbctl" view open --help | grep -F -- "--can-focus-desktop"
+          "$python" -m agent_switchboard.navigator --help >/dev/null
           "$python" -I - <<'PY'
           from importlib import util
           from importlib.metadata import version

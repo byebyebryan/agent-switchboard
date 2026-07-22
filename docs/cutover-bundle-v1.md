@@ -2,7 +2,7 @@
 
 Date: 2026-07-22
 
-Status: implemented and validated behind `agent_switchboard._v3`
+Status: implemented and validated in the core `0.3.0` clean-break runtime
 
 Cutover is an offline, one-way salvage path from exactly registry schema 10,
 protocol 2, and Config v2 into the fresh Phase 6 baseline. The normal Phase 6
