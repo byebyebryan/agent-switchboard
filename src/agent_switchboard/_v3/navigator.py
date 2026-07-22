@@ -146,6 +146,8 @@ def run_navigator(paths: GenerationPaths, view_id: ViewId) -> int:
         BINDINGS: ClassVar[list[Binding]] = [
             Binding("r", "refresh_state", "Refresh"),
             Binding("d", "direct", "Direct"),
+            Binding("b", "back", "Back"),
+            Binding("c", "close_task", "Close task"),
             Binding("p", "show_tab('projects')", "Projects"),
             Binding("h", "show_tab('history')", "History"),
             Binding("x", "show_tab('recovery')", "Recovery"),
@@ -284,6 +286,30 @@ def run_navigator(paths: GenerationPaths, view_id: ViewId) -> int:
                     str(view_id),
                     "--mode",
                     ViewMode.DIRECT.value,
+                    "--request-id",
+                    str(uuid4()),
+                ]
+            )
+
+        def action_back(self) -> None:
+            self._spawn(
+                [
+                    "view",
+                    "back",
+                    "--view",
+                    str(view_id),
+                    "--request-id",
+                    str(uuid4()),
+                ]
+            )
+
+        def action_close_task(self) -> None:
+            self._spawn(
+                [
+                    "view",
+                    "close",
+                    "--view",
+                    str(view_id),
                     "--request-id",
                     str(uuid4()),
                 ]

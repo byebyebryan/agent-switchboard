@@ -16,8 +16,20 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from agent_switchboard.hooks import HookInputError, read_hook_json
+
+from .agent_mcp import AgentToolService, run_mcp_server
 from .cutover import CutoverBundle, CutoverError, export_artifacts
-from .domain import FrameId, GenerationId, ProjectId, RequestId, ViewId, ViewMode
+from .domain import (
+    FrameId,
+    GenerationId,
+    ProjectId,
+    ProviderId,
+    RequestId,
+    TransitionId,
+    ViewId,
+    ViewMode,
+)
 from .generation import (
     CutoverEvidence,
     GenerationError,
@@ -31,7 +43,9 @@ from .generation import (
 from .protocol import build_host_state, build_navigator_from_registry
 from .storage import ConflictError
 from .tmux_view import TmuxExecutor, TmuxViewError
+from .trusted_hook import handle_trusted_event
 from .views import ViewRuntime, ViewRuntimeError
+from .workflow import WorkflowError, WorkflowRuntime
 
 
 def _now() -> int:
@@ -94,12 +108,35 @@ def _view_dict(view: Any) -> dict[str, Any]:
     }
 
 
+def _transition_dict(transition: Any) -> dict[str, Any]:
+    return {
+        "transitionId": str(transition.transition_id),
+        "viewId": str(transition.view_id),
+        "kind": transition.kind.value,
+        "sourceFrameId": (
+            None
+            if transition.source_frame_id is None
+            else str(transition.source_frame_id)
+        ),
+        "targetFrameId": str(transition.target_frame_id),
+        "state": transition.state.value,
+    }
+
+
 def _open_runtime(arguments: argparse.Namespace):
     paths = _paths(arguments)
     opened = open_generation(paths)
     socket_path = os.environ.get("SWB_V3_TMUX_SOCKET")
     tmux = None if socket_path is None else TmuxExecutor(socket_path)
     return paths, opened, ViewRuntime(opened, paths, tmux=tmux)
+
+
+def _open_workflow(arguments: argparse.Namespace):
+    paths = _paths(arguments)
+    opened = open_generation(paths)
+    socket_path = os.environ.get("SWB_V3_TMUX_SOCKET")
+    tmux = None if socket_path is None else TmuxExecutor(socket_path)
+    return opened, WorkflowRuntime(opened, paths, tmux=tmux)
 
 
 def _cutover(arguments: argparse.Namespace) -> int:
@@ -210,6 +247,24 @@ def _view(arguments: argparse.Namespace) -> int:
             )
             _print(_view_dict(view))
             return 0
+        if arguments.view_command in {"back", "close"}:
+            workflow = WorkflowRuntime(
+                opened,
+                _paths_value,
+                tmux=runtime.tmux,
+            )
+            action = (
+                workflow.human_back
+                if arguments.view_command == "back"
+                else workflow.human_close
+            )
+            transition = action(
+                ViewId(arguments.view),
+                request_id=_request(arguments.request_id),
+                now=timestamp,
+            )
+            _print(_transition_dict(transition))
+            return 0
         if arguments.view_command == "recover":
             result = runtime.recover_view(ViewId(arguments.view), now=timestamp)
             _print({"repaired": result.repaired, "view": _view_dict(result.view)})
@@ -231,6 +286,60 @@ def _view(arguments: argparse.Namespace) -> int:
             )
             return 0
         raise AssertionError(arguments.view_command)  # pragma: no cover
+    finally:
+        opened.close()
+
+
+def _agent_mcp(arguments: argparse.Namespace) -> int:
+    raw_capability = os.environ.get("AGENT_SWITCHBOARD_CAPABILITY")
+    if not raw_capability:
+        return 2
+    opened, workflow = _open_workflow(arguments)
+    try:
+        service = AgentToolService(
+            workflow, raw_capability, now=_timestamp(arguments.at)
+        )
+        return run_mcp_server(service, sys.stdin.buffer, sys.stdout.buffer)
+    finally:
+        opened.close()
+
+
+def _hook(arguments: argparse.Namespace) -> int:
+    raw_capability = os.environ.get("AGENT_SWITCHBOARD_CAPABILITY")
+    if not raw_capability:
+        return 2
+    try:
+        payload = read_hook_json(sys.stdin.buffer)
+        opened, workflow = _open_workflow(arguments)
+        try:
+            handle_trusted_event(
+                workflow,
+                ProviderId(arguments.provider),
+                payload,
+                os.environ,
+                now=_timestamp(arguments.at),
+            )
+        finally:
+            opened.close()
+    except (HookInputError, WorkflowError, ConflictError, ValueError):
+        return 2
+    return 0
+
+
+def _control_watchdog(arguments: argparse.Namespace) -> int:
+    opened, workflow = _open_workflow(arguments)
+    try:
+        control = workflow.control_watchdog(
+            TransitionId(arguments.transition), now=_timestamp(arguments.at)
+        )
+        _print(
+            {
+                "transitionId": str(control.transition_id),
+                "controlState": control.state.value,
+                "submissionCount": control.submission_count,
+            }
+        )
+        return 0
     finally:
         opened.close()
 
@@ -291,6 +400,11 @@ def _parser() -> argparse.ArgumentParser:
     )
     mode.add_argument("--request-id")
     mode.add_argument("--at", type=int)
+    for name in ("back", "close"):
+        action = view_sub.add_parser(name)
+        action.add_argument("--view", required=True)
+        action.add_argument("--request-id")
+        action.add_argument("--at", type=int)
     recover = view_sub.add_parser("recover")
     recover.add_argument("--view", required=True)
     recover.add_argument("--at", type=int)
@@ -301,6 +415,17 @@ def _parser() -> argparse.ArgumentParser:
     retire = view_sub.add_parser("retire")
     retire.add_argument("--view", required=True)
     retire.add_argument("--at", type=int)
+
+    agent_mcp = root.add_parser("agent-mcp")
+    agent_mcp.add_argument("--at", type=int)
+    hook = root.add_parser("hook")
+    hook.add_argument(
+        "--provider", required=True, choices=[provider.value for provider in ProviderId]
+    )
+    hook.add_argument("--at", type=int)
+    watchdog = root.add_parser("control-watchdog")
+    watchdog.add_argument("--transition", required=True)
+    watchdog.add_argument("--at", type=int)
     return parser
 
 
@@ -314,6 +439,12 @@ def main(argv: list[str] | None = None) -> int:
             return _state(arguments)
         if arguments.command == "view":
             return _view(arguments)
+        if arguments.command == "agent-mcp":
+            return _agent_mcp(arguments)
+        if arguments.command == "hook":
+            return _hook(arguments)
+        if arguments.command == "control-watchdog":
+            return _control_watchdog(arguments)
         raise AssertionError(arguments.command)  # pragma: no cover
     except (
         CutoverError,
@@ -321,6 +452,7 @@ def main(argv: list[str] | None = None) -> int:
         ConflictError,
         TmuxViewError,
         ViewRuntimeError,
+        WorkflowError,
         ValueError,
     ) as error:
         code = getattr(error, "code", type(error).__name__)
