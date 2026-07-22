@@ -104,11 +104,13 @@ and the completed guarded local rollout are recorded in
 pull-based SSH federation, Fleet v1, cached offline/stale host state,
 owning-host action routing, federated TUI rows, exact cross-host handoff
 continuation, and the separate DMS model-v4 vertical slice. Deterministic core,
-DMS, and installed local-Fleet acceptance pass; live SSH open/create/
-continuation remains pending an explicitly configured test host. The exact
-contract and evidence boundary are in
+DMS, installed local-Fleet, and guarded two-host SSH acceptance pass. The live
+exercise covered last-good offline retention, HostId-pinned action routing,
+exact continuation, DMS launch/focus/close, and close/reopen of the same
+zero-turn remote Claude session without changing pre-existing provider or tmux
+processes. The exact contract and evidence boundary are in
 [`docs/phase-5-plan.md`](docs/phase-5-plan.md). Before guarded two-host
-acceptance, the local project-catalog follow-up adds the missing list/add/edit/
+acceptance, the local project-catalog follow-up added the missing list/add/edit/
 archive/restore workflow through core, TUI, and DMS; its implemented contract is
 in [`docs/project-management-plan.md`](docs/project-management-plan.md). See
 [the design](docs/design.md), the

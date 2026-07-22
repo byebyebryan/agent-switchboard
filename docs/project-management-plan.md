@@ -1,7 +1,7 @@
 # Local Project Catalog Management Plan
 
-Status: implemented and locally accepted; live Phase 5 SSH acceptance remains
-pending an explicitly configured test host
+Status: implemented and locally accepted; its live Phase 5 SSH follow-on passed
+on 2026-07-21
 
 ## Goal
 
@@ -129,5 +129,7 @@ proved that Projects, Add Project, Manage Projects, and exactly the local-route
 project rows survive model load, cache round-trip, full refresh, retained
 failure, and recovery. The live DMS service was not reloaded or restarted, and
 no Codex, Claude, tmux, SSH, or provider/model action was launched, stopped, or
-signalled. This is complete local catalog acceptance, not live remote parity or
-a live DMS manager-window interaction claim.
+signalled during this local checkpoint. The later guarded Phase 5 closeout
+imported the same stable ProjectId and RepositoryId onto `snap.lan`, generated
+its distinct host-local CheckoutId, and passed live remote parity without
+changing this catalog contract.

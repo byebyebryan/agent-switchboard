@@ -2038,9 +2038,11 @@ live niri focus and same-window dedup through the existing public presentation
 contract. Exact evidence is recorded in
 [`docs/phase-3c-plan.md`](phase-3c-plan.md).
 
-The separate DMS adapter now consumes Fleet v1 and host-qualified actions. The
-legacy DMS helper remains only as a temporary remote fallback until a real SSH
-open/create/continuation exercise passes equivalent live tests.
+The separate DMS adapter now consumes Fleet v1 and host-qualified actions. A
+guarded 2026-07-21 SSH exercise passed remote fetch, continuation,
+launch/focus/close, and exact-session reopen through that path. The external
+legacy `agentSessions` plugin is no longer required and remains only as an
+optional untouched fallback.
 
 ### Phase 4: Curation, context, and TUI
 
@@ -2092,14 +2094,15 @@ individually validated host snapshots rather than weakening that invariant.
 - Measure polling with SSH multiplexing before considering `watch --jsonl`.
 
 Deterministic gates pass in both repositories, and the installed DMS adapter
-passes local Fleet/cache/reload acceptance. The existing DMS helper remains
-available for remote fallback until a configured test host passes live remote
-fetch, open, create, and exact continuation acceptance.
+passes Fleet/cache/reload acceptance with two hosts. Guarded two-host
+acceptance on 2026-07-21 passed live remote fetch, last-good offline recovery,
+HostId-qualified create/continuation, DMS focus deduplication, close, and
+exact-session reopen with zero submitted prompts.
 
-Guarded two-host acceptance is intentionally paused while the local project
-catalog becomes self-managing. That follow-up does not change Fleet v1 or the
-SSH ownership boundary; it removes the manual-TOML prerequisite before the
-same stable ProjectIds are carried to another host. See
+The self-managing local project catalog follow-up passed before this exercise.
+It did not change Fleet v1 or the SSH ownership boundary; it removed the
+manual-TOML prerequisite before the same stable ProjectIds were carried to
+another host. See
 [`docs/project-management-plan.md`](project-management-plan.md).
 
 ## Test Strategy

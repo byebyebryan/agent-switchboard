@@ -1,8 +1,7 @@
 # Phase 5 Plan: Pull-based SSH Federation and Remote Actions
 
-Status: implementation complete; deterministic and installed local-Fleet
-acceptance passed; guarded live-SSH acceptance paused behind the approved local
-project-catalog management follow-up and a configured test host
+Status: complete; deterministic, installed local-Fleet, and guarded two-host
+SSH acceptance passed on 2026-07-21
 
 Phase 5 extends the completed local Snapshot v2, task, managed-tmux, TUI, and
 DMS contracts across explicitly configured SSH hosts. It keeps every owning
@@ -12,8 +11,8 @@ invariants.
 
 This is one coordinated core and DMS vertical slice delivered through
 reviewable commits. Read-only federation landed before remote mutations. The
-legacy DMS remote helper remains available until the new path passes live
-remote parity acceptance.
+new path now passes live remote parity acceptance; the external legacy
+`agentSessions` plugin is an optional fallback rather than a dependency.
 
 ## Goals
 
@@ -289,12 +288,12 @@ The seven delivery slices are implemented in reviewable core and DMS commits:
 - DMS bridge v3/model v4 merges compatible projects, retains per-host routes,
   scopes desktop identity by host, and invokes only local `swbctl`.
 
-Core formatting, Ruff, compileall, and all 638 tests pass. The separate DMS
-adapter passes 97 Python tests, 15 JavaScript behavior groups, QML formatting,
+Core formatting, Ruff, compileall, and all 668 tests pass. The separate DMS
+adapter passes 113 Python tests, 18 JavaScript behavior groups, QML formatting,
 Ruff, and package Pyright. Its private-state Quickshell harness passes retained
 and full Fleet reads, cache round trip, exact query, last-good failures, and
-recovery. The installed plugin reports bridge 3/model 4 with one local host and
-no failure after the current no-cache core build is installed.
+recovery. The installed plugin reports bridge 4/model 5 with two online hosts
+and no failure after the current no-cache core build is installed.
 
 The true `SwitchboardModelV4.js` contract bump required one documented
 DMS-only restart to clear Qt's retained JavaScript module state. Exact Codex
@@ -302,16 +301,10 @@ and Claude PID sets remained unchanged. `swbctl doctor` reported only warm hook
 p95 around 130 ms against the 125 ms performance budget; it found no federation
 contract failure.
 
-This host has no configured remote endpoint. Therefore automated two-host
-transport/action/continuation coverage and installed local-Fleet coverage are
-complete, while the live-SSH steps below remain pending. No provider was
-launched, stopped, restarted, or signalled during the installed checkpoint.
-
-Before live SSH acceptance, the approved local catalog follow-up in
-[`project-management-plan.md`](project-management-plan.md) closes the missing
-project list/add/edit/archive/restore and export/import workflow. Fleet v1 and
-the completed remote implementation remain unchanged while that local UX gate
-is delivered.
+The earlier one-host checkpoint above is superseded by the guarded two-host
+closeout below. The approved local catalog follow-up in
+[`project-management-plan.md`](project-management-plan.md) passed before the
+same stable project and repository identities were imported on the second host.
 
 ## Automated acceptance
 
@@ -326,31 +319,46 @@ configuration, default registry/tmux, or live DMS.
 
 ## Guarded installed acceptance
 
-The local core/DMS install, private-state harness, cache, and provider
-non-interruption portions have passed. Steps requiring a remote endpoint are not
-executable on the current one-host configuration and remain open.
+The 2026-07-21 closeout used local host `starship` and configured remote
+`snap.lan`, with the same ProjectId and RepositoryId and distinct host-local
+CheckoutIds. Both directions were declared and HostId-pinned because the
+destination validates an imported continuation's source host. Retained and
+full refreshes passed, a controlled unreachable target retained the exact
+last-good snapshot, recovery returned online/non-stale state, and no SSH child
+survived any action.
 
-After full static/unit/package/isolated gates:
+One test-owned local Codex task supplied two exact immutable handoffs. Codex
+0.144.6 allocates an in-memory UUID at the empty prompt but does not emit or
+persist `SessionStart` until a real prompt begins, so the no-credit source
+smoke recorded that limitation and passed its exact UUID through the normal
+event ingestor rather than claiming a provider-emitted startup hook. A
+test-owned remote Codex continuation confirmed the same non-resumable empty
+history behavior and was cleaned by exact surface identity.
 
-1. Record versions, HostIds, project identity, process baselines, and rollback.
-2. Install compatible core remotely without changing hooks or active sessions.
-3. Prove retained/full SSH fetch and no surviving background SSH child.
-4. Prove controlled offline failure retains last-good rows.
-5. Open one managed remote session without another runtime/surface.
-6. Create one test-owned remote task and prove reopen deduplication.
-7. Continue one test-owned task from an explicit handoff and preserve source.
-8. Reload only the Switchboard DMS plugin and verify the same remote path.
-9. Clean exact test-owned identities and restore package/config state on error.
+The full live lifecycle used a test-owned remote Claude task. Its real trusted
+hook emitted `SessionStart` before any prompt. DMS bridge 4/model 5 projected
+both host routes; `switchboard-open` launched one Ghostty window, a repeated
+open focused the same surface, close stopped only that runtime, and reopen
+resumed the exact same provider UUID in one replacement surface. The final
+event counts were two `SessionStart`, two `SessionEnd`, and zero
+`UserPromptSubmit`. The imported handoff ID remained exact across close and
+reopen.
 
-Active user Codex or Claude sessions are never stopped, restarted, signalled,
-adopted, wrapped, or reassigned for acceptance.
+Live reopen also found and fixed the SSH action allowlist omission for
+`--reopen` in core commit `bd287ef`. A plugin-only DMS activation/reload
+succeeded; no DMS restart was needed. All pre-existing tmux pane/PID records
+and Codex/Claude PID records were unchanged, every test-owned runtime/window
+was removed, all three test tasks were closed, and no active user session was
+stopped, restarted, signalled, adopted, wrapped, or reassigned.
 
 ## Rollback and completion
 
 Rollback restores prior core/DMS commits and recorded config/registry copies.
 Remote caches are disposable observations; rollback never deletes provider
-history or tmux sessions. The legacy helper remains until discovery, offline
-retention, open/focus/attach, task creation, and continuation parity pass.
+history or tmux sessions. Discovery, offline retention, open/focus/attach, task
+creation, and continuation parity now pass without the legacy helper. The
+separate `agentSessions` plugin remains untouched as an optional external
+fallback.
 
 Phase 5 completes only when both repositories pass deterministic and
 reproducible-distribution gates; Snapshot v2 remains single-host; Fleet v1 is
