@@ -40,7 +40,7 @@ must not be substituted for one another.
 
 Codex exposes `/rename` inside its interactive TUI but has no `codex rename`
 shell command. `codex_thread_name_probe.py` retains the
-no-model proof originally implemented by the local `$name-thread` skill. It
+no-model proof originally implemented by the local `$rename-thread` skill. It
 uses `CODEX_THREAD_ID` from the current Codex turn, launches one isolated
 short-lived App Server over stdio, calls `thread/name/set`, verifies the result
 with `thread/read`, and exits without creating a shared listener.
@@ -56,6 +56,23 @@ The probe prints no thread ID, title, path, prompt, or transcript content. The
 App Server method and `CODEX_THREAD_ID` environment contract are experimental,
 version-specific evidence. Production naming must capability-gate them and
 must not depend on installing or invoking the personal skill.
+
+There is also no native CLI flag or `thread/start` field that atomically creates
+a named session. `codex_prestart_name_probe.py` tests the useful composition for
+Switchboard instead: inside an isolated temporary Codex home it calls
+`thread/start`, confirms the new thread is unnamed, calls `thread/name/set`,
+verifies the name with an empty turn list, deletes the temporary thread, and
+exits without a model request.
+
+```sh
+.venv/bin/python spikes/codex_prestart_name_probe.py
+```
+
+The recorded Codex `0.144.6` result on 2026-07-21 reported
+`namedBeforeFirstTurn=true` and `modelTurnsStarted=0`. This supports a proposed
+Switchboard sequence of precreate, name, close the transient helper, then start
+the native TUI with exact `codex resume <UUID> <bootstrap-prompt>`. The final
+resume/bind chain still requires installed end-to-end acceptance.
 
 ## Production Codex smoke
 

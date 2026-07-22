@@ -163,10 +163,12 @@ record accepts that expansion for automatic mode because implicit push cannot
 meet the desired UX without it.
 
 The waiting surface should be prepared by the authorized agent tool while the
-parent turn is still active. Attach-before-start keeps it inert: no provider is
-started and no surface moves until the turn finishes. This moves fallible task,
-checkout, launch, and tmux preparation into a normal tool result that the agent
-can report, rather than hiding it after an optimistic final response.
+parent turn is still active. Attach-before-start keeps it inert: no provider TUI
+or model turn starts and no surface moves until the parent turn finishes. A
+bounded adapter may preallocate provider metadata during preparation. This
+moves fallible task, checkout, launch, provider-identity, and tmux preparation
+into a normal tool result that the agent can report, rather than hiding it after
+an optimistic final response.
 
 The post-turn hook has a one-second provider timeout and a 250 ms health budget.
 It must not perform discovery, wait for provider binding, or supervise the full
@@ -178,7 +180,8 @@ and rollback; no persistent controller remains.
 Preparation ordering should keep the parent usable until the child binds:
 
 1. atomically record the push, child task, launch, and waiting surface during
-   the agent tool call;
+   the agent tool call, then let a version-gated adapter preallocate inert
+   provider identity when supported;
 2. let the parent finish its response normally;
 3. revalidate and switch the exact client on the post-turn hot path;
 4. release attach-before-start and bind the child through `SessionStart`;
@@ -307,9 +310,9 @@ The walkthrough supports this deliberately narrower first increment:
    exclusive task claim, so the child can claim a linked worktree normally.
 5. Store a bounded transition brief and prepare one leased inert surface during
    the agent tool call, then start the child with one fixed, visible bootstrap
-   instruction through the provider's tested initial-prompt contract. When the
-   child binds, use the task title as its curated Switchboard name and project
-   that title into provider metadata when the adapter supports it.
+   instruction through the provider's tested initial-prompt contract. For
+   Codex, prefer a precreated, pre-named thread resumed by exact UUID; otherwise
+   name the provider thread after binding when the adapter supports it.
 6. Keep the parent live until child binding and presentation succeed, then park
    it for a resumable automatic return.
 7. Implement separate Back, Cancel push, and Complete and return operations;
@@ -430,7 +433,7 @@ FrameTransition
   source_frame_id
   target_frame_id         nullable until child binding
   target_task_id          required only for push
-  target_session_key      nullable until provider binding
+  target_session_key      nullable until provider identity allocation/binding
   launch_id               nullable for an already-live target
   handoff_id              required for complete_return
   source_runtime_policy   keep_live | park
@@ -463,17 +466,18 @@ phases:
    purpose, and transition brief.
 2. Switchboard validates current-frame authority, creates the child task,
    leased transition/launch intent, and inert waiting surface, and records the
-   parent link without starting a provider.
+   parent link. A supporting adapter may preallocate an inert provider thread,
+   but no provider TUI or model turn starts.
 3. The current agent finishes its response normally.
 4. A trusted post-turn/Stop hook claims the prepared transition and revalidates
    the exact client and waiting surface.
 5. The exact tmux client or desktop surface switches or attaches to the child,
    releasing the attach-before-start bootstrap.
 6. The provider's `SessionStart` hook binds the child provider UUID to the
-   launch, task, frame, and surface.
-7. Switchboard stores the task title as the child's curated name and records a
-   bounded best-effort provider-title projection when supported. The provider
-   write does not gate the transition.
+   launch, task, frame, and surface, and must match any preallocated UUID.
+7. Switchboard stores the task title as the child's curated name and records
+   either a verified pre-start provider title or a bounded post-bind fallback.
+   No provider-title write gates the transition.
 8. Only after confirmed binding and presentation does the transition become
    `completed`, the cursor select the child, and the explicit parent runtime
    policy take effect.
@@ -503,31 +507,48 @@ window, pane, or surface ID. Managed tmux sessions keep their opaque stable
 names so shell quoting, collisions, and later title edits cannot invalidate a
 runtime locator.
 
-The first-slice lifecycle is:
+Neither Codex `0.144.6` launch CLI nor its App Server offers one atomic
+start-with-title operation. `codex`, `codex exec`, `codex resume`, and
+`codex fork` accept initial prompts but no session `--name` or `--title` flag.
+App Server `ThreadStartParams` likewise has no `name` or `title`; naming is the
+separate `thread/name/set` request and therefore requires a returned UUID.
+
+The preferred Codex first-slice lifecycle composes those primitives:
 
 1. `task_push` validates and stores one bounded task title with the task and
-   transition before any provider process starts.
-2. The child starts with the fixed bootstrap instruction. Until `SessionStart`
-   binds its provider UUID, there is nothing provider-specific to rename.
-3. The binding transaction gives the child session the current task title as a
-   curated Switchboard name with `name_actor=agent`. Switchboard can therefore
-   display the useful title immediately even if the provider write is
-   unsupported or fails.
-4. After binding, a transition-owned bounded action attempts to project that
-   same title into provider metadata. This stays off the post-turn
-   surface-switch hot path and cannot delay or roll back a successful push.
-5. Codex has no `codex rename` shell command. Its documented user-facing
-   operation is interactive `/rename`; the retained local `$name-thread` skill
-   proved that a noninteractive helper can reach the same metadata through a
-   transient stdio App Server call to `thread/name/set(threadId, name)`, verify
-   it with `thread/read`, and reap the process. Switchboard must port that
-   bounded helper into its version-gated adapter rather than type `/rename`
-   into the TUI, invoke a personal skill, or enable the shared default-socket
-   daemon.
-6. A known not-yet-writable metadata result may receive one bounded retry after
-   the first completed turn. Unsupported providers and exhausted failures keep
-   the curated Switchboard name and report bounded diagnostic state; they do
-   not create another session or keep retrying in the background.
+   transition before any provider TUI or model turn starts.
+2. During ordinary transition preparation, a short-lived stdio App Server calls
+   `thread/start` to precreate one blank thread and obtain its UUID. A later
+   context-preserving path may use `thread/fork`, but that variant needs its own
+   no-model acceptance.
+3. The same helper immediately calls `thread/name/set`, verifies the title with
+   `thread/read`, confirms that the thread still has zero turns, and exits.
+4. Switchboard records the expected UUID and launches the native child TUI as
+   exact `codex resume <UUID> <fixed-bootstrap-prompt>` only after the parent
+   turn finishes and the waiting surface is selected.
+5. `SessionStart` must bind that exact UUID. The binding transaction sets the
+   current task title as the child session's curated Switchboard name with
+   `name_actor=agent`. Switchboard can therefore display the useful title
+   immediately even if the provider write is unsupported or fails.
+6. Cancellation or failed launch may delete only the exact transition-owned
+   precreated thread after re-reading it and proving that it still has zero
+   turns. Any ambiguous, independently resumed, or nonempty thread is retained
+   for reconciliation rather than destroyed.
+
+This ordering was proven locally without a model call: isolated Codex `0.144.6`
+`thread/start` returned an unnamed thread, `thread/name/set` succeeded,
+`thread/read` returned the chosen name with an empty turn list, and the probe
+deleted the temporary thread. It gives Switchboard the useful provider title
+before the native TUI and fixed bootstrap turn begin.
+
+Codex still has no `codex rename` shell command. Its documented user-facing
+operation is interactive `/rename`; the renamed local `$rename-thread` skill
+proves the post-start fallback by reaching the same metadata through a
+transient stdio App Server. Switchboard must port the bounded helper into its
+version-gated adapter rather than type `/rename` into the TUI, invoke a personal
+skill, or enable the shared default-socket daemon. If precreation is unavailable
+for a supported version, a post-bind write may receive one bounded retry after
+the first completed turn. It remains a fallback and never gates navigation.
 
 A workspace root uses a bounded label derived from the project name, such as
 `Agent Switchboard workspace`; a task child uses the exact current task title.
@@ -687,12 +708,13 @@ that shares Codex's durable local store.
 
 ## Programmatic Codex thread naming
 
-Switchboard can project a task/session title into Codex after the provider UUID
-is known. The existing `SessionStart` binding supplies that UUID. The adapter
-then calls `thread/name/set` through the transient stdio process and verifies
-the result with `thread/read`.
+Switchboard can project a task/session title once the provider UUID is known.
+The preferred Codex path obtains that UUID from transient `thread/start`, names
+and verifies the zero-turn thread, closes the helper, and starts the native TUI
+with exact `resume`; `SessionStart` then confirms the expected identity. In the
+post-start fallback, `SessionStart` is the first source of that UUID.
 
-The operation was proven locally by the `$name-thread` skill against an active
+The fallback was proven locally by the `$rename-thread` skill against an active
 isolated Codex `0.144.6` thread on 2026-07-21. The title was persisted in
 Codex's session index, the transient process exited, the shared service stayed
 disabled, and no default socket or App Server process remained. The proof is
@@ -700,14 +722,19 @@ now retained as
 [`spikes/codex_thread_name_probe.py`](../spikes/codex_thread_name_probe.py);
 the personal skill itself is not a production dependency.
 
+The preferred pre-start sequence is retained separately as
+[`spikes/codex_prestart_name_probe.py`](../spikes/codex_prestart_name_probe.py).
+It uses an isolated temporary Codex home and starts no model turn.
+
 Naming contracts:
 
 - Switchboard task and curated session names remain immediately authoritative
   for Switchboard presentation.
 - Provider naming is a best-effort projection, never an identity write.
 - Provider names need not be unique; every action continues to use the UUID.
-- A just-created thread may not yet have writable retained metadata. Retry only
-  after `SessionStart` or the first completed turn, with a fixed attempt bound.
+- A precreated zero-turn thread was immediately writable in the accepted local
+  probe. Post-bind fallback retries remain fixed and version-gated rather than
+  being inferred from that separate path.
 - A separately running TUI does not receive the transient process's
   `thread/name/updated` notification. Its in-memory `/status` display may remain
   stale until resume, while Switchboard and later Codex history reads see the
@@ -867,10 +894,11 @@ intentionally stops at one workspace child until checkout ownership is revised.
    stack-level checkout ownership before enabling nested tasks.
 7. Define the exact initiating-attachment proof, multi-client failure behavior,
    and bounded transition status surface.
-8. Version-gate Codex fork/resume/initial-prompt/name contracts and Claude
-   fork/resume/initial-prompt semantics with isolated no-model probes.
-9. Define the durable diagnostic/idempotency representation for the accepted
-   one-shot provider-name projection and its single bounded retry.
+8. Version-gate the Codex precreate/name/resume chain, the optional fork
+   variant, and the initial-prompt contract; version-gate Claude
+   fork/resume/initial-prompt semantics separately.
+9. Define durable ownership, diagnostic, idempotency, and zero-turn rollback
+   state for precreated provider threads and the bounded post-bind fallback.
 10. Decide how a directly or manually resumed historical session joins a
     workspace path or remains a parentless recovery flow.
 11. Define workspace provider-thread rollover without changing durable
@@ -883,10 +911,11 @@ intentionally stops at one workspace child until checkout ownership is revised.
 - Local no-model CLI help on 2026-07-21 confirmed that Codex `0.144.6` accepts
   an initial prompt on exact `fork` and `resume`, and Claude Code `2.1.216`
   accepts a prompt with `--resume` plus optional `--fork-session`.
-- Codex's command overview has no thread-rename shell command. The
-  supported interactive surface is `/rename`; the repo-owned no-model probe
-  retains the local `$name-thread` skill's experimental stdio bridge for
-  version-gated adapter work.
+- Codex's command overview has no thread-rename shell command, and local help
+  exposes no session title option at launch. App Server `ThreadStartParams`
+  likewise has no title field. The supported interactive surface is `/rename`;
+  the repo-owned probes retain the local `$rename-thread` skill's stdio bridge
+  and the validated precreate-then-name composition for adapter work.
 - Codex `0.144.6` TUI source selects an embedded in-process App Server when no
   reusable default daemon socket is reachable, and otherwise auto-selects the
   local daemon for eligible launches:

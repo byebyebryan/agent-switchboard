@@ -14,6 +14,7 @@ import sys
 import tempfile
 import time
 import unicodedata
+from collections.abc import Mapping
 from typing import Any
 
 RESPONSE_TIMEOUT_SECONDS = 10
@@ -22,7 +23,12 @@ MAX_STDOUT_BYTES = 1024 * 1024
 
 
 class StdioAppServer:
-    def __init__(self, codex: str) -> None:
+    def __init__(
+        self,
+        codex: str,
+        *,
+        environment: Mapping[str, str] | None = None,
+    ) -> None:
         self.resources = contextlib.ExitStack()
         self.stderr = self.resources.enter_context(
             tempfile.TemporaryFile(mode="w+b")  # noqa: SIM115 - owned by ExitStack
@@ -34,6 +40,7 @@ class StdioAppServer:
                 stdout=subprocess.PIPE,
                 stderr=self.stderr,
                 bufsize=0,
+                env=None if environment is None else dict(environment),
             )
         except Exception:
             self.resources.close()
