@@ -29,20 +29,8 @@ packages = ["src/agent_switchboard"]
 only-include = [
   "src/agent_switchboard",
   "docs/design.md",
-  "docs/phase-1-validation.md",
-  "docs/phase-2-validation.md",
-  "docs/phase-2b-plan.md",
-  "docs/phase-3a-validation.md",
-  "docs/phase-3b-plan.md",
-  "docs/phase-3c-plan.md",
-  "docs/phase-4a-plan.md",
-  "docs/phase-4b-plan.md",
-  "docs/phase-4c-plan.md",
-  "docs/phase-4d-plan.md",
-  "docs/phase-5-plan.md",
-  "docs/project-management-plan.md",
-  "docs/frictionless-task-close-plan.md",
-  "docs/foreground-task-session-stack.md",
+  "docs/view-workflow.md",
+  "docs/phase-6-plan.md",
 ]
 
 [tool.pytest.ini_options]

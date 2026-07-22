@@ -10,117 +10,32 @@ status metadata, then hands the user back to the unmodified provider UI.
 
 ## Implementation status
 
-The current checkout contains the Phase 1 core, the local Codex and Claude
-provider foundations from Phase 2, Phase 3A existing-session presentation, and
-the complete local managed-tmux paths for new, existing, and history-selected
-Codex and Claude sessions:
+The current executable remains the implemented `0.2.0` task-first system:
+provider discovery and trusted hooks, managed Codex and Claude tmux runtimes,
+projects/repositories/checkouts, explicit tasks, Snapshot v2/Fleet v1,
+pull-based SSH federation, the full-screen Textual manager, and the separate
+DMS model-v5 picker all have deterministic and guarded live acceptance.
 
-- Python package and finalized `swbctl` executable name
-- stable host identity and strict TOML configuration
-- provider-neutral domain and state models
-- versioned machine protocols and privacy validation
-- SQLite schema, migrations, and registry operations
-- production Codex `0.144.6` app-server discovery, normalization, atomic
-  reconciliation, and canonical local snapshots
-- bounded Claude Code `2.1.214` through `2.1.215` capability detection for the
-  Agent-View-disabled profile without supervisor or transcript discovery
-- retained no-refresh reads, structured provider degradation, and explicit
-  snapshot-session truncation
-- privacy-safe Codex lifecycle hook ingestion with atomic launch binding and
-  deterministic event ordering
-- privacy-safe Claude lifecycle ingestion with canonical prompt identity,
-  retained exact PID/birth evidence, and foreground-only activity semantics
-- bounded `/proc` and tmux reconciliation for normalized live activity,
-  attachment, and parked state
-- explicit, ownership-safe Codex hook installation and effective hook/trust
-  diagnostics through the supported app-server contract
-- ownership-safe Claude user-hook installation, profile diagnostics, and
-  isolated zero-model effective-hook acceptance
-- validated tmux surface discovery, creation, metadata, selection, attachment,
-  and rollback without shell interpolation
-- atomic existing-Codex preparation with live-pane adoption, resumable-session
-  leases, waiting bootstrap, idempotent retries, and a final duplicate-runtime
-  check before `codex resume`
-- atomic existing-Claude preparation through the same managed-tmux lifecycle,
-  with forced disabled Agent View and exact `claude --resume` execution
-- exact process/session/tmux correlation that can atomically finish a pending
-  resume when Codex omits the expected start hook
-- explicit projects with stable repository memberships, host-local main or
-  linked-worktree checkouts, and bounded read-only Git discovery
-- first-class open and closed tasks with one current top-level provider
-  session, retained session history, explicit adoption, and checkout claims
-- atomic task creation and Codex or Claude launch reservation with an unbound
-  waiting surface, attach-before-start bootstrap, and same-request idempotency
-- provider-native Claude history selection through an unbound managed surface
-  running exact `claude --resume`, with hook binding after selection and
-  fail-closed surface retirement after cancellation
-- ownership-safe Claude stop actions that request exact interactive `/exit`,
-  wait a bounded grace period, and restrict fallback termination to the
-  revalidated launch-owned process group and tmux surface
-- versioned focus, switch, attach, and blocked presentation plans consumed by
-  the separate DMS integration
-- random per-launch Codex and Claude agent capabilities stored only as digests, with
-  exact current-pane/launch/surface/session authorization
-- repository-owned bounded context, project-scoped retained reads/search, and
-  current-task-only title, purpose, pin, handoff, and close commands
-- a thin dependency-free stdio MCP projection of the same authorized service,
-  plus an explicit, disabled-by-default bounded memory MCP adapter
-- unit, migration, concurrency, provider, protocol, and packaging tests
+Phase 6 is now the accepted clean-break direction for `0.3.0`. It replaces,
+rather than extends, that product shape with durable host-local user views,
+unified workspace/task Frames, navigator and direct modes, automatic bounded
+task transitions, HostState v1/NavigatorState v1/ViewAction v1, Config v3, a
+fresh registry baseline, a replacement Textual navigator, and a views/projects/
+recovery-only DMS entry picker.
 
-Phase 3B implementation and live acceptance are complete in the core and
-separate DMS adapter. Phase 2B implementation, Agent View cutover, and live
-acceptance are also complete. Phase 3C reuses the Codex managed-tmux lifecycle
-for known, new, and provider-history-selected Claude sessions, adds safe stop,
-and projects those actions through the separate DMS adapter. Its completed
-contract, provider lifecycle, live compositor focus, and same-window dedup
-acceptance are recorded in
-[`docs/phase-3c-plan.md`](docs/phase-3c-plan.md).
-The terminal-native Phase 4A vertical slice has its optional Textual shell,
-terminal-context resolver, bounded public-command gateway, and pure searchable
-session/launch-target model in place. Its Textual view provides responsive
-session navigation, search, filters, details, issues, help, and refresh. It can
-open known sessions, start configured Codex or Claude sessions, enter Claude's
-native history picker, and request confirmed safe stop through the existing
-versioned core commands. Phase 4B now adds on-demand immutable handoff detail,
-name and purpose editing, pinning, explicit handoff and wrap forms, and
-continuation from the selected exact latest handoff. Successful routing selects
-only the inherited tmux client or replaces the restored plain terminal with
-`attach-surface`; installed no-model acceptance for the Phase 4A provider
-contracts, plain terminal, dedicated tmux manager, popup, and complete action
-matrix is recorded in
-[`docs/phase-4a-plan.md`](docs/phase-4a-plan.md). Phase 4B installed isolated
-acceptance is also complete; its implemented boundary and evidence are recorded in
-[`docs/phase-4b-plan.md`](docs/phase-4b-plan.md). Phase 4C completes exact
-session-scoped authorization for managed Codex and Claude launches, bounded
-current-project context and retained-state search, current-session curation, a
-thin stdio MCP transport, and an optional external memory MCP adapter. Its
-contract and isolated installed evidence are recorded in
-[`docs/phase-4c-plan.md`](docs/phase-4c-plan.md). Phase 4D is the clean `0.2.0`
-local-management cutover: Snapshot v2,
-configuration v2, repositories/checkouts, explicit tasks, and the task-first
-TUI are implemented in core. Its accepted contract and acceptance checklist
-and the completed guarded local rollout are recorded in
-[`docs/phase-4d-plan.md`](docs/phase-4d-plan.md). Phase 5 now implements bounded
-pull-based SSH federation, Fleet v1, cached offline/stale host state,
-owning-host action routing, federated TUI rows, exact cross-host handoff
-continuation, and the separate DMS model-v4 vertical slice. Deterministic core,
-DMS, installed local-Fleet, and guarded two-host SSH acceptance pass. The live
-exercise covered last-good offline retention, HostId-pinned action routing,
-exact continuation, DMS launch/focus/close, and close/reopen of the same
-zero-turn remote Claude session without changing pre-existing provider or tmux
-processes. The exact contract and evidence boundary are in
-[`docs/phase-5-plan.md`](docs/phase-5-plan.md). Before guarded two-host
-acceptance, the local project-catalog follow-up added the missing list/add/edit/
-archive/restore workflow through core, TUI, and DMS; its implemented contract is
-in [`docs/project-management-plan.md`](docs/project-management-plan.md). See
-[the design](docs/design.md), the
-[Phase 1 validation record](docs/phase-1-validation.md), and the
-[Phase 2 validation record](docs/phase-2-validation.md), the
-[Phase 2B plan](docs/phase-2b-plan.md), and the
-[Phase 3A validation record](docs/phase-3a-validation.md) for the implemented
-boundary and evidence. The completed Codex vertical-slice contract is in the
-[Phase 3B plan](docs/phase-3b-plan.md).
+Phase 6 production code has not landed. The old runtime remains usable only
+until the coordinated activation slice; it is not a compatibility contract.
+Do not run the registry/config cutover before the Phase 6 implementation and
+paired core/DMS acceptance are complete.
 
+Current design sources:
+
+- [Agent Switchboard Design](docs/design.md)
+- [View and Frame Workflow](docs/view-workflow.md)
+- [Phase 6 Clean-Break Plan](docs/phase-6-plan.md)
+
+The implemented `0.2` phase records are retained as non-packaged historical
+evidence under [`docs/archive/0.2`](docs/archive/0.2/README.md).
 ## Local commands
 
 The implemented command surface emits one versioned snapshot envelope:

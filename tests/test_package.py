@@ -34,34 +34,20 @@ def test_static_pep_621_metadata_and_stdlib_runtime() -> None:
     assert build["targets"]["sdist"]["only-include"] == [
         "src/agent_switchboard",
         "docs/design.md",
-        "docs/phase-1-validation.md",
-        "docs/phase-2-validation.md",
-        "docs/phase-2b-plan.md",
-        "docs/phase-3a-validation.md",
-        "docs/phase-3b-plan.md",
-        "docs/phase-3c-plan.md",
-        "docs/phase-4a-plan.md",
-        "docs/phase-4b-plan.md",
-        "docs/phase-4c-plan.md",
-        "docs/phase-4d-plan.md",
-        "docs/phase-5-plan.md",
-        "docs/project-management-plan.md",
-        "docs/frictionless-task-close-plan.md",
-        "docs/foreground-task-session-stack.md",
+        "docs/view-workflow.md",
+        "docs/phase-6-plan.md",
     ]
     assert metadata["tool"]["pytest"]["ini_options"]["pythonpath"] == ["src"]
 
 
 def test_readme_states_phase_and_license() -> None:
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
-    assert "Phase 3A existing-session presentation" in readme
-    assert "Phase 2" in readme
-    assert "docs/phase-2-validation.md" in readme
-    assert "docs/phase-2b-plan.md" in readme
-    assert "docs/phase-3a-validation.md" in readme
-    assert "docs/phase-3b-plan.md" in readme
-    assert "docs/phase-4a-plan.md" in readme
-    assert "docs/phase-4b-plan.md" in readme
+    assert "implemented `0.2.0` task-first system" in readme
+    assert "Phase 6 is now the accepted clean-break direction" in readme
+    assert "docs/design.md" in readme
+    assert "docs/view-workflow.md" in readme
+    assert "docs/phase-6-plan.md" in readme
+    assert "docs/archive/0.2/README.md" in readme
     assert "MIT License" in readme
     assert "SOURCE_DATE_EPOCH=1784073600" in readme
 
@@ -134,19 +120,9 @@ def test_ci_smokes_wheel_and_source_distribution_installations() -> None:
     assert 'project list --json > "$smoke_root/catalog.json"' in workflow
     assert "Path(sys.argv[1]).read_bytes()" in workflow
     assert "SnapshotEnvelope.from_json" in workflow
-    assert '"docs/phase-2-validation.md"' in verifier
-    assert '"docs/phase-2b-plan.md"' in verifier
-    assert '"docs/phase-3a-validation.md"' in verifier
-    assert '"docs/phase-3b-plan.md"' in verifier
-    assert '"docs/phase-3c-plan.md"' in verifier
-    assert '"docs/phase-4a-plan.md"' in verifier
-    assert '"docs/phase-4b-plan.md"' in verifier
-    assert '"docs/phase-4c-plan.md"' in verifier
-    assert '"docs/phase-4d-plan.md"' in verifier
-    assert '"docs/phase-5-plan.md"' in verifier
-    assert '"docs/project-management-plan.md"' in verifier
-    assert '"docs/frictionless-task-close-plan.md"' in verifier
-    assert '"docs/foreground-task-session-stack.md"' in verifier
+    assert '"docs/design.md"' in verifier
+    assert '"docs/view-workflow.md"' in verifier
+    assert '"docs/phase-6-plan.md"' in verifier
     assert '"agent_switchboard/migrations/v0003_name_provenance_runtime_index.py"' in (
         verifier
     )
