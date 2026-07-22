@@ -3,8 +3,12 @@ from __future__ import annotations
 import os
 import pty
 import shutil
+import signal
+import struct
 import subprocess
+import termios
 import time
+from fcntl import ioctl
 from pathlib import Path
 
 import pytest
@@ -70,6 +74,7 @@ def test_isolated_view_shell_preserves_surface_across_modes_and_detach(
         assert presented.active.process_id == process_id
 
         master, slave = pty.openpty()
+        ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 40, 140, 0, 0))
         environment = dict(os.environ)
         environment["TERM"] = "xterm-256color"
         environment.pop("TMUX", None)
@@ -84,6 +89,11 @@ def test_isolated_view_shell_preserves_surface_across_modes_and_detach(
         os.close(slave)
         clients.append((client, master))
         assert wait_for(lambda: tmux.run("list-clients", check=False).returncode == 0)
+        geometry = tmux._pane(surface.pane_id).geometry
+        ioctl(master, termios.TIOCSWINSZ, struct.pack("HHHH", 50, 180, 0, 0))
+        os.kill(client.pid, signal.SIGWINCH)
+        assert wait_for(lambda: tmux._pane(surface.pane_id).geometry != geometry)
+        assert tmux._pane(surface.pane_id).process_id == process_id
         client.terminate()
         client.wait(timeout=3)
         os.close(master)
