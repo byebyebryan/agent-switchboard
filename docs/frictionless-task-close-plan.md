@@ -4,6 +4,11 @@ Date: 2026-07-21
 
 Status: implementation contract
 
+> Foreground-stack note (2026-07-21):
+> [Foreground task session stack](foreground-task-session-stack.md) explores a
+> separate agent-authorized return/complete transition with an exact handoff.
+> It does not yet supersede or overload the human-only close contract below.
+
 ## Decision
 
 Closing a task is a lightweight organizational action, not a handoff-writing

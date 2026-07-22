@@ -7,6 +7,9 @@ Last updated: 2026-07-21
 Task-close reconciliation:
 [Frictionless task close plan](frictionless-task-close-plan.md)
 
+Proposed foreground task/session automation:
+[Foreground task session stack](foreground-task-session-stack.md)
+
 Related research: [Open-source product landscape](product-landscape.md)
 
 Implementation evidence: [Phase 0 validation](phase-0-validation.md)
@@ -308,7 +311,7 @@ than silently showing incorrect data.
 ```text
                        Provider-native state
                  +-----------------------------+
-                 | Codex app-server / processes|
+                 | Codex stdio probes / CLI    |
                  | Claude hooks / CLI processes|
                  +--------------+--------------+
                                 |
@@ -767,6 +770,24 @@ and its supervisor are an explicitly disabled, incompatible runtime mode for
 managed Claude presentation rather than a discovery dependency.
 
 ## Codex Provider
+
+### Runtime mode
+
+Managed Codex sessions use isolated native TUI processes in tmux. On the
+validated Codex `0.144.6` baseline, an eligible plain TUI launch probes the
+well-known App Server Unix socket and automatically reuses a reachable daemon.
+Switchboard therefore treats a persistent server on the default socket as an
+incompatible managed runtime mode, not as required discovery infrastructure.
+
+Without that socket, each Codex TUI owns an embedded in-process App Server. The
+embedded implementation is private to that TUI and preserves the isolated
+process/surface model. Switchboard's provider discovery continues to use only
+bounded short-lived stdio App Server subprocesses; they create no listener and
+cannot attract TUI clients.
+
+The runtime-mode evidence, safe transient naming flow, and future automatic
+foreground task transitions are recorded in
+[`docs/foreground-task-session-stack.md`](foreground-task-session-stack.md).
 
 ### Discovery
 
