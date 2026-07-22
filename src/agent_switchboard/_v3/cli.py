@@ -612,6 +612,8 @@ def _session(arguments: argparse.Namespace) -> int:
 
 
 def _hooks(arguments: argparse.Namespace) -> int:
+    with open_generation(_paths(arguments)) as opened:
+        opened.require_mutation(f"hooks {arguments.hooks_command}")
     executable = arguments.executable
     if executable is None:
         discovered = shutil.which("swbctl")

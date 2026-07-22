@@ -83,6 +83,22 @@ def test_private_cli_runs_staged_reads_then_committed_view_workflow(
             == 2
         )
         assert json.loads(capsys.readouterr().out)["error"]["code"] == "cutover_staged"
+        assert (
+            v3_main(
+                [
+                    *base,
+                    "hooks",
+                    "install",
+                    "--provider",
+                    "codex",
+                    "--executable",
+                    "/bin/true",
+                    "--dry-run",
+                ]
+            )
+            == 2
+        )
+        assert json.loads(capsys.readouterr().out)["error"]["code"] == "cutover_staged"
 
         evidence_path = tmp_path / "evidence.json"
         evidence_path.write_bytes(
