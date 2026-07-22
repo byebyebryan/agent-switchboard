@@ -1725,7 +1725,25 @@ def worker_call(spec: Spec, role: str, action: str, *extra: str) -> dict[str, An
             host.ssh_target,
             *argv,
         ]
-    return json.loads(run(argv, timeout=600).stdout)
+    result = run(argv, timeout=600, check=False)
+    try:
+        value = json.loads(result.stdout)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise CutoverFailure(
+            f"{role} {action} worker did not return JSON (exit {result.returncode})"
+        ) from error
+    if not isinstance(value, dict):
+        raise CutoverFailure(f"{role} {action} worker returned incompatible JSON")
+    if result.returncode != 0:
+        failure = value.get("error")
+        message = failure.get("message") if isinstance(failure, dict) else None
+        detail = (
+            str(message)[:512]
+            if isinstance(message, str) and message
+            else f"worker exited {result.returncode}"
+        )
+        raise CutoverFailure(f"{role} {action} failed: {detail}")
+    return value
 
 
 def sync_remote(spec: Spec) -> None:

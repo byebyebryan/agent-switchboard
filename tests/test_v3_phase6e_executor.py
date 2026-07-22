@@ -4,6 +4,7 @@ import importlib.util
 import json
 import os
 import sqlite3
+import subprocess
 import sys
 from pathlib import Path
 
@@ -226,6 +227,33 @@ def test_rehome_console_script_repairs_relocated_venv_entrypoint(
     assert script.stat().st_mode & 0o777 == 0o755
     phase6e.rehome_console_script(script, interpreter)
     assert script.read_bytes() == f"#!{interpreter}\n".encode() + body
+
+
+def test_worker_call_propagates_bounded_remote_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    spec = parsed_spec(tmp_path)
+    failure = phase6e.canonical(
+        {
+            "ok": False,
+            "error": {
+                "code": "phase6e_cutover_failed",
+                "message": "release console script failed",
+            },
+        }
+    )
+    monkeypatch.setattr(
+        phase6e,
+        "run",
+        lambda *_args, **_kwargs: subprocess.CompletedProcess([], 1, failure, b""),
+    )
+    with pytest.raises(
+        phase6e.CutoverFailure,
+        match=(
+            "remote_owner stage failed: release console script failed"
+        ),
+    ):
+        phase6e.worker_call(spec, "remote_owner", "stage")
 
 
 def legacy_database(
