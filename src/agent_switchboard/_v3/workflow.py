@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import secrets
+import subprocess
 import sys
 from collections.abc import Callable
 from contextlib import suppress
@@ -28,6 +29,7 @@ from .domain import (
     ControlTransport,
     ControlTurn,
     ControlTurnId,
+    ControlTurnPolicy,
     CreatedBy,
     Frame,
     FrameId,
@@ -83,6 +85,40 @@ from .tmux_view import PaneObservation, TmuxExecutor
 
 CAPABILITY_TTL_MS = 24 * 60 * 60 * 1_000
 EXECUTION_LEASE_MS = 30_000
+
+
+def spawn_control_watchdog(
+    paths: GenerationPaths,
+    generation_id,
+    transition_id: TransitionId,
+    *,
+    delay_seconds: int,
+) -> None:
+    """Start one detached, generation-bound settlement helper."""
+
+    subprocess.Popen(
+        (
+            sys.executable,
+            "-m",
+            "agent_switchboard._v3",
+            "--config-root",
+            str(paths.config_root),
+            "--state-root",
+            str(paths.state_root),
+            "control-watchdog",
+            "--transition",
+            str(transition_id),
+            "--generation-id",
+            str(generation_id),
+            "--delay-ms",
+            str(delay_seconds * 1_000),
+        ),
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        close_fds=True,
+        start_new_session=True,
+    )
 
 
 class WorkflowError(RuntimeError):
@@ -155,6 +191,7 @@ class WorkflowRuntime:
         allocator: SessionAllocator | None = None,
         contracts: dict[ProviderId, ProviderContract] | None = None,
         capability_factory: Callable[[], str] | None = None,
+        watchdog_launcher: Callable[[TransitionId], None] | None = None,
     ) -> None:
         self.opened = opened
         self.paths = paths
@@ -168,6 +205,16 @@ class WorkflowRuntime:
         self.capability_factory = capability_factory or (
             lambda: secrets.token_urlsafe(48)
         )
+        self.watchdog_launcher = watchdog_launcher or (lambda _transition_id: None)
+
+    def _watch_control(self, transition_id: TransitionId) -> None:
+        try:
+            self.watchdog_launcher(transition_id)
+        except OSError as error:
+            raise WorkflowError(
+                "control_watchdog_start_failed",
+                "control settlement watchdog could not start",
+            ) from error
 
     def _require_mutation(self, operation: str) -> None:
         self.opened.require_mutation(operation)
@@ -711,6 +758,10 @@ class WorkflowRuntime:
                 "parent_placement_missing", "parent has no exact view affinity"
             )
         if placement.state in {PlacementState.PARKED, PlacementState.ACTIVE}:
+            frame = self.registry.get_frame(frame_id)
+            session_key = frame.current_session_key
+            if session_key is None:
+                raise WorkflowError("parent_session_missing", "parent has no session")
             if placement.surface_id is None:
                 raise WorkflowError(
                     "parent_surface_missing", "parent runtime surface is missing"
@@ -720,7 +771,67 @@ class WorkflowRuntime:
                 raise WorkflowError(
                     "parent_surface_unavailable", "parent runtime is not live"
                 )
-            return False
+            session = self.registry.get_provider_session(session_key)
+            if (
+                surface.session_key != session_key
+                or surface.pane_id is None
+                or session.runtime_presence is not RuntimePresence.LIVE
+                or session.resumability is not Resumability.RESUMABLE
+                or session.activity is not Activity.READY
+                or session.activity_reason is not ActivityReason.TURN_COMPLETE
+            ):
+                raise WorkflowError(
+                    "control_target_unready",
+                    "parent is not an exact verified-idle owned runtime",
+                )
+            if self.config.control_turns.transport is ControlTurnPolicy.LIVE_FIRST:
+                return False
+            _view, executor = self._tmux_for_view(view_id)
+            try:
+                executor.stop_surface(
+                    generation_id=self.generation_id,
+                    view_id=view_id,
+                    surface_id=str(surface.surface_id),
+                    pane_id=surface.pane_id,
+                )
+                self.registry.advance_surface_state(
+                    surface.surface_id,
+                    surface.metadata_generation,
+                    SurfaceState.DEAD,
+                    now=now,
+                )
+                placement = self.registry.advance_placement(
+                    placement.placement_id,
+                    placement.generation,
+                    PlacementState.STOPPED_AFFINITY,
+                    now=now,
+                )
+                self.registry.upsert_provider_session(
+                    ProviderSession(
+                        session.session_key,
+                        session.host_id,
+                        session.provider,
+                        session.provider_session_id,
+                        session.project_id,
+                        session.checkout_id,
+                        session.name,
+                        session.purpose,
+                        session.pinned,
+                        RuntimePresence.STOPPED,
+                        session.resumability,
+                        session.activity,
+                        session.activity_reason,
+                        session.created_at,
+                        session.provider_updated_at,
+                        now,
+                        now,
+                    )
+                )
+            except Exception as error:
+                raise WorkflowError(
+                    "parent_resume_stop_failed",
+                    "verified idle parent could not be stopped for exact resume",
+                ) from error
         if placement.state is not PlacementState.STOPPED_AFFINITY:
             raise WorkflowError(
                 "parent_affinity_unavailable", "parent affinity cannot be resumed"
@@ -1186,6 +1297,7 @@ class WorkflowRuntime:
             ControlState.SUBMITTED,
             now=now,
         )
+        self._watch_control(transition.transition_id)
         try:
             observed = executor.launch_surface(
                 generation_id=self.generation_id,
@@ -1317,6 +1429,7 @@ class WorkflowRuntime:
             ControlState.SUBMITTED,
             now=now,
         )
+        self._watch_control(transition.transition_id)
         try:
             executor.submit_control_prompt(
                 generation_id=self.generation_id,
@@ -1408,6 +1521,7 @@ class WorkflowRuntime:
                 ControlState.SUBMITTED,
                 now=now,
             )
+            self._watch_control(transition.transition_id)
         try:
             observed = executor.launch_surface(
                 generation_id=self.generation_id,
@@ -1763,6 +1877,16 @@ class WorkflowRuntime:
             raise WorkflowError("control_missing", "transition has no control turn")
         if control.state is not ControlState.SUBMITTED:
             return control
+        if control.submitted_at is None:
+            raise WorkflowError(
+                "control_submission_invalid", "submitted control has no timestamp"
+            )
+        deadline = (
+            control.submitted_at
+            + self.config.control_turns.watchdog_timeout_seconds * 1_000
+        )
+        if now < deadline:
+            return control
         control = self.registry.advance_control_turn(
             control.control_turn_id,
             ControlState.SUBMITTED,
@@ -1789,6 +1913,20 @@ class WorkflowRuntime:
             now=now,
         )
         return control
+
+    def reconcile_control_turns(self, *, now: int) -> tuple[ControlTurn, ...]:
+        """Fence every overdue submitted control without resubmission."""
+
+        rows = self.registry.connection.execute(
+            "SELECT transition_id FROM control_turns WHERE state = 'submitted' "
+            "AND submitted_at IS NOT NULL AND submitted_at <= ? "
+            "ORDER BY transition_id",
+            (now - self.config.control_turns.watchdog_timeout_seconds * 1_000,),
+        ).fetchall()
+        return tuple(
+            self.control_watchdog(TransitionId(row["transition_id"]), now=now)
+            for row in rows
+        )
 
     def claim(self, raw_capability: str, *, now: int) -> TransitionClaim:
         """Release one semantic payload to the exact active target capability."""
@@ -1895,4 +2033,5 @@ __all__ = [
     "StopResult",
     "WorkflowError",
     "WorkflowRuntime",
+    "spawn_control_watchdog",
 ]

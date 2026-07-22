@@ -95,6 +95,7 @@ class AutomationConfig:
 @dataclass(frozen=True, slots=True)
 class ControlTurnsConfig:
     transport: ControlTurnPolicy = ControlTurnPolicy.LIVE_FIRST
+    watchdog_timeout_seconds: int = 5
 
 
 @dataclass(frozen=True, slots=True)
@@ -593,13 +594,19 @@ def _parse_automation(raw: object) -> AutomationConfig:
 
 def _parse_control_turns(raw: object) -> ControlTurnsConfig:
     table = _table(raw, "control_turns")
-    _known(table, {"transport"}, "control_turns")
+    _known(table, {"transport", "watchdog_timeout_seconds"}, "control_turns")
     return ControlTurnsConfig(
         _enum(
             table.get("transport", "live_first"),
             "control_turns.transport",
             ControlTurnPolicy,
-        )
+        ),
+        _integer(
+            table.get("watchdog_timeout_seconds", 5),
+            "control_turns.watchdog_timeout_seconds",
+            minimum=1,
+            maximum=60,
+        ),
     )
 
 
@@ -852,6 +859,8 @@ def render_config(config: SwitchboardConfig) -> str:
             "",
             "[control_turns]",
             f"transport = {_toml_string(config.control_turns.transport.value)}",
+            "watchdog_timeout_seconds = "
+            f"{config.control_turns.watchdog_timeout_seconds}",
             "",
             "[tmux]",
             f"naming_prefix = {_toml_string(config.tmux.naming_prefix)}",

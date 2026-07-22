@@ -1,4 +1,4 @@
-"""Version-gated native provider command construction for Phase 6D.
+"""Contract-gated native provider command construction for Phase 6.
 
 This module does not start a provider.  It turns an already-authorized durable
 launch into one fixed argv and environment contract.  The tmux executor owns
@@ -21,8 +21,9 @@ from .domain import ProviderId
 CONTROL_PROMPT: Final = (
     "Call transition_claim() and follow the returned transition instructions."
 )
-CODEX_ACCEPTED_VERSIONS: Final = frozenset({"0.144.6"})
-CLAUDE_ACCEPTED_VERSIONS: Final = frozenset({"2.1.216"})
+CODEX_KNOWN_GOOD_VERSIONS: Final = frozenset({"0.144.6"})
+CLAUDE_KNOWN_GOOD_VERSIONS: Final = frozenset({"2.1.216"})
+_VERSION_VALUE_RE: Final = re.compile(r"\d+\.\d+\.\d+(?:[-+][^\s()]+)?$")
 _VERSION_RE: Final = re.compile(
     r"(?:^|\s)(?:codex(?:-cli)?\s+)?"
     r"(?P<version>\d+\.\d+\.\d+(?:[-+][^\s()]+)?)"
@@ -48,17 +49,22 @@ class ProviderContract:
 
     def __post_init__(self) -> None:
         _safe_executable(self.executable)
-        accepted = (
-            CODEX_ACCEPTED_VERSIONS
-            if self.provider is ProviderId.CODEX
-            else CLAUDE_ACCEPTED_VERSIONS
-        )
-        if self.version not in accepted:
+        if (
+            not isinstance(self.version, str)
+            or _VERSION_VALUE_RE.fullmatch(self.version) is None
+        ):
             raise ProviderRuntimeError(
-                "provider_version_unaccepted",
-                f"{self.provider.value} {self.version} is outside the accepted "
-                "launch contract",
+                "provider_version_invalid", "provider version is malformed"
             )
+
+    @property
+    def known_good(self) -> bool:
+        observed = (
+            CODEX_KNOWN_GOOD_VERSIONS
+            if self.provider is ProviderId.CODEX
+            else CLAUDE_KNOWN_GOOD_VERSIONS
+        )
+        return self.version in observed
 
 
 @dataclass(frozen=True, slots=True)
@@ -112,7 +118,11 @@ def probe_contract(
     executable: str | None = None,
     environment: Mapping[str, str] | None = None,
 ) -> ProviderContract:
-    """Return an exact accepted provider contract or fail closed."""
+    """Return a strictly parsed provider observation or fail closed.
+
+    Version identity is telemetry. Behavioral command, UUID, and lifecycle
+    checks remain the launch authority.
+    """
 
     binary = _safe_executable(executable or provider.value)
     try:
@@ -152,16 +162,6 @@ def probe_contract(
             "provider_version_invalid", "provider version output is unrecognized"
         )
     version = match.group("version")
-    accepted = (
-        CODEX_ACCEPTED_VERSIONS
-        if provider is ProviderId.CODEX
-        else CLAUDE_ACCEPTED_VERSIONS
-    )
-    if version not in accepted:
-        raise ProviderRuntimeError(
-            "provider_version_unaccepted",
-            f"{provider.value} {version} is outside the accepted launch contract",
-        )
     return ProviderContract(provider, binary, version)
 
 
@@ -373,8 +373,8 @@ def build_fork_command(
 
 
 __all__ = [
-    "CLAUDE_ACCEPTED_VERSIONS",
-    "CODEX_ACCEPTED_VERSIONS",
+    "CLAUDE_KNOWN_GOOD_VERSIONS",
+    "CODEX_KNOWN_GOOD_VERSIONS",
     "CONTROL_PROMPT",
     "ProviderCommand",
     "ProviderContract",

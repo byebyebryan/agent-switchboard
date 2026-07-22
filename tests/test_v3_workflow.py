@@ -5,6 +5,7 @@ import json
 import os
 import shutil
 import subprocess
+from dataclasses import replace
 from hashlib import sha256
 from pathlib import Path
 from uuid import UUID
@@ -17,12 +18,14 @@ from agent_switchboard._v3.agent_mcp import (
     AgentToolService,
     run_mcp_server,
 )
+from agent_switchboard._v3.config import ControlTurnsConfig
 from agent_switchboard._v3.domain import (
     ActivationState,
     Activity,
     ActivityReason,
     AgentCapability,
     CapabilityId,
+    ControlTurnPolicy,
     FrameSession,
     FrameSessionId,
     LaunchAction,
@@ -554,21 +557,66 @@ def test_uncertain_control_watchdog_never_submits_twice(tmp_path: Path) -> None:
             now=57,
         )
         workflow.trusted_stop(child_token, now=58)
-        first = workflow.control_watchdog(complete.transition_id, now=59)
-        second = workflow.control_watchdog(complete.transition_id, now=60)
+        early = workflow.control_watchdog(complete.transition_id, now=5_057)
+        first = workflow.control_watchdog(complete.transition_id, now=5_058)
+        second = workflow.control_watchdog(complete.transition_id, now=5_059)
+        assert early.state.value == "submitted"
         assert first.state.value == "uncertain"
         assert second.state.value == "uncertain"
         assert second.submission_count == 1
         observed = workflow.observe_prompt(
-            parent_token, prompt_id="late-exact-observation", now=61
+            parent_token, prompt_id="late-exact-observation", now=5_060
         )
         assert observed is not None
         assert observed.submission_count == 1
-        assert workflow.claim(parent_token, now=62).summary is not None
+        assert workflow.claim(parent_token, now=5_061).summary is not None
         assert (
-            workflow.trusted_stop(parent_token, now=63).state
+            workflow.trusted_stop(parent_token, now=5_062).state
             is TransitionState.COMPLETED
         )
+    finally:
+        workflow.opened.close()
+        if tmux.socket_path is not None:
+            subprocess.run(
+                ["tmux", "-S", tmux.socket_path, "kill-server"],
+                check=False,
+                capture_output=True,
+            )
+
+
+def test_resume_only_stops_only_verified_idle_parent_and_resumes_exact_uuid(
+    tmp_path: Path,
+) -> None:
+    workflow, tmux, _parent_token, child_token = _runtime(tmp_path)
+    try:
+        _push, child = _enter_child(workflow)
+        workflow.config = replace(
+            workflow.config,
+            control_turns=ControlTurnsConfig(ControlTurnPolicy.RESUME_ONLY, 5),
+        )
+        complete = workflow.task_complete_return(
+            child_token,
+            summary="Resume-only handoff is durable.",
+            next_action="Claim through the exact parent UUID.",
+            request_id=RequestId("eeeeeeee-9999-4eee-8eee-999999999999"),
+            now=5_100,
+        )
+        parent = workflow.registry.get_frame(child.parent_frame_id)
+        assert parent.current_session_key is not None
+        assert (
+            workflow.registry.get_provider_session(
+                parent.current_session_key
+            ).runtime_presence
+            is RuntimePresence.STOPPED
+        )
+        control = workflow.registry.control_turn_for_transition(complete.transition_id)
+        assert control is not None
+        assert control.transport.value == "resume_initial"
+        result = workflow.trusted_stop(child_token, now=5_101)
+        assert result.state is TransitionState.AWAITING_CLAIM
+        resumed = workflow.registry.get_provider_session(parent.current_session_key)
+        assert resumed.runtime_presence is RuntimePresence.LIVE
+        assert resumed.provider_session_id == PARENT_SESSION_ID
     finally:
         workflow.opened.close()
         if tmux.socket_path is not None:

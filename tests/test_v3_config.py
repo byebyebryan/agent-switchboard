@@ -88,6 +88,7 @@ initial_max_depth = 1
 
 [control_turns]
 transport = "resume_only"
+watchdog_timeout_seconds = 9
 
 [tmux]
 naming_prefix = "agent"
@@ -119,6 +120,7 @@ def test_minimal_v3_configuration_has_phase6_defaults() -> None:
     assert config.automation.task_push is TaskPushPolicy.CONSERVATIVE
     assert config.automation.complete_return is CompleteReturnPolicy.SYNTHESIZE
     assert config.control_turns.transport is ControlTurnPolicy.LIVE_FIRST
+    assert config.control_turns.watchdog_timeout_seconds == 5
     assert not config.memory.enabled
 
 
@@ -135,6 +137,7 @@ def test_full_v3_configuration_is_typed_canonical_and_round_trips(
     assert config.checkouts[0].provider_override is ProviderId.CLAUDE
     assert config.views.cli_default_mode is ViewMode.NAVIGATOR
     assert config.control_turns.transport is ControlTurnPolicy.RESUME_ONLY
+    assert config.control_turns.watchdog_timeout_seconds == 9
     assert render_config(config).startswith("config_version = 3\n")
     assert parse_config(render_config(config)) == config
 

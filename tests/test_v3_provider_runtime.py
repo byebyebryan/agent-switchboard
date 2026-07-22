@@ -90,16 +90,16 @@ def test_claude_new_resume_and_fork_preserve_exact_uuid_contract() -> None:
     assert "--fork-session" in forked.argv
 
 
-def test_version_probe_fails_closed_outside_accepted_contract(
+def test_version_probe_accepts_strict_newer_version_as_observed_telemetry(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     def run(*_args, **_kwargs):  # type: ignore[no-untyped-def]
         return subprocess.CompletedProcess([], 0, b"codex-cli 0.145.0\n", b"")
 
     monkeypatch.setattr(subprocess, "run", run)
-    with pytest.raises(ProviderRuntimeError) as caught:
-        probe_contract(ProviderId.CODEX, executable="codex")
-    assert caught.value.code == "provider_version_unaccepted"
+    contract = probe_contract(ProviderId.CODEX, executable="codex")
+    assert contract.version == "0.145.0"
+    assert contract.known_good is False
 
 
 def test_codex_rejects_claimed_preallocated_fork_target() -> None:
@@ -116,10 +116,11 @@ def test_codex_rejects_claimed_preallocated_fork_target() -> None:
     assert caught.value.code == "provider_fork_identity_unsupported"
 
 
-def test_contract_and_command_builders_reject_unaccepted_semantic_input() -> None:
+def test_contract_and_command_builders_reject_malformed_semantic_input() -> None:
+    assert ProviderContract(ProviderId.CODEX, "codex", "0.145.0").known_good is False
     with pytest.raises(ProviderRuntimeError) as version:
-        ProviderContract(ProviderId.CODEX, "codex", "0.145.0")
-    assert version.value.code == "provider_version_unaccepted"
+        ProviderContract(ProviderId.CODEX, "codex", "latest")
+    assert version.value.code == "provider_version_invalid"
 
     contract = ProviderContract(ProviderId.CODEX, "codex", "0.144.6")
     with pytest.raises(ProviderRuntimeError) as prompt:

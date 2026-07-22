@@ -585,6 +585,7 @@ initial_max_depth = 1
 
 [control_turns]
 transport = "live_first"
+watchdog_timeout_seconds = 5
 ```
 
 `complete_return` is `synthesize | handoff` and may be overridden per project.

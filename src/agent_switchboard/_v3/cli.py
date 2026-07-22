@@ -57,7 +57,7 @@ from .storage import ConflictError
 from .tmux_view import TmuxExecutor, TmuxViewError
 from .trusted_hook import handle_trusted_event
 from .views import ViewRuntime, ViewRuntimeError
-from .workflow import WorkflowError, WorkflowRuntime
+from .workflow import WorkflowError, WorkflowRuntime, spawn_control_watchdog
 
 
 def _now() -> int:
@@ -148,7 +148,17 @@ def _open_workflow(arguments: argparse.Namespace):
     opened = open_generation(paths)
     socket_path = os.environ.get("SWB_V3_TMUX_SOCKET")
     tmux = None if socket_path is None else TmuxExecutor(socket_path)
-    return opened, WorkflowRuntime(opened, paths, tmux=tmux)
+    return opened, WorkflowRuntime(
+        opened,
+        paths,
+        tmux=tmux,
+        watchdog_launcher=lambda transition_id: spawn_control_watchdog(
+            paths,
+            opened.generation_id,
+            transition_id,
+            delay_seconds=opened.config.control_turns.watchdog_timeout_seconds,
+        ),
+    )
 
 
 def _cutover(arguments: argparse.Namespace) -> int:
@@ -451,8 +461,20 @@ def _hook(arguments: argparse.Namespace) -> int:
 
 
 def _control_watchdog(arguments: argparse.Namespace) -> int:
+    if not 0 <= arguments.delay_ms <= 60_000:
+        raise ValueError("watchdog delay must be between 0 and 60000 ms")
+    if arguments.delay_ms:
+        time.sleep(arguments.delay_ms / 1_000)
     opened, workflow = _open_workflow(arguments)
     try:
+        if str(opened.generation_id) != arguments.generation_id:
+            _print(
+                {
+                    "transitionId": arguments.transition,
+                    "controlState": "superseded_generation",
+                }
+            )
+            return 0
         control = workflow.control_watchdog(
             TransitionId(arguments.transition), now=_timestamp(arguments.at)
         )
@@ -461,6 +483,22 @@ def _control_watchdog(arguments: argparse.Namespace) -> int:
                 "transitionId": str(control.transition_id),
                 "controlState": control.state.value,
                 "submissionCount": control.submission_count,
+            }
+        )
+        return 0
+    finally:
+        opened.close()
+
+
+def _reconcile(arguments: argparse.Namespace) -> int:
+    opened, workflow = _open_workflow(arguments)
+    try:
+        controls = workflow.reconcile_control_turns(now=_timestamp(arguments.at))
+        _print(
+            {
+                "generationId": str(opened.generation_id),
+                "overdueControls": len(controls),
+                "transitionIds": [str(item.transition_id) for item in controls],
             }
         )
         return 0
@@ -573,7 +611,12 @@ def _parser() -> argparse.ArgumentParser:
     hook.add_argument("--at", type=int)
     watchdog = root.add_parser("control-watchdog")
     watchdog.add_argument("--transition", required=True)
+    watchdog.add_argument("--generation-id", required=True)
+    watchdog.add_argument("--delay-ms", type=int, default=0)
     watchdog.add_argument("--at", type=int)
+    reconcile = root.add_parser("reconcile")
+    reconcile.add_argument("--at", type=int)
+    reconcile.add_argument("--json", action="store_true")
     return parser
 
 
@@ -593,6 +636,8 @@ def main(argv: list[str] | None = None) -> int:
             return _hook(arguments)
         if arguments.command == "control-watchdog":
             return _control_watchdog(arguments)
+        if arguments.command == "reconcile":
+            return _reconcile(arguments)
         raise AssertionError(arguments.command)  # pragma: no cover
     except (
         CutoverError,
