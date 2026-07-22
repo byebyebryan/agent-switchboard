@@ -2,8 +2,7 @@
 
 Date: 2026-07-22
 
-Status: Phase 6A.1 through 6D complete behind the private replacement boundary;
-Phase 6E coordinated activation is next
+Status: Phase 6A.1 through 6E complete; Phase 6F is next
 
 Target core release: `0.3.0`
 
@@ -11,10 +10,10 @@ Target DMS adapter release: `0.5.0`
 
 ## Outcome
 
-Phase 6 replaces the `0.2` task-first product with durable host-local views,
+Phase 6 replaced the `0.2` task-first product with durable host-local views,
 unified workspace/task frames, a resident optional navigator, direct mode, and
-agent-driven foreground transitions. Core and DMS activate as one coordinated
-generation. No old public contract remains active after cutover.
+agent-driven foreground transitions. Core and DMS completed their one-time
+coordinated activation. No old public contract remains active.
 
 The architecture is in [the design](design.md), exact user behavior is in
 [View and Frame Workflow](view-workflow.md), and canonical ownership, state,
@@ -23,7 +22,8 @@ control-turn, and presentation rules are in
 
 ## Cutover Policy
 
-This is a clean break with bounded offline salvage, not an in-place upgrade:
+The completed `0.2` to `0.3` activation was a clean break with bounded offline
+salvage, not an in-place upgrade:
 
 - new runtime accepts only Config v3 and the fresh registry baseline;
 - old registry/config readers exist only in the repo-owned offline exporter;
@@ -32,12 +32,14 @@ This is a clean break with bounded offline salvage, not an in-place upgrade:
   reader ships;
 - imported state remains staged and mutation-inert until an explicit cutover
   commit;
-- old provider runtimes are quiesced and resumed by exact UUID into fresh
-  views; and
+- one selected legacy provider UUID was resumed into a fresh view during the
+  completed activation; and
 - old task rows remain in the immutable backup/bundle for audit only.
 
-Development may build private replacement modules before activation, but no
-installed release exposes two product generations at once.
+This policy describes historical data conversion, not future operations. The
+coordinator is retired. Development resets discard Switchboard-owned state and
+never quiesce existing providers; see
+[Runtime Operations and Safety](operations.md).
 
 ## Replacement Contracts
 
@@ -282,26 +284,20 @@ Exit: deterministic failures and guarded installed Codex/Claude acceptance prove
 one workspace-child-parent flow, semantic parent synthesis, exact child close,
 and no duplicate prompt or runtime.
 
-### Phase 6E: coordinated activation
+### Phase 6E: coordinated activation — complete
 
-- Freeze `0.2` writes, export, back up, and rehearse from a plain shell.
-- Build and accept exact paired commits on temporary `phase6e` branches; version
-  observations are recorded evidence rather than provider allowlists.
-- Disable and close the old DMS before installing either replacement.
-- Install paired core/DMS artifacts inactive, import a staged generation, and
-  cold-start DMS; plugin reload is not accepted activation evidence.
-- Validate local, DMS, and remote state reads while every mutation is blocked.
-- Collect `CutoverEvidence v1`: exact core/DMS commits, artifact hashes,
-  observed provider versions, local and remote generation IDs, cold-start
-  identity, staged read hashes, and named acceptance checks. Boolean attestations
-  are not sufficient.
-- Commit the paired generation, reinstall trusted hooks, then open the first
-  view and resume one exact known provider UUID.
-- Delete old active modules/tests/fixtures/packaging and release core `0.3.0`
-  with DMS `0.5.0`.
+- Core `0.3.0` and DMS `0.5.0` committed on both hosts with exact artifact,
+  staged-read, DMS cold/warm cache, and remote online/offline evidence.
+- The selected Codex UUID resumed and the old installed contracts disappeared.
+- Post-activation acceptance found and fixed unmanaged global-hook failure and
+  missing reopen-to-view projection.
+- The one-shot coordinator and executable runbook were retired from active
+  source-distribution surfaces. Git history and the private activation
+  workspace retain the exact evidence.
 
 Exit: installed core and DMS expose no old command/protocol/cache route;
-local/two-host acceptance passes; backups and the cutover manifest remain.
+local/two-host acceptance passed; operational ownership now follows
+[Runtime Operations and Safety](operations.md).
 
 ### Phase 6F: recursive task frames
 
@@ -332,42 +328,21 @@ Retain only in history, the non-packaged archive, or cutover fixtures: Phase
 0-5 records, rejected provider/supervisor evidence, old fixtures required by the
 offline exporter, and sanitized rehearsal bundles.
 
-## Quiescent Live Cutover Runbook
+## Post-activation operations
 
-Run from a plain shell outside every managed provider pane:
+There is no reusable live-cutover runbook. Switchboard configuration, registry,
+cache, generated view, and DMS state remain disposable during development.
+Existing provider sessions and unrelated tmux state remain outside every reset,
+upgrade, rollback, and cleanup boundary.
 
-1. Verify both repositories are clean, built from the accepted paired commits,
-   and backed up; record installed versions and hashes.
-2. Disable old DMS and close every old picker/window. Disable old transition
-   hooks while preserving settings in the rollback manifest.
-3. Confirm no pending launch/transition or command owns a managed checkout;
-   gracefully stop core-owned runtimes and verify exact UUID resumability.
-4. Export read-only, verify the bundle, and copy old DB, Config v2, DMS state,
-   hook settings, package manifests, and bundle into the backup directory.
-5. Install core and DMS replacements inactive. Import into a fresh generation;
-   do not commit it.
-6. Cold-start DMS against the staged generation. Validate core doctor,
-   reconciliation, provider/remote discovery, HostState, NavigatorState, DMS
-   model v1, cache provenance, and two-host offline/online reads. Prove core,
-   hook, view, provider, and DMS mutations all return `cutover_staged`.
-7. Run `swbctl cutover commit` after paired-version and cold-start checks pass.
-   Reinstall trusted hooks from the committed generation.
-8. Open the first direct local view, resume one exact known UUID, then validate
-   navigator mode, Projects navigation, Views focus, recovery, focus miss,
-   single attach lease, same-window dedup, and remote presentation.
-9. Remove the old installed artifacts/cache only after acceptance. Retain the
-   immutable backups, bundle, manifest, and prior pointer.
+Broken global hooks are contained by removing only Switchboard-owned handlers.
+New builds are proven with temporary roots, isolated tmux servers, and new test
+provider sessions. Hosts update independently. A running managed provider may
+remain pinned to its immutable release; no update waits for or stops it.
 
-Any failure before step 7 uses `cutover rollback`. Any failure after step 7 is
-forward recovery unless the operator explicitly chooses a full offline restore.
-There is no automatic post-commit downgrade.
-
-The one-shot executor prepares both hosts before the first commit and records
-roles `desktop_primary` (local) and `remote_owner` (snap). It commits snap first,
-then local, with hooks and DMS disabled across the distributed boundary. Once
-the first host commits, recovery is forward-only. The operator launches the
-executor from a plain shell after exiting managed providers; it finally opens
-an empty workspace frame and resumes the captured exact session UUID.
+From SSH, `swbctl view attach --view VIEW` is the first-class attachment path.
+It revalidates and attaches the existing view without DMS and without starting
+or resuming another provider process.
 
 ## Acceptance Matrix
 

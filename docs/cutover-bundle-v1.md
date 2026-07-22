@@ -4,6 +4,12 @@ Date: 2026-07-22
 
 Status: implemented and validated in the core `0.3.0` clean-break runtime
 
+This is the retained historical import format for the completed `0.2` to `0.3`
+clean break, not a live update procedure. Its quiescence rules apply only to
+that legacy Switchboard source. The one-shot coordinator is retired; current
+operations follow [Runtime Operations and Safety](operations.md) and never stop
+existing provider sessions for Switchboard maintenance.
+
 Cutover is an offline, one-way salvage path from exactly registry schema 10,
 protocol 2, and Config v2 into the fresh Phase 6 baseline. The normal Phase 6
 runtime never opens or migrates the legacy files. Export holds one read

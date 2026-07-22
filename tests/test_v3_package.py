@@ -24,8 +24,9 @@ def test_clean_break_metadata_maps_only_replacement_runtime() -> None:
     sdist = metadata["tool"]["hatch"]["build"]["targets"]["sdist"]
     assert "src/agent_switchboard/_v3" in sdist["only-include"]
     assert "src/agent_switchboard" not in sdist["only-include"]
-    assert "docs/phase-6e-activation.md" in sdist["only-include"]
-    assert "scripts/phase6e_cutover.py" in sdist["only-include"]
+    assert "docs/operations.md" in sdist["only-include"]
+    assert "docs/phase-6e-activation.md" not in sdist["only-include"]
+    assert "scripts/phase6e_cutover.py" not in sdist["only-include"]
     requirements = (ROOT / "requirements-offline.txt").read_text().splitlines()
     assert requirements[0] == "textual==8.2.8"
     assert all("==" in line for line in requirements)

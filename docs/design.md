@@ -2,13 +2,13 @@
 
 Date: 2026-07-21
 
-Status: accepted Phase 6A.1 replacement design; implementation pending
+Status: Phase 6E activated; Phase 6F recursive frames are next
 
 Target release: `0.3.0`
 
 The implemented `0.2.0` task-first product is historical input, not a
-compatibility boundary. Phase 6 replaces its registry, protocols, command
-surface, terminal UI, and DMS model in one coordinated cutover. Normative
+compatibility boundary. Phase 6 replaced its registry, protocols, command
+surface, terminal UI, and DMS model in one completed clean break. Normative
 storage/state rules are in [State and Control-Turn Contract](state-contract.md),
 user behavior is in [View and Frame Workflow](view-workflow.md), and delivery is
 in [Phase 6 Plan](phase-6-plan.md).
@@ -57,6 +57,23 @@ handoffs, visible fixed control turns, and trusted post-turn transitions.
 - Automatic Git branching, worktree creation, commit, merge, or cleanup.
 - Runtime compatibility with `0.2` Snapshot, Fleet, task-first TUI, DMS, CLI,
   configuration, or registry contracts.
+
+## Runtime safety boundary
+
+Switchboard state is disposable; existing Codex and Claude Code sessions are
+not. Installation, upgrade, reset, testing, and repair never require provider
+sessions to stop or restart. A failed Switchboard remains offline, stays on its
+prior version, or discards its own state while provider work continues.
+
+Discovery is observation, not ownership. Switchboard may control or stop only
+an exact surface it launched whose capability, process, pane, and generation
+still match, and only for the explicit lifecycle action that owns that change.
+It never kills a tmux server or uses a provider-wide outage as an activation
+mechanism.
+
+Global provider hooks must no-op when pane-local Switchboard authority is wholly
+absent. DMS is optional: SSH users attach directly to a persistent tmux view.
+The full operational contract is [Runtime Operations and Safety](operations.md).
 
 ## Core Model
 

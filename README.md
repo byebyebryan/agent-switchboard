@@ -25,7 +25,7 @@ swbctl view open --host HOST (--view VIEW | --project PROJECT) --request-id UUID
   [--can-focus-desktop] [--can-launch-terminal] --json
 swbctl view recover --host HOST --recovery RECOVERY --request-id UUID \
   [--can-focus-desktop] [--can-launch-terminal] --json
-swbctl view attach --host HOST --view VIEW --request-id UUID
+swbctl view attach --view VIEW [--host HOST] [--request-id UUID]
 
 swbctl view list|show|focus|mode|retire
 swbctl frame list|show|push|back|complete|close|reopen
@@ -43,22 +43,24 @@ state is presentation-only; every mutation executes and revalidates on its
 owner host. Provider versions are strict observations rather than allowlists:
 missing/malformed executables and behavioral or identity mismatch fail closed.
 
-The `0.3.0` artifact is paired with DMS adapter `0.5.0`. Activation uses a
-staged generation, a cold DMS restart, exact artifact/read evidence, and a
-two-host one-shot executor. Before the first host commit, rollback is automatic;
-after it, recovery is forward-only.
+The `0.3.0` artifact is paired with DMS adapter `0.5.0`. Their one-time Phase 6E
+activation is complete. The coordinator is intentionally not shipped: future
+development installs and resets treat Switchboard state as disposable and
+never require an existing Codex or Claude Code session to stop.
 
 Design and operations:
 
 - [Agent Switchboard Design](docs/design.md)
 - [State and Control-Turn Contract](docs/state-contract.md)
 - [View and Frame Workflow](docs/view-workflow.md)
+- [Runtime Operations and Safety](docs/operations.md)
 - [Phase 6 Clean-Break Plan](docs/phase-6-plan.md)
 - [CutoverBundle v1 and Activation](docs/cutover-bundle-v1.md)
-- [Phase 6E Coordinated Activation](docs/phase-6e-activation.md)
 
 Historical `0.2` records remain outside the installed package under
 [`docs/archive/0.2`](docs/archive/0.2/README.md).
+The completed Phase 6E activation retrospective is retained under
+[`docs/archive/0.3`](docs/archive/0.3/README.md).
 
 ## License
 

@@ -283,6 +283,12 @@ preserved/restored as display state and never changes durable mode.
 - A view never navigates to a remote frame; remote selection opens a separate
   SSH-backed host-local view.
 
+An SSH client does not require DMS. `swbctl view list` discovers the durable
+local views and `swbctl view attach --view VIEW` revalidates one view, acquires
+its own bounded attachment lease, and execs the exact tmux attach command. It
+never starts or resumes a provider. A provider `frame reopen` reports success
+only after the exact surface has moved from holding into `view.main`.
+
 ## DMS Entry and Recovery
 
 DMS lists Views, Projects, then structural Recovery. It never lists normal tasks

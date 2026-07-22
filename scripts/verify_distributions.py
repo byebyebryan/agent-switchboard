@@ -123,15 +123,14 @@ def audit_contents(wheel: Path, sdist: Path) -> dict[str, object]:
             "docs/design.md",
             "docs/state-contract.md",
             "docs/view-workflow.md",
+            "docs/operations.md",
             "docs/phase-6-plan.md",
             "docs/cutover-bundle-v1.md",
             "docs/phase-6c-acceptance.md",
             "docs/phase-6d-acceptance.md",
-            "docs/phase-6e-activation.md",
             "pyproject.toml",
             "requirements-offline.txt",
             "scripts/build_offline_bundle.py",
-            "scripts/phase6e_cutover.py",
         )
     }
     wheel_content = wheel_files(wheel)
