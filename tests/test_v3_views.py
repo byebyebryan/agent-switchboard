@@ -21,11 +21,20 @@ from agent_switchboard._v3.config import (
 )
 from agent_switchboard._v3.domain import (
     ActivationState,
+    BackgroundState,
     Checkout,
     CheckoutId,
     CheckoutKind,
+    CreatedBy,
+    Frame,
+    FrameId,
+    FrameLifecycleState,
+    FramePlacement,
+    FrameRole,
     GenerationId,
     HostId,
+    PlacementId,
+    PlacementState,
     Project,
     ProjectId,
     ProjectRepository,
@@ -47,7 +56,7 @@ from agent_switchboard._v3.navigator import NavigatorModel
 from agent_switchboard._v3.protocol import DirectiveKind, build_navigator_from_registry
 from agent_switchboard._v3.storage import Registry
 from agent_switchboard._v3.tmux_view import TmuxExecutor
-from agent_switchboard._v3.views import ViewRuntime
+from agent_switchboard._v3.views import ViewRuntime, ViewRuntimeError
 
 GENERATION = GenerationId("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
 HOST = HostId("11111111-1111-4111-8111-111111111111")
@@ -58,6 +67,8 @@ REPOSITORY_B = RepositoryId("33333333-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
 CHECKOUT_A = CheckoutId("44444444-4444-4444-8444-444444444444")
 CHECKOUT_B = CheckoutId("44444444-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
 VIEW = ViewId("55555555-5555-4555-8555-555555555555")
+TASK = FrameId("77777777-7777-4777-8777-777777777777")
+TASK_PLACEMENT = PlacementId("88888888-8888-4888-8888-888888888888")
 
 pytestmark = pytest.mark.skipif(shutil.which("tmux") is None, reason="tmux required")
 
@@ -153,6 +164,55 @@ def stop_tmux(tmux: TmuxExecutor) -> None:
             check=False,
             capture_output=True,
         )
+
+
+def seed_task_placeholder(
+    app: ViewRuntime, tmux: TmuxExecutor, workspace_id: FrameId, *, now: int
+) -> None:
+    workspace = app.registry.get_frame(workspace_id)
+    context = app.registry.get_work_context(workspace.work_context_id)
+    app.registry.acquire_work_context(
+        context.work_context_id,
+        context.claim_generation,
+        workspace.frame_id,
+        now=now,
+    )
+    app.registry.create_task(
+        Frame(
+            TASK,
+            HOST,
+            PROJECT_A,
+            FrameRole.TASK,
+            workspace.frame_id,
+            workspace.work_context_id,
+            "Task",
+            "Exercise manual focus",
+            ProviderId.CODEX,
+            FrameLifecycleState.OPEN,
+            None,
+            None,
+            CreatedBy.USER,
+            now,
+            now,
+        ),
+        FramePlacement(
+            TASK_PLACEMENT,
+            HOST,
+            VIEW,
+            TASK,
+            None,
+            PlacementState.STAGED,
+            0,
+            None,
+            now,
+        ),
+    )
+    tmux.spawn_placeholder(
+        prefix="v3test",
+        generation_id=GENERATION,
+        view_id=VIEW,
+        frame_id=str(TASK),
+    )
 
 
 def test_project_navigation_modes_attach_and_projection_share_one_view(
@@ -273,6 +333,99 @@ def test_project_navigation_modes_attach_and_projection_share_one_view(
         )
         assert attach.kind is DirectiveKind.ATTACH
         assert attach.lease_expires_at == 15_028
+    finally:
+        stop_tmux(tmux)
+
+
+def test_focus_transfers_foreground_only_after_explicit_background_confirmation(
+    tmp_path: Path,
+) -> None:
+    app, tmux = runtime(tmp_path)
+    try:
+        opened = app.create_project_view(
+            PROJECT_A,
+            request_id=RequestId("99999999-1111-4111-8111-111111111111"),
+            mode=ViewMode.DIRECT,
+            view_id=VIEW,
+            now=20,
+        )
+        workspace_id = opened.view.active_frame_id
+        assert workspace_id is not None
+        seed_task_placeholder(app, tmux, workspace_id, now=21)
+        workspace = app.registry.get_frame(workspace_id)
+        with app.registry.transaction(immediate=True) as connection:
+            connection.execute(
+                "UPDATE work_contexts SET background_state = ? "
+                "WHERE work_context_id = ?",
+                (BackgroundState.KNOWN.value, str(workspace.work_context_id)),
+            )
+
+        with pytest.raises(ViewRuntimeError) as blocked:
+            app.focus_frame(
+                VIEW,
+                TASK,
+                request_id=RequestId("99999999-2222-4222-8222-222222222222"),
+                now=22,
+            )
+        assert blocked.value.code == "background_confirmation_required"
+        before = app.registry.get_work_context(workspace.work_context_id)
+        assert before.foreground_frame_id == workspace_id
+        assert app.registry.get_view(VIEW).active_frame_id == workspace_id
+
+        focused = app.focus_frame(
+            VIEW,
+            TASK,
+            request_id=RequestId("99999999-3333-4333-8333-333333333333"),
+            confirm_background_transfer=True,
+            now=23,
+        )
+        after = app.registry.get_work_context(workspace.work_context_id)
+        assert focused.active_frame_id == TASK
+        assert after.foreground_frame_id == TASK
+        assert after.claim_generation == before.claim_generation + 1
+    finally:
+        stop_tmux(tmux)
+
+
+def test_focus_restores_source_without_recovery_before_commit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    app, tmux = runtime(tmp_path)
+    try:
+        opened = app.create_project_view(
+            PROJECT_A,
+            request_id=RequestId("aaaaaaaa-1111-4111-8111-111111111111"),
+            mode=ViewMode.DIRECT,
+            view_id=VIEW,
+            now=20,
+        )
+        workspace_id = opened.view.active_frame_id
+        assert workspace_id is not None
+        seed_task_placeholder(app, tmux, workspace_id, now=21)
+
+        def fail_commit(*_args: object, **_kwargs: object) -> None:
+            from agent_switchboard._v3.storage import ConflictError
+
+            raise ConflictError("test_conflict", "injected pre-commit conflict")
+
+        monkeypatch.setattr(app.registry, "commit_transition_presentation", fail_commit)
+        with pytest.raises(ViewRuntimeError) as failed:
+            app.focus_frame(
+                VIEW,
+                TASK,
+                request_id=RequestId("aaaaaaaa-2222-4222-8222-222222222222"),
+                now=22,
+            )
+        assert failed.value.code == "view_presentation_failed"
+        view = app.registry.get_view(VIEW)
+        assert view.state is ViewState.READY
+        assert view.active_frame_id == workspace_id
+        shell = tmux.inspect_shell("v3test", GENERATION, VIEW, ViewMode.DIRECT)
+        assert shell.active.frame_id == str(workspace_id)
+        recovery_count = app.registry.connection.execute(
+            "SELECT COUNT(*) FROM recoveries"
+        ).fetchone()[0]
+        assert recovery_count == 0
     finally:
         stop_tmux(tmux)
         app.opened.close()

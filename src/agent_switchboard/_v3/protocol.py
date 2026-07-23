@@ -1475,6 +1475,20 @@ _NAV_FRAME_FIELDS: Final[dict[str, Validator]] = {
     "parentFrameId": _optional(_uuid),
     "lifecycleState": _enum_validator(FrameLifecycleState),
     "activity": _enum_validator(Activity),
+    "currentSession": _optional(
+        lambda value, path: _record(
+            value,
+            path,
+            {
+                "provider": _enum_validator(ProviderId),
+                "runtimePresence": _enum_validator(RuntimePresence),
+                "resumability": _enum_validator(Resumability),
+                "activity": _enum_validator(Activity),
+                "updatedAt": _integer,
+            },
+        )
+    ),
+    "sessionCount": _integer,
 }
 
 
@@ -1751,21 +1765,27 @@ def build_navigator_state(
                 }
             )
         all_frames = list(data["frames"])  # type: ignore[arg-type]
+        frame_session_counts: dict[str, int] = {}
+        for membership in data["frameSessions"]:  # type: ignore[union-attr]
+            frame_key = str(membership["frameId"])
+            frame_session_counts[frame_key] = frame_session_counts.get(frame_key, 0) + 1
         placements = list(data["placements"])  # type: ignore[arg-type]
         for project in data["projects"]:  # type: ignore[union-attr]
             if project["declared"] is not True:
                 continue
             project_id = str(project["projectId"])
             project_frames = [
+                frame for frame in all_frames if frame["projectId"] == project_id
+            ]
+            open_project_frames = [
                 frame
-                for frame in all_frames
-                if frame["projectId"] == project_id
-                and frame["lifecycleState"] != FrameLifecycleState.CLOSED.value
+                for frame in project_frames
+                if frame["lifecycleState"] != FrameLifecycleState.CLOSED.value
             ]
             workspace = next(
                 (
                     frame
-                    for frame in project_frames
+                    for frame in open_project_frames
                     if frame["role"] == FrameRole.WORKSPACE.value
                 ),
                 None,
@@ -1792,7 +1812,7 @@ def build_navigator_state(
                     active = next(
                         (
                             frame
-                            for frame in project_frames
+                            for frame in open_project_frames
                             if frame["frameId"] == owner_view["activeFrameId"]
                         ),
                         None,
@@ -1816,6 +1836,18 @@ def build_navigator_state(
                         "activity": Activity.UNKNOWN.value
                         if session is None
                         else str(session["activity"]),
+                        "currentSession": None
+                        if session is None
+                        else {
+                            "provider": str(session["provider"]),
+                            "runtimePresence": str(session["runtimePresence"]),
+                            "resumability": str(session["resumability"]),
+                            "activity": str(session["activity"]),
+                            "updatedAt": int(session["updatedAt"]),
+                        },
+                        "sessionCount": frame_session_counts.get(
+                            str(frame["frameId"]), 0
+                        ),
                     }
                 )
             projects.append(

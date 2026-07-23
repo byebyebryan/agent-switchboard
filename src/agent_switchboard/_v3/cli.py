@@ -347,6 +347,7 @@ def _view(arguments: argparse.Namespace) -> int:
                 ViewId(arguments.view),
                 FrameId(arguments.frame),
                 request_id=_request(arguments.request_id),
+                confirm_background_transfer=arguments.confirm_background_transfer,
                 now=timestamp,
             )
             _print(_view_dict(view))
@@ -868,6 +869,7 @@ def _parser() -> argparse.ArgumentParser:
     focus.add_argument("--view", required=True)
     focus.add_argument("--frame", required=True)
     focus.add_argument("--request-id")
+    focus.add_argument("--confirm-background-transfer", action="store_true")
     focus.add_argument("--at", type=int)
     mode = view_sub.add_parser("mode")
     mode.add_argument("--view", required=True)

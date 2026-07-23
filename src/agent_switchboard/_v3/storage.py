@@ -3541,6 +3541,87 @@ class Registry:
             raise ConflictError("presentation_conflict", str(error)) from error
         return self.get_transition(transition_id)
 
+    def fail_restored_transition(
+        self,
+        transition_id: TransitionId,
+        execution_owner: str,
+        failure: FailureRecord,
+        *,
+        now: int | None = None,
+    ) -> ViewTransition:
+        """Fail an executing transition after exact physical source restoration.
+
+        Presentation has not committed at this boundary, so placements and any
+        WorkContext claim remain unchanged.  Unlike an uncertain failure, the
+        view can safely return to ready instead of entering recovery.
+        """
+
+        timestamp = _timestamp(now)
+        with self.transaction(immediate=True) as connection:
+            row = connection.execute(
+                "SELECT * FROM view_transitions WHERE transition_id = ?",
+                (str(transition_id),),
+            ).fetchone()
+            if row is None:
+                raise ConflictError("not_found", "transition does not exist")
+            transition = _transition(row)
+            self._require_execution_owner(transition, execution_owner, timestamp)
+            if (
+                transition.state is not TransitionState.EXECUTING
+                or transition.transport_phase is TransportPhase.COMMITTED
+            ):
+                raise ConflictError(
+                    "restore_boundary", "transition crossed the restoration boundary"
+                )
+            view = connection.execute(
+                "SELECT state, revision FROM user_views WHERE view_id = ?",
+                (str(transition.view_id),),
+            ).fetchone()
+            if (
+                view is None
+                or view["state"] != ViewState.TRANSITIONING.value
+                or view["revision"] != transition.expected_view_revision + 1
+            ):
+                raise ConflictError(
+                    "stale_revision", "transitioning view revision changed"
+                )
+            transport_phase = (
+                TransportPhase.ROLLED_BACK
+                if transition.transport_phase
+                in {TransportPhase.MOVED, TransportPhase.INSPECTED}
+                else transition.transport_phase
+            )
+            connection.execute(
+                "UPDATE view_transitions SET state = 'failed', "
+                "transport_phase = ?, failure_code = ?, failure_message = ?, "
+                "failure_retryable = ?, updated_at = ? WHERE transition_id = ?",
+                (
+                    transport_phase.value,
+                    failure.code,
+                    failure.message,
+                    failure.retryable,
+                    timestamp,
+                    str(transition_id),
+                ),
+            )
+            connection.execute(
+                "UPDATE request_records SET state = 'failed', "
+                "result_type = 'transition', result_id = ?, completed_at = ? "
+                "WHERE host_id = ? AND request_id = ? AND state = 'prepared'",
+                (
+                    str(transition_id),
+                    timestamp,
+                    str(transition.host_id),
+                    str(transition.request_id),
+                ),
+            )
+            connection.execute(
+                "UPDATE user_views SET state = 'ready', revision = revision + 1, "
+                "updated_at = ? WHERE view_id = ?",
+                (timestamp, str(transition.view_id)),
+            )
+        return self.get_transition(transition_id)
+
     def advance_transition_state(
         self,
         transition_id: TransitionId,

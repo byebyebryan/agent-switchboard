@@ -13,9 +13,14 @@ from agent_switchboard._v3.domain import (
     Checkout,
     CheckoutId,
     CheckoutKind,
+    CloseReason,
+    CreatedBy,
     FailureRecord,
+    Frame,
     FrameId,
+    FrameLifecycleState,
     FramePlacement,
+    FrameRole,
     FrameSession,
     FrameSessionId,
     GenerationId,
@@ -229,11 +234,104 @@ def test_host_projection_orders_records_and_excludes_authority_and_paths() -> No
         project = navigator.data["projects"][0]  # type: ignore[index]
         assert project["viewId"] == str(VIEW)
         assert project["entryFrameId"] == str(WORKSPACE)
+        assert project["frames"] == [
+            {
+                "frameId": str(WORKSPACE),
+                "title": "Switchboard",
+                "role": "workspace",
+                "parentFrameId": None,
+                "lifecycleState": "open",
+                "activity": "unknown",
+                "currentSession": None,
+                "sessionCount": 0,
+            }
+        ]
         navigator_json = navigator.to_json().casefold()
         assert all(
             forbidden not in navigator_json
             for forbidden in ("sessions", "surfaces", "checkouts", "repositoryid")
         )
+
+
+def test_navigator_retains_closed_frame_history_with_bounded_session_summary() -> None:
+    task = FrameId("88888888-1111-4111-8111-111111111111")
+    placement = PlacementId("99999999-1111-4111-8111-111111111111")
+    membership_id = FrameSessionId("aaaaaaaa-1111-4111-8111-111111111111")
+    with registry() as opened:
+        seed_structural_state(opened)
+        opened.create_task(
+            Frame(
+                task,
+                HOST,
+                PROJECT,
+                FrameRole.TASK,
+                WORKSPACE,
+                CONTEXT,
+                "Closed task",
+                None,
+                ProviderId.CODEX,
+                FrameLifecycleState.OPEN,
+                None,
+                None,
+                CreatedBy.USER,
+                23,
+                23,
+            ),
+            FramePlacement(
+                placement,
+                HOST,
+                VIEW,
+                task,
+                None,
+                PlacementState.STAGED,
+                0,
+                None,
+                23,
+            ),
+        )
+        session = provider_session(1, associated=True)
+        opened.upsert_provider_session(session)
+        opened.append_frame_session(
+            FrameSession(
+                membership_id,
+                task,
+                session.session_key,
+                1,
+                MembershipReason.STARTED,
+                24,
+            )
+        )
+        with opened.transaction(immediate=True) as connection:
+            connection.execute(
+                "UPDATE frames SET lifecycle_state = ?, close_reason = ? "
+                "WHERE frame_id = ?",
+                (
+                    FrameLifecycleState.CLOSED.value,
+                    CloseReason.DISMISSED.value,
+                    str(task),
+                ),
+            )
+        navigator = build_navigator_from_registry(opened, generated_at=25)
+
+    project = navigator.data["projects"][0]  # type: ignore[index]
+    frames = {item["frameId"]: item for item in project["frames"]}
+    assert project["entryFrameId"] == str(WORKSPACE)
+    assert frames[str(task)] == {
+        "frameId": str(task),
+        "title": "Closed task",
+        "role": "task",
+        "parentFrameId": str(WORKSPACE),
+        "lifecycleState": "closed",
+        "activity": "ready",
+        "currentSession": {
+            "provider": "codex",
+            "runtimePresence": "stopped",
+            "resumability": "resumable",
+            "activity": "ready",
+            "updatedAt": 1,
+        },
+        "sessionCount": 1,
+    }
 
 
 def test_unknown_safe_fields_are_omitted_but_sensitive_and_corrupt_input_fails() -> (

@@ -8,6 +8,9 @@ from dataclasses import dataclass
 from uuid import NAMESPACE_URL, uuid4, uuid5
 
 from .domain import (
+    Activity,
+    BackgroundState,
+    ClaimState,
     DesktopAttachmentLease,
     FailureRecord,
     FrameId,
@@ -493,6 +496,7 @@ class ViewRuntime:
         frame_id: FrameId,
         *,
         request_id: RequestId,
+        confirm_background_transfer: bool = False,
         now: int,
     ) -> UserView:
         self._require_mutation("view focus")
@@ -521,9 +525,65 @@ class ViewRuntime:
             raise ViewRuntimeError(
                 "active_placement_missing", "view has no active frame"
             )
+        source_frame = self.registry.get_frame(source.frame_id)
+        target_frame = self.registry.get_frame(target.frame_id)
+        transfer_context = (
+            source.frame_id != target.frame_id
+            and source_frame.work_context_id == target_frame.work_context_id
+        )
+        work_context_id = None
+        expected_claim_generation = None
+        if transfer_context:
+            context = self.registry.get_work_context(source_frame.work_context_id)
+            if (
+                context.claim_state is not ClaimState.HELD
+                or context.foreground_frame_id != source.frame_id
+            ):
+                raise ViewRuntimeError(
+                    "foreground_authority_mismatch",
+                    "source frame does not hold foreground WorkContext authority",
+                )
+            current_session = (
+                None
+                if source_frame.current_session_key is None
+                else self.registry.get_provider_session(
+                    source_frame.current_session_key
+                )
+            )
+            background_unsafe = (
+                context.background_state is not BackgroundState.SAFE
+                or (
+                    current_session is not None
+                    and current_session.activity is not Activity.READY
+                )
+            )
+            if background_unsafe and not confirm_background_transfer:
+                raise ViewRuntimeError(
+                    "background_confirmation_required",
+                    "source activity may continue in the background; retry with "
+                    "explicit background-transfer confirmation",
+                )
+            work_context_id = context.work_context_id
+            expected_claim_generation = context.claim_generation
+        elif source.frame_id != target.frame_id and target.surface_id is not None:
+            target_context = self.registry.get_work_context(
+                target_frame.work_context_id
+            )
+            if (
+                target_context.claim_state is not ClaimState.HELD
+                or target_context.foreground_frame_id != target.frame_id
+            ):
+                raise ViewRuntimeError(
+                    "target_authority_mismatch",
+                    "target frame does not hold foreground WorkContext authority",
+                )
         fingerprint = request_fingerprint(
             "view.focus",
-            {"viewId": str(view.view_id), "frameId": str(target.frame_id)},
+            {
+                "viewId": str(view.view_id),
+                "frameId": str(target.frame_id),
+                "confirmBackgroundTransfer": confirm_background_transfer,
+            },
         )
         transition_id = _stable_id(TransitionId, self.host_id, request_id, "focus")
         transition = ViewTransition(
@@ -535,9 +595,9 @@ class ViewRuntime:
             TransitionKind.FOCUS,
             source.frame_id,
             target.frame_id,
-            None,
+            work_context_id,
             view.revision,
-            None,
+            expected_claim_generation,
             TransitionState.PREPARED,
             None,
             None,
@@ -549,17 +609,38 @@ class ViewRuntime:
         transition = self.registry.prepare_transition(transition)
         if transition.state is TransitionState.COMPLETED:
             return self.registry.get_view(view.view_id)
-        owner = f"view-executor-{uuid4()}"
-        transition = self._claim_transition(transition, owner, now=now)
         executor = self._tmux_for_view(view)
+        source_pane_id = self._pane_for_placement(executor, view, source)
+        target_pane_id = self._pane_for_placement(executor, view, target)
+        source_live = source.surface_id is not None
+        target_live = target.surface_id is not None
+        owner = f"view-executor-{uuid4()}"
+        source_fenced = False
+        transition = self._claim_transition(transition, owner, now=now)
         try:
-            pane_id = self._pane_for_placement(executor, view, target)
+            if source_live:
+                executor.set_pane_input(
+                    generation_id=self.generation_id,
+                    view_id=view.view_id,
+                    pane_id=source_pane_id,
+                    enabled=False,
+                )
+                source_fenced = True
+            if target_live:
+                target_observation = next(
+                    pane for pane in executor.panes() if pane.pane_id == target_pane_id
+                )
+                if target_observation.dead or not target_observation.input_off:
+                    raise ViewRuntimeError(
+                        "target_not_fenced",
+                        "target surface is not live and input-fenced",
+                    )
             executor.present_pane(
                 prefix=self.config.tmux.naming_prefix,
                 generation_id=self.generation_id,
                 view_id=view.view_id,
                 mode=view.mode,
-                pane_id=pane_id,
+                pane_id=target_pane_id,
             )
             phase = transition.transport_phase
             if phase is TransportPhase.INTENT and source.frame_id != target.frame_id:
@@ -582,6 +663,13 @@ class ViewRuntime:
             self.registry.commit_transition_presentation(
                 transition.transition_id, owner, now=now
             )
+            if target_live:
+                executor.set_pane_input(
+                    generation_id=self.generation_id,
+                    view_id=view.view_id,
+                    pane_id=target_pane_id,
+                    enabled=True,
+                )
             self.registry.advance_transition_state(
                 transition.transition_id,
                 TransitionState.PRESENTED,
@@ -597,17 +685,66 @@ class ViewRuntime:
                 now=now,
             )
         except (TmuxViewError, ConflictError, ViewRuntimeError) as error:
-            with suppress(ConflictError):
-                self.registry.advance_transition_state(
-                    transition.transition_id,
-                    TransitionState.EXECUTING,
-                    TransitionState.FAILED,
-                    execution_owner=owner,
-                    failure=FailureRecord(
-                        "view_presentation_uncertain", "View presentation needs repair."
-                    ),
-                    now=now,
+            restored = False
+            try:
+                executor.present_pane(
+                    prefix=self.config.tmux.naming_prefix,
+                    generation_id=self.generation_id,
+                    view_id=view.view_id,
+                    mode=view.mode,
+                    pane_id=source_pane_id,
                 )
+                if target_live:
+                    executor.set_pane_input(
+                        generation_id=self.generation_id,
+                        view_id=view.view_id,
+                        pane_id=target_pane_id,
+                        enabled=False,
+                    )
+                if source_live and source_fenced:
+                    executor.set_pane_input(
+                        generation_id=self.generation_id,
+                        view_id=view.view_id,
+                        pane_id=source_pane_id,
+                        enabled=True,
+                    )
+                restored = True
+            except (TmuxViewError, ViewRuntimeError, StopIteration):
+                pass
+            failure = FailureRecord(
+                "view_presentation_uncertain", "View presentation needs repair."
+            )
+            if restored:
+                with suppress(ConflictError):
+                    self.registry.fail_restored_transition(
+                        transition.transition_id, owner, failure, now=now
+                    )
+                current = self.registry.get_transition(transition.transition_id)
+                restored = current.state is TransitionState.FAILED and (
+                    self.registry.get_view(view.view_id).state is ViewState.READY
+                )
+            if not restored:
+                for pane_id in {source_pane_id, target_pane_id}:
+                    with suppress(TmuxViewError):
+                        executor.set_pane_input(
+                            generation_id=self.generation_id,
+                            view_id=view.view_id,
+                            pane_id=pane_id,
+                            enabled=False,
+                        )
+                with suppress(ConflictError):
+                    self.registry.advance_transition_state(
+                        transition.transition_id,
+                        TransitionState.EXECUTING,
+                        TransitionState.FAILED,
+                        execution_owner=owner,
+                        failure=failure,
+                        now=now,
+                    )
+            if restored:
+                raise ViewRuntimeError(
+                    "view_presentation_failed", str(error)
+                ) from error
             self._open_recovery(
                 kind="view_presentation",
                 subject_type="view",
