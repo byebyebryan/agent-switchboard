@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import shutil
 import subprocess
 from pathlib import Path
@@ -52,7 +53,11 @@ from agent_switchboard._v3.generation import (
     GenerationPaths,
     OpenGeneration,
 )
-from agent_switchboard._v3.navigator import NavigatorModel
+from agent_switchboard._v3.navigator import (
+    ActionOutcome,
+    NavigatorModel,
+    create_navigator_app,
+)
 from agent_switchboard._v3.protocol import (
     DirectiveKind,
     PresentationDirective,
@@ -317,7 +322,7 @@ def test_project_navigation_modes_attach_and_projection_share_one_view(
 
         state = build_navigator_from_registry(app.registry, generated_at=26)
         model = NavigatorModel.from_state(state, VIEW)
-        assert model.breadcrumb == "starship / Alpha / Alpha"
+        assert model.breadcrumb == "starship / Alpha"
         assert model.active_project_id == str(PROJECT_A)
         assert [project.name for project in model.projects] == ["Alpha", "Beta"]
 
@@ -637,6 +642,71 @@ def test_terminal_entry_remote_preflights_owner_then_returns_fixed_attach(
             "--preflight-only",
             "--confirm-background-transfer",
         )
+    finally:
+        stop_tmux(tmux)
+
+
+def test_resident_navigator_factory_runs_structured_single_actions(
+    tmp_path: Path,
+) -> None:
+    app, tmux = runtime(tmp_path)
+    calls: list[list[str]] = []
+
+    async def action_runner(arguments: list[str]) -> ActionOutcome:
+        calls.append(list(arguments))
+        if len(calls) == 1:
+            return ActionOutcome(
+                False,
+                "background_confirmation_required",
+                "source activity may continue",
+            )
+        return ActionOutcome(True, payload={"entered": True})
+
+    try:
+        opened = app.create_project_view(
+            PROJECT_A,
+            request_id=RequestId("ffffffff-2222-4222-8222-222222222222"),
+            mode=ViewMode.NAVIGATOR,
+            view_id=VIEW,
+            now=20,
+        )
+        tui = create_navigator_app(
+            app.paths,
+            opened.view.view_id,
+            action_runner=action_runner,
+            opened_factory=lambda _paths: app.opened,
+        )
+
+        async def exercise() -> None:
+            async with tui.run_test() as pilot:
+                for selector in (
+                    "#view-list",
+                    "#project-list",
+                    "#task-list",
+                    "#history-list",
+                    "#recovery-list",
+                    "#settings-body",
+                ):
+                    assert tui.query_one(selector) is not None
+                outcome = await tui._execute_action(  # type: ignore[attr-defined]
+                    ["view", "focus"], "focus"
+                )
+                assert not outcome.ok
+                assert (  # type: ignore[attr-defined]
+                    "confirmation required" in tui.action_status
+                )
+                tui.action_confirm_background()  # type: ignore[attr-defined]
+                await pilot.pause()
+                assert calls[-1] == [
+                    "view",
+                    "focus",
+                    "--confirm-background-transfer",
+                ]
+                assert (  # type: ignore[attr-defined]
+                    tui.action_status == "success: focus"
+                )
+
+        asyncio.run(exercise())
     finally:
         stop_tmux(tmux)
         app.opened.close()

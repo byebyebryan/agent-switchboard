@@ -6,7 +6,8 @@ import json
 from collections.abc import Mapping
 from typing import BinaryIO, Final
 
-from .domain import ProviderId, RequestId, TransitionId
+from .domain import ProviderId, RequestId, TransitionId, ViewMode
+from .views import ViewRuntime
 from .workflow import WorkflowRuntime
 
 MCP_PROTOCOL_VERSION: Final = "2025-11-25"
@@ -38,6 +39,11 @@ TOOLS: Final = (
     ("switchboard_current", "Read exact current frame authority.", _schema()),
     ("switchboard_context", "Read current checkout ownership.", _schema()),
     ("switchboard_history", "Read bounded frame session history.", _schema()),
+    (
+        "switchboard_mode",
+        "Switch the current managed view between navigator and direct mode.",
+        _schema({"mode": {"enum": ["navigator", "direct"]}}, required=("mode",)),
+    ),
     (
         "task_push",
         "Prepare one conservative child task after this turn stops.",
@@ -96,6 +102,7 @@ def _records() -> list[dict[str, object]]:
         "task_complete_return",
         "transition_claim",
         "transition_cancel",
+        "switchboard_mode",
     }
     return [
         {
@@ -308,6 +315,32 @@ def _call(
             now=service.now,
         )
         result = _prepared_result(prepared)
+    elif name == "switchboard_mode":
+        args = _arguments(raw_params, {"mode"}, {"mode"})
+        try:
+            target_mode = ViewMode(_text(args, "mode"))
+        except ValueError as error:
+            raise McpError(-32602, "mode is invalid") from error
+        capability = service._capability()
+        view = ViewRuntime(
+            service.workflow.opened,
+            service.workflow.paths,
+            tmux=service.workflow.tmux,
+        ).set_mode(
+            capability.view_id,
+            target_mode,
+            request_id=RequestId.new(),
+            now=service.now,
+        )
+        result = {
+            "viewId": str(view.view_id),
+            "mode": view.mode.value,
+            "instruction": (
+                "The resident navigator is now visible."
+                if view.mode is ViewMode.NAVIGATOR
+                else "The active agent now fills the managed view."
+            ),
+        }
     elif name == "task_back":
         args = _arguments(raw_params, {"park_safe", "request_id"}, set())
         result = _prepared_result(

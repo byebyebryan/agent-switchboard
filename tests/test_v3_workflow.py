@@ -749,6 +749,15 @@ def test_replacement_mcp_exposes_only_capability_derived_frame_tools(
                 "id": 4,
                 "method": "tools/call",
                 "params": {
+                    "name": "switchboard_mode",
+                    "arguments": {"mode": "navigator"},
+                },
+            },
+            {
+                "jsonrpc": "2.0",
+                "id": 5,
+                "method": "tools/call",
+                "params": {
                     "name": "task_push",
                     "arguments": {
                         "title": "Child task",
@@ -786,7 +795,10 @@ def test_replacement_mcp_exposes_only_capability_derived_frame_tools(
             for tool in listed
         )
         assert responses[2]["result"]["structuredContent"]["role"] == "workspace"
-        prepared = responses[3]["result"]["structuredContent"]
+        mode = responses[3]["result"]["structuredContent"]
+        assert mode["mode"] == "navigator"
+        assert workflow.registry.get_view(VIEW).mode is ViewMode.NAVIGATOR
+        prepared = responses[4]["result"]["structuredContent"]
         assert prepared["state"] == "prepared"
         assert parent_token not in output.getvalue().decode()
         workflow.cancel_push(
