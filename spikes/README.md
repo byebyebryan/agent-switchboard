@@ -43,6 +43,22 @@ Trusted adoption plus native input-fenced history runs with:
 The retained result passes Gates 2 and 3. See
 `docs/spikes/rollover-trust-history.md`.
 
+Execution-intent timing for ordinary Plan implementation and conversational
+plans runs with:
+
+```sh
+.venv/bin/python -m spikes.thread_workstream.execution_trigger_study \
+  --output \
+  spikes/fixtures/thread-workstream/codex/0.145.0/execution-trigger.json
+```
+
+The retained result proves the ordinary Plan implementation input can be held
+before sampling while its structured plan remains available. It also proves
+that conversational plan/result/acceptance events are observable, but natural
+language alone remains advisory; an explicitly selected plan supplies
+provider-neutral authority. See
+`docs/spikes/execution-intent-timing.md`.
+
 Managed-worktree ownership runs with:
 
 ```sh

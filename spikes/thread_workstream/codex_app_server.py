@@ -244,9 +244,34 @@ def latest_plan(thread: Mapping[str, Any]) -> str | None:
     return found
 
 
+def latest_agent_message(thread: Mapping[str, Any]) -> str | None:
+    """Return the last completed agent message from a private thread read."""
+
+    turns = thread.get("turns")
+    if not isinstance(turns, list):
+        return None
+    found: str | None = None
+    for turn in turns:
+        if not isinstance(turn, Mapping):
+            continue
+        items = turn.get("items")
+        if not isinstance(items, list):
+            continue
+        for item in items:
+            if (
+                isinstance(item, Mapping)
+                and item.get("type") == "agentMessage"
+                and isinstance(item.get("text"), str)
+                and item["text"].strip()
+            ):
+                found = item["text"]
+    return found
+
+
 __all__ = [
     "AppServerError",
     "CodexAppServer",
+    "latest_agent_message",
     "latest_plan",
     "provider_version",
     "schema_fingerprint",

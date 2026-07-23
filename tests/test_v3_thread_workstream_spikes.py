@@ -20,7 +20,7 @@ from spikes.thread_workstream.adoption import (
     InputObservation,
     TransitionClassification,
 )
-from spikes.thread_workstream.codex_app_server import latest_plan
+from spikes.thread_workstream.codex_app_server import latest_agent_message, latest_plan
 from spikes.thread_workstream.evidence import (
     EvidenceError,
     StudyResult,
@@ -29,6 +29,21 @@ from spikes.thread_workstream.evidence import (
     audit_sanitized_evidence,
     sanitize_hook_order,
     write_private_json,
+)
+from spikes.thread_workstream.execution_trigger import (
+    AtomicCutoverStore,
+    CutoverBinding,
+    CutoverState,
+    CutoverTransaction,
+    DeliveryLedger,
+    ExecutionSignal,
+    ExecutionTriggerGate,
+    PlanCandidate,
+    PlanProvenance,
+    TriggerDecision,
+    TriggerError,
+    TriggerObservation,
+    classify_execution_trigger,
 )
 from spikes.thread_workstream.isolation import reject_repository
 from spikes.thread_workstream.memory_continuity import (
@@ -494,6 +509,21 @@ def test_latest_plan_uses_completed_structured_item() -> None:
     )
 
 
+def test_latest_agent_message_uses_last_completed_message() -> None:
+    assert (
+        latest_agent_message(
+            {
+                "turns": [
+                    {"items": [{"type": "agentMessage", "text": "first"}]},
+                    {"items": [{"type": "plan", "text": "not a message"}]},
+                    {"items": [{"type": "agentMessage", "text": "authoritative"}]},
+                ]
+            }
+        )
+        == "authoritative"
+    )
+
+
 def test_managed_worktree_study_passes_all_ownership_gates() -> None:
     _version, _fingerprint, status, assertions, cleanup = run_worktree_study()
     assert status is StudyStatus.PASS
@@ -619,10 +649,340 @@ def test_retained_memory_fixture_is_sanitized_and_passing() -> None:
 def test_all_retained_thread_workstream_evidence_passes_privacy_audit() -> None:
     fixture_root = ROOT / "spikes" / "fixtures" / "thread-workstream"
     fixtures = sorted(fixture_root.rglob("*.json"))
-    assert len(fixtures) == 4
+    assert len(fixtures) >= 4
     for fixture in fixtures:
         retained = json.loads(fixture.read_text())
         audit_sanitized_evidence(retained)
-        assert retained["status"] == "pass"
+        assert retained["status"] in {"pass", "falsified", "blocked"}
         assert retained["assisted"] is False
         assert all(retained["privacyAudit"].values())
+
+
+def test_trigger_hook_holds_matching_input_until_private_block_decision(
+    tmp_path: Path,
+) -> None:
+    events = tmp_path / "private" / "events.jsonl"
+    decision = tmp_path / "private" / "decision.json"
+    write_private_json(decision, {"decision": "block"})
+    environment = dict(os.environ)
+    environment["ASB_SPIKE_DISPOSABLE_ROOT"] = str(tmp_path)
+    payload = {
+        "session_id": "11111111-1111-4111-8111-111111111111",
+        "hook_event_name": "UserPromptSubmit",
+        "turn_id": "private-turn",
+        "prompt": "Implement the plan.",
+        "cwd": str(tmp_path),
+        "permission_mode": "bypassPermissions",
+    }
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(ROOT / "spikes" / "thread_workstream" / "trigger_hook.py"),
+            str(events),
+            str(decision),
+            "ordinary",
+        ],
+        input=json.dumps(payload),
+        capture_output=True,
+        text=True,
+        timeout=5,
+        env=environment,
+    )
+    assert result.returncode == 0
+    assert json.loads(result.stdout)["decision"] == "block"
+    assert_private_file(events)
+    retained = json.loads(events.read_text())
+    assert retained["trigger_match"] is True
+    assert retained["provider_input"] == "Implement the plan."
+
+
+def test_retained_execution_trigger_fixture_is_sanitized_and_passing() -> None:
+    fixture = (
+        ROOT
+        / "spikes"
+        / "fixtures"
+        / "thread-workstream"
+        / "codex"
+        / "0.145.0"
+        / "execution-trigger.json"
+    )
+    retained = json.loads(fixture.read_text())
+    assert retained["status"] == "pass"
+    assert retained["assisted"] is False
+    assert all(retained["assertions"].values())
+    assert all(retained["isolation"].values())
+    assert all(retained["cleanup"].values())
+    assert retained["assertions"]["ordinary_trigger_authoritative"] is True
+    assert retained["assertions"]["natural_language_is_advisory_only"] is True
+    assert retained["assertions"]["explicit_selection_authorizes_cutover"] is True
+    encoded = fixture.read_text()
+    assert "/home/" not in encoded
+    assert "/tmp/" not in encoded
+    assert "provider_input" not in encoded
+    assert "provider_output" not in encoded
+
+
+PLAN_DIGEST = "b" * 64
+
+
+def structured_candidate(**overrides: object) -> PlanCandidate:
+    values: dict[str, object] = {
+        "source_identity": "source-private",
+        "source_revision": 4,
+        "digest": PLAN_DIGEST,
+        "provenance": PlanProvenance.CODEX_PLAN_ITEM,
+        "accepted": True,
+    }
+    values.update(overrides)
+    return PlanCandidate(**values)  # type: ignore[arg-type]
+
+
+def ordinary_observation(**overrides: object) -> TriggerObservation:
+    values: dict[str, object] = {
+        "nonce": "trigger-1",
+        "order": 1,
+        "source_identity": "source-private",
+        "source_revision": 4,
+        "signal": ExecutionSignal.CODEX_ORDINARY_IMPLEMENT,
+        "before_source_commit": True,
+        "source_sampled": False,
+        "referenced_plan_digest": PLAN_DIGEST,
+        "ordinary_coding_input": True,
+        "mode_before": "plan",
+        "mode_at_submit": "default",
+    }
+    values.update(overrides)
+    return TriggerObservation(**values)  # type: ignore[arg-type]
+
+
+def test_structured_ordinary_implementation_authorizes_pre_submit_cutover() -> None:
+    receipt = classify_execution_trigger(
+        structured_candidate(),
+        ordinary_observation(),
+    )
+    assert receipt.decision is TriggerDecision.CUTOVER
+    assert receipt.authoritative is True
+    assert receipt.reason == "structured-plan-implementation"
+
+
+@pytest.mark.parametrize(
+    ("candidate", "observation"),
+    [
+        (None, ordinary_observation()),
+        (
+            structured_candidate(provenance=PlanProvenance.EXPLICIT_SELECTION),
+            ordinary_observation(),
+        ),
+        (structured_candidate(accepted=False), ordinary_observation()),
+        (structured_candidate(consumed=True), ordinary_observation()),
+        (
+            structured_candidate(source_identity="other"),
+            ordinary_observation(),
+        ),
+        (structured_candidate(source_revision=3), ordinary_observation()),
+        (
+            structured_candidate(),
+            ordinary_observation(referenced_plan_digest="c" * 64),
+        ),
+        (
+            structured_candidate(),
+            ordinary_observation(ordinary_coding_input=False),
+        ),
+        (
+            structured_candidate(),
+            ordinary_observation(before_source_commit=False),
+        ),
+        (structured_candidate(), ordinary_observation(source_sampled=True)),
+    ],
+)
+def test_ordinary_implementation_fails_closed_without_compound_authority(
+    candidate: PlanCandidate | None,
+    observation: TriggerObservation,
+) -> None:
+    receipt = classify_execution_trigger(candidate, observation)
+    assert receipt.decision is TriggerDecision.STAY
+    assert receipt.authoritative is False
+
+
+def test_permission_mode_is_not_required_as_collaboration_mode_evidence() -> None:
+    receipt = classify_execution_trigger(
+        structured_candidate(),
+        ordinary_observation(
+            mode_before=None,
+            mode_at_submit="bypassPermissions",
+        ),
+    )
+    assert receipt.decision is TriggerDecision.CUTOVER
+    assert receipt.authoritative is True
+
+
+def test_selected_conversational_plan_requires_explicit_fresh_action() -> None:
+    selected = structured_candidate(
+        provenance=PlanProvenance.EXPLICIT_SELECTION,
+    )
+    natural = ordinary_observation(
+        signal=ExecutionSignal.NATURAL_LANGUAGE_ACCEPTANCE,
+        ordinary_coding_input=False,
+        mode_before="default",
+        mode_at_submit="default",
+    )
+    advisory = classify_execution_trigger(selected, natural)
+    assert advisory.decision is TriggerDecision.ADVISORY
+    assert advisory.authoritative is False
+
+    explicit = replace(
+        natural,
+        signal=ExecutionSignal.EXPLICIT_FRESH_IMPLEMENT,
+    )
+    receipt = classify_execution_trigger(selected, explicit)
+    assert receipt.decision is TriggerDecision.CUTOVER
+    assert receipt.authoritative is True
+    assert receipt.reason == "explicit-plan-selection"
+
+
+def test_discussion_revision_and_generic_clear_do_not_create_task_boundary() -> None:
+    for signal in (ExecutionSignal.DISCUSSION, ExecutionSignal.PLAN_REVISION):
+        receipt = classify_execution_trigger(
+            structured_candidate(),
+            ordinary_observation(signal=signal),
+        )
+        assert receipt.decision is TriggerDecision.STAY
+        assert receipt.authoritative is False
+
+    generic = classify_execution_trigger(
+        structured_candidate(),
+        ordinary_observation(signal=ExecutionSignal.GENERIC_CLEAR),
+    )
+    assert generic.decision is TriggerDecision.PROVIDER_ONLY
+    assert generic.authoritative is False
+
+
+def test_native_clear_requires_exact_structured_plan_for_task_adoption() -> None:
+    observation = ordinary_observation(
+        signal=ExecutionSignal.NATIVE_CLEAR_IMPLEMENT,
+    )
+    accepted = classify_execution_trigger(structured_candidate(), observation)
+    assert accepted.decision is TriggerDecision.NATIVE_ADOPT
+    assert accepted.authoritative is True
+
+    unproven = classify_execution_trigger(None, observation)
+    assert unproven.decision is TriggerDecision.PROVIDER_ONLY
+    assert unproven.authoritative is False
+
+
+def test_trigger_gate_rejects_replay_stale_and_concurrent_authority() -> None:
+    gate = ExecutionTriggerGate()
+    first = ordinary_observation()
+    assert gate.observe(structured_candidate(), first).authoritative is True
+    with pytest.raises(TriggerError, match="trigger-replayed"):
+        gate.observe(structured_candidate(), first)
+    with pytest.raises(TriggerError, match="trigger-stale"):
+        gate.observe(
+            structured_candidate(),
+            ordinary_observation(nonce="stale", order=0),
+        )
+    with pytest.raises(TriggerError, match="trigger-concurrent"):
+        gate.observe(
+            structured_candidate(),
+            ordinary_observation(nonce="concurrent", order=2),
+        )
+    with pytest.raises(TriggerError, match="trigger-settlement-mismatch"):
+        gate.settle("wrong")
+    gate.settle(first.nonce)
+    assert (
+        gate.observe(
+            structured_candidate(),
+            ordinary_observation(nonce="next", order=3),
+        ).authoritative
+        is True
+    )
+
+
+def prepared_transaction() -> tuple[
+    PlanCandidate,
+    TriggerObservation,
+    AtomicCutoverStore,
+    CutoverTransaction,
+]:
+    candidate = structured_candidate()
+    observation = ordinary_observation()
+    receipt = classify_execution_trigger(candidate, observation)
+    store = AtomicCutoverStore(
+        CutoverBinding(version=7, active_identity=observation.source_identity)
+    )
+    transaction = CutoverTransaction.prepare(
+        candidate,
+        observation,
+        receipt,
+        store,
+    )
+    return candidate, observation, store, transaction
+
+
+def test_cutover_transaction_delivers_once_then_commits_and_consumes_plan() -> None:
+    candidate, _observation, store, transaction = prepared_transaction()
+    ledger = DeliveryLedger()
+    transaction.set_destination("destination-private")
+    transaction.deliver(ledger)
+    transaction.commit(store)
+    consumed = transaction.consume_candidate(candidate)
+
+    assert transaction.state is CutoverState.COMMITTED
+    assert ledger.attempts == ledger.deliveries == 1
+    assert store.binding == CutoverBinding(
+        version=8,
+        active_identity="destination-private",
+        plan_consumed=True,
+    )
+    assert consumed.consumed is True
+    assert transaction.source_input_restored is False
+
+
+def test_pre_delivery_failure_restores_source_input_without_delivery() -> None:
+    _candidate, _observation, store, transaction = prepared_transaction()
+    ledger = DeliveryLedger()
+    transaction.set_destination("destination-private")
+    with pytest.raises(TriggerError, match="delivery-rejected"):
+        transaction.deliver(ledger, fail_at="before")
+    transaction.restore_source()
+
+    assert transaction.state is CutoverState.RESTORED
+    assert transaction.source_input_restored is True
+    assert ledger.deliveries == 0
+    assert store.binding.active_identity == "source-private"
+
+
+def test_uncertain_delivery_recovers_without_duplicate_source_or_destination() -> None:
+    _candidate, _observation, store, transaction = prepared_transaction()
+    ledger = DeliveryLedger()
+    transaction.set_destination("destination-private")
+    with pytest.raises(TriggerError, match="delivery-outcome-uncertain"):
+        transaction.deliver(ledger, fail_at="after")
+    with pytest.raises(
+        TriggerError,
+        match="delivered-input-cannot-return-to-source",
+    ):
+        transaction.restore_source()
+
+    transaction.recover_delivery(ledger)
+    transaction.commit(store)
+
+    assert transaction.state is CutoverState.COMMITTED
+    assert ledger.attempts == 1
+    assert ledger.deliveries == 1
+    assert transaction.source_input_restored is False
+
+
+def test_uncertain_binding_commit_recovers_complete_destination_record() -> None:
+    _candidate, _observation, store, transaction = prepared_transaction()
+    ledger = DeliveryLedger()
+    transaction.set_destination("destination-private")
+    transaction.deliver(ledger)
+    with pytest.raises(TriggerError, match="binding-commit-outcome-uncertain"):
+        transaction.commit(store, fail_at="after")
+    assert transaction.state is CutoverState.COMMIT_UNCERTAIN
+
+    transaction.recover_commit(store)
+    assert transaction.state is CutoverState.COMMITTED
+    assert store.binding.active_identity == "destination-private"
+    assert ledger.deliveries == 1

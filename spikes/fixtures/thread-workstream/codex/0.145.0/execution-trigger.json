@@ -1,0 +1,82 @@
+{
+  "assertions": {
+    "conversational_block_appends_only_content_free_turn": true,
+    "conversational_blocked_input_absent_from_source_history": true,
+    "conversational_input_observed_while_held": true,
+    "conversational_no_execution_stop_after_block": true,
+    "conversational_result_explicitly_selectable": true,
+    "conversational_result_has_no_structured_plan": true,
+    "conversational_same_surface_and_process": true,
+    "conversational_source_composer_restored": true,
+    "conversational_source_identity_unchanged": true,
+    "conversational_stop_exposes_exact_result": true,
+    "explicit_selection_authorizes_cutover": true,
+    "explicit_transaction_replay_exact_once": true,
+    "natural_language_is_advisory_only": true,
+    "ordinary_block_appends_only_content_free_turn": true,
+    "ordinary_blocked_input_absent_from_source_history": true,
+    "ordinary_input_is_fixed_coding_action": true,
+    "ordinary_input_observed_while_held": true,
+    "ordinary_no_clear_started": true,
+    "ordinary_no_execution_stop_after_block": true,
+    "ordinary_same_surface_and_process": true,
+    "ordinary_source_composer_restored": true,
+    "ordinary_source_identity_unchanged": true,
+    "ordinary_transaction_replay_exact_once": true,
+    "ordinary_trigger_authoritative": true,
+    "ordinary_trigger_independent_of_permission_mode": true,
+    "structured_plan_available_while_held": true
+  },
+  "assisted": false,
+  "cleanup": {
+    "conversational_capture_deleted": true,
+    "conversational_decision_deleted": true,
+    "conversational_root_deleted": true,
+    "fingerprint_root_deleted": true,
+    "ordinary_capture_deleted": true,
+    "ordinary_decision_deleted": true,
+    "ordinary_root_deleted": true,
+    "unrelated_agent_processes_unchanged": true,
+    "unrelated_tmux_panes_unchanged": true
+  },
+  "contractFingerprint": "4242b14096f29619f86c3d27a832d853ceaa55cbf60bd4ae3fafda446b1e8a5c",
+  "eventOrder": [
+    "thread-a:SessionStart:startup",
+    "thread-a:UserPromptSubmit",
+    "thread-a:Stop",
+    "thread-a:UserPromptSubmit",
+    "thread-b:SessionStart:startup",
+    "thread-b:UserPromptSubmit",
+    "thread-b:Stop",
+    "thread-b:UserPromptSubmit"
+  ],
+  "installedVersion": "codex-cli 0.145.0",
+  "isolation": {
+    "disposable_repositories": true,
+    "private_provider_homes": true,
+    "private_switchboard_state": true,
+    "private_tmux_servers": true,
+    "source_inputs_blocked_before_sampling": true
+  },
+  "limitations": [
+    "live destination cutover reused proven transaction evidence",
+    "explicit conversational plan selection was replayed spike-only"
+  ],
+  "privacyAudit": {
+    "credentialsExcluded": true,
+    "providerIdentifiersExcluded": true,
+    "providerInputExcluded": true,
+    "providerOutputExcluded": true,
+    "runtimeLocationsExcluded": true,
+    "runtimeProcessIdentifiersExcluded": true
+  },
+  "provider": "codex",
+  "schemaVersion": 1,
+  "status": "pass",
+  "study": "codex-execution-intent-timing",
+  "timingsMs": {
+    "conversational": 11740,
+    "ordinary": 15622,
+    "total": 27733
+  }
+}

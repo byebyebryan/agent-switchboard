@@ -144,6 +144,8 @@ def _write_minimal_codex_home(
     *,
     source_home: Path,
     hook_script: Path,
+    hook_arguments: Sequence[str] = (),
+    hook_timeout: int = 10,
 ) -> None:
     source_auth = source_home / "auth.json"
     if not source_auth.is_file():
@@ -163,11 +165,18 @@ def _write_minimal_codex_home(
         encoding="utf-8",
     )
     config.chmod(0o600)
-    command = shlex.join((sys.executable, str(hook_script), str(layout.private_events)))
+    command = shlex.join(
+        (
+            sys.executable,
+            str(hook_script),
+            str(layout.private_events),
+            *hook_arguments,
+        )
+    )
     handler = {
         "type": "command",
         "command": command,
-        "timeout": 10,
+        "timeout": hook_timeout,
         "statusMessage": "Switchboard isolated rollover evidence",
     }
     hooks = {
