@@ -2,8 +2,7 @@
 
 Date: 2026-07-22
 
-Status: Phase 6A.1 through 6F complete; Phase 6F.1 operational hardening in
-progress; Phase 6G follows
+Status: Phase 6A.1 through 6F.1 complete; Phase 6G is next
 
 Target core release: `0.3.3`
 
@@ -369,8 +368,7 @@ workspace/task ancestry remains exclusively Phase 6G.
 
 ### Phase 6F.1: persisted-view operational baseline
 
-Status: implementation complete; installed-state acceptance pending. Evidence
-is recorded in
+Status: complete and accepted. Evidence is recorded in
 [Phase 6F.1 Acceptance](phase-6f1-acceptance.md).
 
 - Observe each non-retired view's recorded tmux socket, PID, start time, and

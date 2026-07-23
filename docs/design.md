@@ -2,7 +2,7 @@
 
 Date: 2026-07-22
 
-Status: Phase 6F complete; Phase 6F.1 operational hardening in progress
+Status: Phase 6F.1 complete and accepted; Phase 6G is next
 
 Target release: `0.3.3`
 
