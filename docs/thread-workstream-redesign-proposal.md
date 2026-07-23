@@ -2,7 +2,7 @@
 
 Date: 2026-07-23
 
-Status: studies complete; direction accepted, proposed contracts remain unapproved
+Status: studies complete; explicit-intent direction accepted, proposed contracts remain unapproved
 
 > **Decision:** the
 > [Thread and Workstream Redesign Decision](thread-workstream-redesign-decision.md)
@@ -12,11 +12,13 @@ Status: studies complete; direction accepted, proposed contracts remain unapprov
 
 This proposal records a possible clean-break successor to the accepted Phase 6
 workspace/child/return workflow. It does not change the current registry,
-commands, hooks, state contract, or installed behavior. Implementation requires
-the provider, hook, tmux, memory, history, and Git spikes defined below.
+commands, hooks, state contract, or installed behavior. The provider, hook,
+tmux, memory, history, and Git spikes below establish direction only;
+implementation still requires an approved production contract and combined
+acceptance.
 
-If those studies fail, the proposal may be narrowed or rejected without
-creating a compatibility obligation.
+If installed capability gates or combined acceptance later fail, the proposal
+may still be narrowed or rejected without creating a compatibility obligation.
 
 ## Why Reconsider the Accepted Workflow
 
@@ -45,6 +47,9 @@ The revised direction starts from these observations:
   conversation rolls from task A to task B.
 - Parallel work is an explicit workstream fork, not an accidental copy of a
   giant project-long provider transcript.
+- Seamless thread management means the user states a simple intent and
+  Switchboard performs the lifecycle transaction. It does not require
+  Switchboard to infer when the user wants a transition.
 - Git worktrees are the natural filesystem boundary for parallel workstreams.
 - Provider-native thread transitions should be adopted where available rather
   than reimplemented without evidence.
@@ -147,14 +152,14 @@ Any accepted successor design must preserve all of these:
 1. A completed assistant result remains the visible tip of its source thread.
 2. No post-result control prompt, synthesis turn, or pane switch is required to
    make that result durable.
-3. Automatic rerouting occurs before the destination agent begins the user's
-   execution turn.
+3. Any requested rerouting occurs before the destination agent begins the
+   user's execution turn.
 4. The triggering execution turn is sampled by at most one working provider
    thread. Any boundary classifier is advisory and cannot perform the task.
 5. The persistent UI identifies the source thread and current destination
    thread before and after a transition.
-6. A user can initiate the same transition without depending on task-boundary
-   inference.
+6. A transition requires an explicit user action; task-boundary inference may
+   suggest an action but cannot initiate one.
 7. Provider thread history is never silently deleted or rewritten.
 8. Historical inspection does not silently change the active workstream tip.
 9. Explicit parallel work does not share a mutable checkout by default.
@@ -163,13 +168,16 @@ Any accepted successor design must preserve all of these:
 
 ## Proposed Sequential Happy Path
 
-The desired flow is task-to-task inside one persistent user view:
+The desired flow preserves both native Plan choices inside one persistent user
+view:
 
 ```text
 task A thread remains visible through work, review, and alignment
 -> task A produces or records an accepted plan/brief for B
--> user commits to execution ("Implement the plan", "Go ahead with B")
--> Switchboard/provider rolls to a fresh B thread before model work
+-> "implement this plan" continues in task A's current provider thread
+or
+-> "clear context and implement" explicitly requests a fresh B thread
+-> provider rolls to B before implementation model work
 -> navigator records and shows A -> B
 -> B receives the exact execution prompt plus the accepted plan/brief
 -> B performs the work and returns its ordinary native result
@@ -204,7 +212,8 @@ Current hooks can observe the generated prompt before accepted input is
 recorded, but no stable hook field directly names the TUI selection or carries
 the approved plan as a separate field.
 
-Rerouting that action is therefore proposed only if a spike proves all of:
+The timing study evaluated whether a future opt-in policy could reroute that
+action. It required proof of:
 
 - reliable compound detection of completed Plan mode -> Default mode;
 - supported structured retrieval of the exact approved `PlanItem`;
@@ -218,41 +227,78 @@ subsequently proved that the fixed ordinary implementation input can be held
 before sampling while the current structured Plan item remains retrievable.
 The blocked input text does not enter source history and produces no model
 `Stop`, although Codex appends one content-free turn. Combined with the
-previously proved transition transaction, ordinary Plan implementation is now
-a viable automatic cutover trigger subject to a production capability gate.
+previously proved transition transaction, ordinary Plan implementation is a
+technically viable optional cutover trigger.
 
-### Generic conversational rollover
+That capability is not the proposed v1 policy. Ordinary **implement this plan**
+continues in the current thread so the user retains the native choice. A future
+explicit preference may force fresh-thread implementation only after product
+evidence justifies the surprise and the content-free blocked turn.
 
-Not every task uses Plan mode. A generic provider-neutral transition may be
-staged by an agent or inferred before a turn, but uncertainty must keep the
-prompt in the current thread.
+### Explicit conversational thread management
+
+Not every task uses Plan mode. At a user prompt boundary, reserved explicit
+actions such as **go ahead in a new thread**, **start a new thread**, and
+**fork this task** may request provider-neutral thread management. Natural
+language that merely resembles acceptance or transition intent remains in the
+current thread.
 
 Model-based classification is not part of the input hot path until latency,
 false-positive, cancellation, and exact-once delivery studies pass. Structured
-signals such as an accepted provider Plan item take priority over inference.
+signals such as an accepted provider Plan item can validate what to carry, but
+do not replace the user's transition request.
 
 The live timing study confirmed that a conversational `Stop` result and the
 next user acceptance are both observable without a structured Plan item.
 Natural language alone remains advisory. A provider-neutral
-**implement selected plan in a fresh thread** action can make an exact assistant
-result or plan document authoritative without inference; that installed action
-is not yet implemented.
+**implement selected plan in a fresh thread** action can bind an exact assistant
+result or plan document to an authoritative user request without inference;
+that installed action is not yet implemented.
 
 ## User-Initiated Transitions
 
-Automatic operation and manual operation should invoke one semantic command,
-not separate workflows. Proposed user actions are:
+The navigator is the canonical thread-management surface because it remains
+available while the provider is generating, running tools, or otherwise not at
+a user prompt boundary. Conversational commands are prompt-boundary aliases for
+the same semantic actions, not the full control surface.
 
-- **Next prompt starts a new task** from the current workstream tip;
-- **Start fresh from this plan** from a selected accepted plan;
-- **Fork workstream from here** from the current or a historical task; and
-- an equivalent bounded CLI/direct-mode action.
+The proposed intent model is:
+
+| User action | Meaning | Source behavior | Destination |
+| --- | --- | --- | --- |
+| **Implement this plan** | Execute with existing context | Continue current thread | None |
+| **Clear context and implement** | Execute accepted plan in fresh context | Preserve source thread | New thread, same task/workstream/worktree |
+| **Start a new thread** | Continue sequential work with clean provider context | Preserve idle source thread | New thread, same workstream/worktree |
+| **Interrupt** | Stop a mistaken or obsolete active attempt | Interrupt active turn; do not roll back files | No automatic destination |
+| **Start new workstream** | Begin unrelated parallel project work | Leave source running or parked | Fresh thread plus independent worktree |
+| **Fork this task** | Explore approach B while approach A continues | Leave source running | Provider fork plus sibling workstream/worktree |
+
+The user's action is the confirmation. A second confirmation is required only
+for a separately identified hazard such as an incomplete filesystem
+checkpoint. Proposed entry points are:
+
+- navigator keys/actions for interrupt, new thread, new workstream, and fork;
+- **Start fresh from this plan** from a selected accepted plan or result;
+- exact reserved conversational aliases at a user prompt boundary; and
+- equivalent bounded CLI/direct-mode actions.
 
 Arming a transition should not open a task-administration form. The user's next
 ordinary prompt is the destination thread's first real prompt.
 
 The navigator must show the pending source and intended transition before input
 is accepted, and the confirmed source/destination identities after binding.
+An out-of-band navigator action may instead collect the destination's first
+prompt directly and launch it immediately without writing into the source
+provider thread.
+
+Explicit navigation may move focus from running approach A to newly started
+approach B. When A later completes, Switchboard marks it `result ready` and
+leaves B focused; it never auto-returns, injects a notification into either
+provider transcript, or replaces A's result tip.
+
+A same-workstream **Start a new thread** action is rejected while its source
+turn is active because both threads would share one mutable worktree. The user
+must interrupt first, start an independent workstream, or fork the task.
 
 ## Persistent Visibility
 
@@ -308,6 +354,20 @@ The first proposal does not allow in-place mutation of a non-tip historical
 thread. That keeps the original workstream linear and makes divergence
 explicit.
 
+Forking a currently running task uses the same rule. If approach A is active,
+the provider fork branches through the latest completed turn before A:
+
+```text
+settled state S
+├── approach A                         original workstream, still running
+└── approach B                         forked workstream from S
+```
+
+The in-progress prompt, partial assistant output, and active tool state are not
+copied into B. The user supplies B's first prompt through the navigator. A
+separate **Interrupt** action stops A when the intent is correction or pivot
+rather than parallel exploration.
+
 ## Worktrees and Filesystem Lineage
 
 Git worktrees are proposed as the default filesystem isolation for explicit
@@ -322,7 +382,10 @@ Project / Repository
 The worktree belongs to the workstream, not each task:
 
 - sequential task/thread rollover keeps the existing worktree;
-- explicit workstream fork creates a fresh branch and managed worktree;
+- a new unrelated workstream creates a fresh managed worktree from an explicit
+  or project-default base commit and has no provider-fork lineage;
+- explicit workstream fork creates a fresh branch and managed worktree from
+  the source's exact recorded checkpoint;
 - switching workstreams restores both provider thread and working directory.
 
 Proposed ownership modes are:
@@ -342,6 +405,12 @@ boundary should record `HEAD` and dirtiness. If the historical task ended dirty,
 the UI must distinguish conversational lineage from an incomplete filesystem
 checkpoint. Automatic checkpoint commits, merge, rebase, and force cleanup are
 out of the first proposal.
+
+An exact running-task fork therefore requires both a completed provider turn
+and its recorded exact filesystem checkpoint. If that checkpoint was dirty or
+cannot be reconstructed, the navigator must block the exact-fork claim and may
+offer a distinctly labeled new workstream from recorded `HEAD`. Interrupting a
+turn never implies that its partial filesystem changes were reverted.
 
 ## Context and External Memory
 
@@ -381,6 +450,7 @@ allowlists:
 - fresh thread with initial input;
 - native clear-context/plan rollover;
 - exact thread resume;
+- native active-turn interrupt with terminal-state confirmation;
 - provider-native fork when useful;
 - structured plan retrieval;
 - thread naming;
@@ -393,6 +463,14 @@ must validate the behavioral contract and fail closed when it changes.
 Native operations are preferred when they preserve the required invariants.
 Switchboard-owned emulation is allowed only after equivalent failure and
 recovery behavior is proven.
+
+For an out-of-band Codex fork, the proved App Server `thread/fork` path returns
+the exact new provider identity and accepts a completed-turn boundary. That is a
+better transaction primitive than launching `codex fork`, whose target identity
+is provider-allocated after launch. A production adapter would still need to
+feature-probe the installed App Server contract, create the matching worktree,
+resume the returned identity in a managed pane, deliver B's first prompt exactly
+once, and recover partial failure without disturbing A.
 
 ## Required Spikes and Studies
 
@@ -415,13 +493,13 @@ Prove against the installed Codex contract:
    input; and
 7. prove the source result remains inspectable after the transition.
 
-### S2: Codex ordinary-implementation interception
+### S2: Codex ordinary-implementation interception feasibility
 
 Status: trigger timing passed; destination transition reuses already-proven
 cutover mechanics.
 
-The study determined whether **implement this plan** can safely be standardized
-as a fresh thread:
+The study determined whether **implement this plan** could technically support
+an optional fresh-thread policy:
 
 1. observe the Plan -> Default transition and exact prompt hook;
 2. retrieve the approved Plan item through a supported structured interface;
@@ -435,6 +513,10 @@ available, and source text/model execution did not occur. Automated fault tests
 proved exact-once delivery and recovery around the existing transaction. The
 sanitized result is
 `spikes/fixtures/thread-workstream/codex/0.145.0/execution-trigger.json`.
+
+The proposed v1 policy deliberately does not activate that capability.
+**Implement this plan** stays in the current thread; **clear context and
+implement** remains the explicit cutover choice.
 
 ### S3: Claude Code equivalent study
 
@@ -457,6 +539,30 @@ Prove that the sidebar can:
 - fence historical input;
 - return to current work in one action; and
 - expose equivalent identity in direct mode without transcript injection.
+
+### S4.1: Navigator-initiated stable fork during active work
+
+Status: native provider boundary passed; production navigator composition
+remains unapproved.
+
+Using an isolated Codex App Server and disposable repository:
+
+- complete one baseline turn;
+- begin approach A and observe its command still running;
+- fork through the exact completed baseline turn;
+- start and complete approach B in the fork;
+- prove A remains active until explicitly interrupted for cleanup;
+- prove the fork contains no in-progress A state; and
+- prove unrelated agent processes and the user's tmux panes remain unchanged.
+
+The unassisted result is
+`spikes/fixtures/thread-workstream/codex/0.145.0/running-source-fork.json`.
+A second unassisted run performed the fork beside an actively working isolated
+Codex TUI and retained
+`spikes/fixtures/thread-workstream/codex/0.145.0/navigator-running-fork.json`.
+The provider process, managed pane, and working directory remained stable while
+the forked alternative completed. Filesystem isolation composes with S5; no
+installed navigator action was created.
 
 ### S5: Managed workstream worktrees
 
@@ -489,10 +595,12 @@ Run the proposed user path end to end:
 ```text
 project/workstream
 -> plan thread
--> native or safely emulated fresh implementation thread
+-> user chooses same-thread implementation or explicit fresh implementation
 -> visible ordinary result
 -> alignment
 -> next task rollover
+-> start unrelated work from the navigator while a task runs
+-> fork approach B from approach A's latest settled state
 -> inspect an old thread
 -> explicit fork from history into a managed worktree
 -> switch between both workstreams
@@ -512,11 +620,14 @@ The redesign advances only if the studies establish:
 - persistent source/current visibility;
 - native historical inspection with safe input fencing;
 - isolated workstream filesystem ownership;
+- an out-of-band explicit action that can start or fork work while the source
+  is active without copying its in-progress turn;
 - explicit degraded behavior when provider or memory capabilities are absent;
 - and failure containment that leaves unrelated native work untouched.
 
-If a provider lacks a safe automatic path, manual fresh-thread transition is an
-acceptable initial capability. If provider naming is unreliable, Switchboard
+If a provider lacks a safe native transition path, an explicit managed
+fresh-thread transition is an acceptable initial capability. If provider naming
+is unreliable, Switchboard
 names remain authoritative. If external memory is delayed, the accepted
 plan/brief remains the immediate handoff. If historical dirty state cannot be
 reconstructed, the UI must say so rather than manufacturing a snapshot.

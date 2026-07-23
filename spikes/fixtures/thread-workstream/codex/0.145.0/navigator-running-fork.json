@@ -1,0 +1,57 @@
+{
+  "assertions": {
+    "disposable_repository_unchanged": true,
+    "fork_alternative_completed": true,
+    "fork_contains_only_settled_prefix": true,
+    "fork_identity_is_distinct": true,
+    "provider_records_source_lineage": true,
+    "source_managed_surface_stable": true,
+    "source_tui_command_still_running": true,
+    "source_tui_has_no_completion_after_fork": true
+  },
+  "assisted": false,
+  "cleanup": {
+    "private_capture_deleted": true,
+    "private_tmux_endpoint_deleted": true,
+    "private_tmux_server_stopped": true,
+    "temporary_root_deleted": true,
+    "unrelated_agent_processes_unchanged": true,
+    "unrelated_tmux_panes_unchanged": true
+  },
+  "contractFingerprint": "4242b14096f29619f86c3d27a832d853ceaa55cbf60bd4ae3fafda446b1e8a5c",
+  "eventOrder": [
+    "source-baseline-completed",
+    "source-tui-command-started",
+    "navigator-stable-prefix-fork-created",
+    "fork-alternative-completed",
+    "source-tui-still-running",
+    "source-tui-stopped-for-cleanup"
+  ],
+  "installedVersion": "codex-cli 0.145.0",
+  "isolation": {
+    "disposable_repository": true,
+    "no_repository_remotes": true,
+    "private_provider_home": true,
+    "private_switchboard_root": true,
+    "private_tmux_server": true
+  },
+  "limitations": [
+    "filesystem isolation composes with separate managed worktree evidence",
+    "source TUI stopped only after concurrent fork proof"
+  ],
+  "privacyAudit": {
+    "credentialsExcluded": true,
+    "providerIdentifiersExcluded": true,
+    "providerInputExcluded": true,
+    "providerOutputExcluded": true,
+    "runtimeLocationsExcluded": true,
+    "runtimeProcessIdentifiersExcluded": true
+  },
+  "provider": "codex",
+  "schemaVersion": 1,
+  "status": "pass",
+  "study": "codex-navigator-fork-beside-running-tui",
+  "timingsMs": {
+    "total": 15672
+  }
+}

@@ -60,6 +60,15 @@ from spikes.thread_workstream.navigator import (
     NavigatorState,
     TransitionVisibility,
 )
+from spikes.thread_workstream.thread_actions import (
+    ActionObservation,
+    ActionRoute,
+    ActionSurface,
+    ThreadAction,
+    ThreadActionError,
+    conversational_action,
+    decide_thread_action,
+)
 from spikes.thread_workstream.worktree_study import run_study as run_worktree_study
 
 FINGERPRINT = "a" * 64
@@ -305,6 +314,217 @@ def test_retained_trust_history_fixture_is_sanitized_and_passing() -> None:
     assert "/tmp/" not in encoded
     assert "provider_identity" not in encoded
     assert "process_birth" not in encoded
+
+
+def test_explicit_thread_action_policy_preserves_user_choice() -> None:
+    implement_here = decide_thread_action(
+        ActionObservation(
+            surface=ActionSurface.NATIVE_PLAN,
+            action=ThreadAction.IMPLEMENT_HERE,
+            active_turn=False,
+            has_completed_turn=True,
+            has_exact_filesystem_checkpoint=True,
+            has_transfer_artifact=True,
+        )
+    )
+    clear_and_implement = decide_thread_action(
+        ActionObservation(
+            surface=ActionSurface.NATIVE_PLAN,
+            action=ThreadAction.CLEAR_AND_IMPLEMENT,
+            active_turn=False,
+            has_completed_turn=True,
+            has_exact_filesystem_checkpoint=True,
+            has_transfer_artifact=True,
+        )
+    )
+    assert implement_here.route is ActionRoute.STAY
+    assert clear_and_implement.route is ActionRoute.THREAD_CUTOVER
+    assert not clear_and_implement.creates_worktree
+
+
+def test_navigator_can_start_or_fork_work_while_source_turn_is_active() -> None:
+    new_workstream = decide_thread_action(
+        ActionObservation(
+            surface=ActionSurface.NAVIGATOR,
+            action=ThreadAction.START_WORKSTREAM,
+            active_turn=True,
+            has_completed_turn=True,
+            has_exact_filesystem_checkpoint=True,
+            has_transfer_artifact=False,
+        )
+    )
+    fork = decide_thread_action(
+        ActionObservation(
+            surface=ActionSurface.NAVIGATOR,
+            action=ThreadAction.FORK_WORKSTREAM,
+            active_turn=True,
+            has_completed_turn=True,
+            has_exact_filesystem_checkpoint=True,
+            has_transfer_artifact=False,
+        )
+    )
+    assert new_workstream.route is ActionRoute.NEW_WORKSTREAM
+    assert new_workstream.preserves_source_turn
+    assert new_workstream.creates_worktree
+    assert fork.route is ActionRoute.FORK_WORKSTREAM
+    assert fork.preserves_source_turn
+    assert fork.branches_from_last_completed_turn
+    assert fork.creates_worktree
+    assert not fork.requires_prompt_boundary
+
+
+def test_interrupt_is_distinct_from_fork_and_does_not_require_prompt_boundary() -> None:
+    decision = decide_thread_action(
+        ActionObservation(
+            surface=ActionSurface.NAVIGATOR,
+            action=ThreadAction.INTERRUPT,
+            active_turn=True,
+            has_completed_turn=True,
+            has_exact_filesystem_checkpoint=True,
+            has_transfer_artifact=False,
+        )
+    )
+    assert decision.route is ActionRoute.INTERRUPT
+    assert not decision.preserves_source_turn
+    assert not decision.requires_prompt_boundary
+    with pytest.raises(ThreadActionError):
+        decide_thread_action(
+            ActionObservation(
+                surface=ActionSurface.NAVIGATOR,
+                action=ThreadAction.INTERRUPT,
+                active_turn=False,
+                has_completed_turn=True,
+                has_exact_filesystem_checkpoint=True,
+                has_transfer_artifact=False,
+            )
+        )
+
+    with pytest.raises(ThreadActionError):
+        decide_thread_action(
+            ActionObservation(
+                surface=ActionSurface.NAVIGATOR,
+                action=ThreadAction.START_THREAD,
+                active_turn=True,
+                has_completed_turn=True,
+                has_exact_filesystem_checkpoint=True,
+                has_transfer_artifact=False,
+            )
+        )
+
+
+def test_conversational_thread_actions_are_exact_and_prompt_bound() -> None:
+    assert (
+        conversational_action("  Go ahead   in a new thread.  ")
+        is ThreadAction.CLEAR_AND_IMPLEMENT
+    )
+    assert conversational_action("fork this task") is ThreadAction.FORK_WORKSTREAM
+    assert conversational_action("start a new thread") is ThreadAction.START_THREAD
+    assert (
+        conversational_action("start a new workstream") is ThreadAction.START_WORKSTREAM
+    )
+    assert conversational_action("maybe fork this task please") is None
+    assert conversational_action("sounds good") is None
+    with pytest.raises(ThreadActionError):
+        decide_thread_action(
+            ActionObservation(
+                surface=ActionSurface.CONVERSATION,
+                action=ThreadAction.FORK_WORKSTREAM,
+                active_turn=True,
+                has_completed_turn=True,
+                has_exact_filesystem_checkpoint=True,
+                has_transfer_artifact=True,
+            )
+        )
+
+
+def test_fork_requires_settled_provider_and_filesystem_boundaries() -> None:
+    for overrides in (
+        {"has_completed_turn": False},
+        {"has_exact_filesystem_checkpoint": False},
+    ):
+        values = {
+            "surface": ActionSurface.NAVIGATOR,
+            "action": ThreadAction.FORK_WORKSTREAM,
+            "active_turn": True,
+            "has_completed_turn": True,
+            "has_exact_filesystem_checkpoint": True,
+            "has_transfer_artifact": False,
+        }
+        values.update(overrides)
+        with pytest.raises(ThreadActionError):
+            decide_thread_action(ActionObservation(**values))
+
+    with pytest.raises(ThreadActionError):
+        decide_thread_action(
+            ActionObservation(
+                surface=ActionSurface.NATIVE_PLAN,
+                action=ThreadAction.FORK_WORKSTREAM,
+                active_turn=False,
+                has_completed_turn=True,
+                has_exact_filesystem_checkpoint=True,
+                has_transfer_artifact=False,
+            )
+        )
+
+    with pytest.raises(ThreadActionError):
+        decide_thread_action(
+            ActionObservation(
+                surface=ActionSurface.CONVERSATION,
+                action=ThreadAction.CLEAR_AND_IMPLEMENT,
+                active_turn=False,
+                has_completed_turn=True,
+                has_exact_filesystem_checkpoint=True,
+                has_transfer_artifact=False,
+            )
+        )
+
+
+def test_retained_running_fork_fixture_is_sanitized_and_passing() -> None:
+    fixture = (
+        ROOT
+        / "spikes"
+        / "fixtures"
+        / "thread-workstream"
+        / "codex"
+        / "0.145.0"
+        / "running-source-fork.json"
+    )
+    retained = json.loads(fixture.read_text())
+    audit_sanitized_evidence(retained)
+    assert retained["status"] == "pass"
+    assert retained["assisted"] is False
+    assert all(retained["assertions"].values())
+    assert all(retained["isolation"].values())
+    assert all(retained["cleanup"].values())
+    encoded = fixture.read_text()
+    assert "/home/" not in encoded
+    assert "/tmp/" not in encoded
+    assert "threadId" not in encoded
+    assert "provider_input" not in encoded
+
+
+def test_retained_navigator_fork_fixture_is_sanitized_and_passing() -> None:
+    fixture = (
+        ROOT
+        / "spikes"
+        / "fixtures"
+        / "thread-workstream"
+        / "codex"
+        / "0.145.0"
+        / "navigator-running-fork.json"
+    )
+    retained = json.loads(fixture.read_text())
+    audit_sanitized_evidence(retained)
+    assert retained["status"] == "pass"
+    assert retained["assisted"] is False
+    assert all(retained["assertions"].values())
+    assert all(retained["isolation"].values())
+    assert all(retained["cleanup"].values())
+    encoded = fixture.read_text()
+    assert "/home/" not in encoded
+    assert "/tmp/" not in encoded
+    assert "threadId" not in encoded
+    assert "provider_input" not in encoded
 
 
 def test_repeated_adoption_rotates_identity_and_capability_atomically() -> None:

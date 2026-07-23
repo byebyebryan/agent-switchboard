@@ -10,7 +10,7 @@ import select
 import subprocess
 import tempfile
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
 
@@ -41,6 +41,7 @@ class CodexAppServer:
         self._buffer = b""
         self._received = 0
         self._next_id = 1
+        self._notifications: list[dict[str, Any]] = []
         self.request(
             "initialize",
             {
@@ -102,6 +103,8 @@ class CodexAppServer:
         while True:
             message = self._receive(deadline)
             if message.get("id") != request_id:
+                if isinstance(message.get("method"), str):
+                    self._notifications.append(message)
                 continue
             if "error" in message:
                 raise AppServerError(f"provider app server rejected {method}")
@@ -109,6 +112,37 @@ class CodexAppServer:
             if not isinstance(result, dict):
                 raise AppServerError("provider app server returned an invalid result")
             return result
+
+    def wait_notification(
+        self,
+        method: str,
+        *,
+        predicate: Callable[[Mapping[str, Any]], bool] | None = None,
+        timeout: float = RESPONSE_TIMEOUT_SECONDS,
+    ) -> dict[str, Any]:
+        """Wait for one matching notification without losing unrelated events."""
+
+        predicate = predicate or (lambda _params: True)
+        deadline = time.monotonic() + timeout
+        while True:
+            for index, message in enumerate(self._notifications):
+                params = message.get("params")
+                if (
+                    message.get("method") == method
+                    and isinstance(params, Mapping)
+                    and predicate(params)
+                ):
+                    return self._notifications.pop(index)
+            message = self._receive(deadline)
+            params = message.get("params")
+            if (
+                message.get("method") == method
+                and isinstance(params, Mapping)
+                and predicate(params)
+            ):
+                return message
+            if isinstance(message.get("method"), str):
+                self._notifications.append(message)
 
     def thread_read(
         self,

@@ -42,6 +42,7 @@ only-include = [
   "docs/phase-6f2-acceptance.md",
   "docs/thread-workstream-redesign-proposal.md",
   "docs/thread-workstream-redesign-decision.md",
+  "docs/thread-workstream-redesign-review.md",
   "docs/usage-tracking-discovery.md",
   "requirements-offline.txt",
   "scripts/build_offline_bundle.py",

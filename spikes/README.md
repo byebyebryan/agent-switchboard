@@ -53,11 +53,37 @@ plans runs with:
 ```
 
 The retained result proves the ordinary Plan implementation input can be held
-before sampling while its structured plan remains available. It also proves
-that conversational plan/result/acceptance events are observable, but natural
-language alone remains advisory; an explicitly selected plan supplies
-provider-neutral authority. See
+before sampling while its structured plan remains available. This is retained
+as optional-policy capability evidence; v1 keeps ordinary implementation in the
+current thread. It also proves that conversational plan/result/acceptance events
+are observable, but natural language alone remains advisory; an explicitly
+selected plan supplies artifact provenance and a user action supplies routing
+authority. See
 `docs/spikes/execution-intent-timing.md`.
+
+Stable-prefix fork while the source's next turn remains active runs with:
+
+```sh
+.venv/bin/python -m spikes.thread_workstream.running_fork_study \
+  --output \
+  spikes/fixtures/thread-workstream/codex/0.145.0/running-source-fork.json
+```
+
+The retained result proves an immediate alternative can run from the latest
+completed turn without copying or interrupting the source's in-progress turn.
+See `docs/spikes/navigator-running-fork.md`.
+
+The stronger same-TUI composition runs with:
+
+```sh
+.venv/bin/python -m spikes.thread_workstream.navigator_fork_study \
+  --output \
+  spikes/fixtures/thread-workstream/codex/0.145.0/navigator-running-fork.json
+```
+
+That retained result proves the original native TUI process, managed surface,
+working directory, and active turn remain stable while the forked alternative
+completes.
 
 Managed-worktree ownership runs with:
 

@@ -140,6 +140,7 @@ def audit_contents(wheel: Path, sdist: Path) -> dict[str, object]:
             "docs/phase-6f2-acceptance.md",
             "docs/thread-workstream-redesign-proposal.md",
             "docs/thread-workstream-redesign-decision.md",
+            "docs/thread-workstream-redesign-review.md",
             "docs/usage-tracking-discovery.md",
             "pyproject.toml",
             "requirements-offline.txt",

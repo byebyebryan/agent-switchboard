@@ -1,0 +1,56 @@
+{
+  "assertions": {
+    "baseline_turn_completed": true,
+    "disposable_repository_unchanged": true,
+    "fork_accepts_immediate_alternative_turn": true,
+    "fork_contains_only_settled_prefix": true,
+    "fork_identity_is_distinct": true,
+    "provider_records_source_lineage": true,
+    "source_command_observed_in_progress": true,
+    "source_interrupt_is_explicit_cleanup": true,
+    "source_prefix_remains_intact": true,
+    "source_turn_remains_active_after_alternative": true
+  },
+  "assisted": false,
+  "cleanup": {
+    "private_capture_deleted": true,
+    "temporary_root_deleted": true,
+    "unrelated_agent_processes_unchanged": true,
+    "unrelated_tmux_panes_unchanged": true
+  },
+  "contractFingerprint": "4242b14096f29619f86c3d27a832d853ceaa55cbf60bd4ae3fafda446b1e8a5c",
+  "eventOrder": [
+    "baseline-turn-completed",
+    "source-next-turn-command-started",
+    "stable-prefix-fork-created",
+    "fork-alternative-turn-completed",
+    "source-next-turn-still-running",
+    "source-turn-interrupted-for-cleanup"
+  ],
+  "installedVersion": "codex-cli 0.145.0",
+  "isolation": {
+    "disposable_repository": true,
+    "no_repository_remotes": true,
+    "private_provider_home": true,
+    "private_switchboard_root": true
+  },
+  "limitations": [
+    "filesystem isolation composes with separate managed worktree evidence",
+    "source interruption occurred only after concurrent fork proof"
+  ],
+  "privacyAudit": {
+    "credentialsExcluded": true,
+    "providerIdentifiersExcluded": true,
+    "providerInputExcluded": true,
+    "providerOutputExcluded": true,
+    "runtimeLocationsExcluded": true,
+    "runtimeProcessIdentifiersExcluded": true
+  },
+  "provider": "codex",
+  "schemaVersion": 1,
+  "status": "pass",
+  "study": "codex-running-source-stable-fork",
+  "timingsMs": {
+    "total": 8880
+  }
+}

@@ -102,14 +102,18 @@ acceptable; it cannot claim that blocking leaves no source record at all.
 
 ## Decision Impact
 
-The missing timing question for ordinary Plan implementation is answered
+The missing capability question for ordinary Plan implementation is answered
 positively: Switchboard can hold the execution turn before sampling and recover
 the exact structured plan while the source remains bound and usable. Combined
-with the previously proved transition machinery, this supports automatic
-fresh-thread cutover for the ordinary Plan action.
+with the previously proved transition machinery, this could support a future
+opt-in fresh-thread policy.
+
+The selected v1 behavior does not use that capability. Ordinary **implement
+this plan** continues in the current thread, while provider-native **clear
+context and implement** remains the explicit fresh-thread choice.
 
 Provider-neutral conversational rollover also has the necessary observation
 points, but not automatic semantic authority. The first production contract
 should use an explicit **implement selected plan in a fresh thread** action.
-Natural-language classification may suggest that action; it remains a separate
-study before it may route automatically.
+Natural-language classification may suggest that action but must not route
+automatically in v1.
