@@ -2,7 +2,13 @@
 
 Date: 2026-07-23
 
-Status: proposed for study; not an implemented or accepted contract
+Status: studies complete; direction accepted, proposed contracts remain unapproved
+
+> **Decision:** the
+> [Thread and Workstream Redesign Decision](thread-workstream-redesign-decision.md)
+> accepts this direction for clean-break production-contract design after the
+> core and secondary studies passed. This proposal remains non-normative and
+> none of its interfaces are approved or implemented.
 
 This proposal records a possible clean-break successor to the accepted Phase 6
 workspace/child/return workflow. It does not change the current registry,
@@ -509,5 +515,5 @@ design decision:
 - approve a clean-break thread/workstream contract, archive the superseded
   parent/child workflow, and plan implementation from the proven capabilities.
 
-No schema, command, hook, or frontend contract in this document is approved
-until that decision.
+The studies and decision are now complete. No schema, command, hook, or
+frontend contract in this document was approved by that directional decision.

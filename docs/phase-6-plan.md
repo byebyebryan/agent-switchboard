@@ -2,18 +2,17 @@
 
 Date: 2026-07-22
 
-Status: Phase 6A.1 through 6F.2 complete and accepted; Phase 6G paused
+Status: Phase 6A.1 through 6F.2 accepted; Phase 6G paused and superseded in direction
 
 Target core release: `0.3.4`
 
 Historical Phase 6E DMS rehearsal adapter: `0.5.0` (deferred, not paired)
 
-> **Roadmap review:** Phase 6A.1 through 6F.2 remain accepted history. Phase 6G
-> implementation is paused while the non-normative
-> [Thread and Workstream Redesign](thread-workstream-redesign-proposal.md)
-> tests provider-native fresh-thread handoff, persistent history, external
-> memory, and managed worktrees. The proposal does not change the installed
-> Phase 6 contract.
+> **Roadmap decision:** Phase 6A.1 through 6F.2 remain accepted history. The
+> [Thread and Workstream Redesign Decision](thread-workstream-redesign-decision.md)
+> accepts a clean-break direction after its bounded studies passed. Phase 6G
+> stays paused, its recursive return model is not the next implementation
+> target, and no replacement production contract is approved.
 
 ## Outcome
 
@@ -417,8 +416,8 @@ remains, and unrelated tmux/provider sessions retain their exact identities.
 
 ### Phase 6G: recursive task frames
 
-Status: paused before implementation pending the proposed thread/workstream
-studies.
+Status: paused before implementation; superseded as the next direction by the
+thread/workstream decision, whose production contract remains unapproved.
 
 - Lift the initial one-child limit to a bounded recursive stack.
 - Generalize WorkContext claim and foreground transfer across ancestors.
@@ -427,6 +426,8 @@ studies.
 
 Exit: task A pushes B, B returns exactly to A, and A returns exactly to the
 workspace while preserving checkout state, handoffs, and provider UUIDs.
+
+This exit remains historical and is not authorized for implementation.
 
 ## Deletion Matrix at Activation
 

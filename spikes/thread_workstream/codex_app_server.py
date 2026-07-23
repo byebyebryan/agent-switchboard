@@ -74,7 +74,9 @@ class CodexAppServer:
                 try:
                     value = json.loads(line)
                 except json.JSONDecodeError as error:
-                    raise AppServerError("provider app server returned invalid JSON") from error
+                    raise AppServerError(
+                        "provider app server returned invalid JSON"
+                    ) from error
                 if not isinstance(value, dict):
                     raise AppServerError("provider app server returned a non-object")
                 return value
@@ -140,7 +142,9 @@ class CodexAppServer:
             "thread/name/set",
             {"threadId": provider_identity, "name": name},
         )
-        return self.thread_read(provider_identity, include_turns=False).get("name") == name
+        return (
+            self.thread_read(provider_identity, include_turns=False).get("name") == name
+        )
 
     def close(self) -> None:
         if self._process.stdin is not None and not self._process.stdin.closed:

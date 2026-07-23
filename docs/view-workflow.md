@@ -2,14 +2,14 @@
 
 Date: 2026-07-22
 
-Status: Phase 6F.2 complete and accepted; Phase 6G paused for redesign studies
+Status: Phase 6F.2 accepted; Phase 6G paused, redesign contract unapproved
 
 > **Accepted historical workflow:** this document remains the implemented
-> Phase 6 behavior. The non-normative
-> [Thread and Workstream Redesign](thread-workstream-redesign-proposal.md)
-> studies a replacement that preserves completed result tips and adopts
-> provider-native fresh-thread transitions. Phase 6G implementation is paused
-> pending those studies.
+> Phase 6 behavior. The
+> [Thread and Workstream Redesign Decision](thread-workstream-redesign-decision.md)
+> accepts a future clean-break direction that preserves completed result tips
+> and adopts provider-native fresh-thread transitions. Its production contract
+> is unapproved, and Phase 6G implementation remains paused.
 
 ## Purpose
 

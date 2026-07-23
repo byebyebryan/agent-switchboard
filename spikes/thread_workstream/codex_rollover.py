@@ -163,9 +163,7 @@ def _write_minimal_codex_home(
         encoding="utf-8",
     )
     config.chmod(0o600)
-    command = shlex.join(
-        (sys.executable, str(hook_script), str(layout.private_events))
-    )
+    command = shlex.join((sys.executable, str(hook_script), str(layout.private_events)))
     handler = {
         "type": "command",
         "command": command,
@@ -284,16 +282,18 @@ class PrivateTmuxTui:
             command,
         )
         if not _wait_for(
-            lambda: _run(
-                layout.tmux_socket,
-                "display-message",
-                "-p",
-                "-t",
-                pane,
-                "#{pane_current_command}",
-                check=False,
-            ).stdout.strip()
-            == "codex",
+            lambda: (
+                _run(
+                    layout.tmux_socket,
+                    "display-message",
+                    "-p",
+                    "-t",
+                    pane,
+                    "#{pane_current_command}",
+                    check=False,
+                ).stdout.strip()
+                == "codex"
+            ),
             UI_TIMEOUT_SECONDS,
         ):
             raise LiveStudyError("Codex TUI did not start on the private pane")
@@ -315,12 +315,17 @@ class PrivateTmuxTui:
             False,
         )
         trust_prompt = "Do you trust the contents of this directory?"
-        if _wait_for(
-            lambda: trust_prompt in tui.capture_view()
-            or "\N{SINGLE RIGHT-POINTING ANGLE QUOTATION MARK}"
-            in tui.capture_view(),
-            UI_TIMEOUT_SECONDS,
-        ) and trust_prompt in tui.capture_view():
+        if (
+            _wait_for(
+                lambda: (
+                    trust_prompt in tui.capture_view()
+                    or "\N{SINGLE RIGHT-POINTING ANGLE QUOTATION MARK}"
+                    in tui.capture_view()
+                ),
+                UI_TIMEOUT_SECONDS,
+            )
+            and trust_prompt in tui.capture_view()
+        ):
             layout.validate()
             reject_repository(
                 layout.repository,
@@ -426,14 +431,16 @@ class PrivateTmuxTui:
         )
         self.key("C-c")
         if not _wait_for(
-            lambda: _run(
-                self.socket,
-                "has-session",
-                "-t",
-                "rollover",
-                check=False,
-            ).returncode
-            != 0,
+            lambda: (
+                _run(
+                    self.socket,
+                    "has-session",
+                    "-t",
+                    "rollover",
+                    check=False,
+                ).returncode
+                != 0
+            ),
             3.0,
         ):
             _run(self.socket, "kill-server", check=False)
@@ -456,7 +463,10 @@ def _event_count(
     return sum(
         1
         for event in events
-        if (provider_identity is None or event.get("provider_identity") == provider_identity)
+        if (
+            provider_identity is None
+            or event.get("provider_identity") == provider_identity
+        )
         and (kind is None or event.get("event") == kind)
         and (source is None or event.get("source") == source)
     )
@@ -585,9 +595,11 @@ def run_live_study(
             exactly_once: list[bool] = []
             for index, request in enumerate(PLAN_REQUESTS):
                 if not _wait_for(
-                    lambda: "\N{SINGLE RIGHT-POINTING ANGLE QUOTATION MARK}"
-                    in tui.capture_view()
-                    and "esc to interrupt" not in tui.capture_view().lower(),
+                    lambda: (
+                        "\N{SINGLE RIGHT-POINTING ANGLE QUOTATION MARK}"
+                        in tui.capture_view()
+                        and "esc to interrupt" not in tui.capture_view().lower()
+                    ),
                     UI_TIMEOUT_SECONDS,
                 ):
                     raise LiveStudyError("Codex TUI composer did not become idle")
@@ -616,11 +628,13 @@ def run_live_study(
                 if not identities:
                     events = _wait_event(
                         layout.private_events,
-                        lambda rows: _event_count(
-                            rows,
-                            kind="UserPromptSubmit",
-                        )
-                        == 1,
+                        lambda rows: (
+                            _event_count(
+                                rows,
+                                kind="UserPromptSubmit",
+                            )
+                            == 1
+                        ),
                     )
                     initial_prompts = [
                         event
@@ -634,18 +648,22 @@ def run_live_study(
                     identities.append(source_identity)
                 _wait_event(
                     layout.private_events,
-                    lambda rows, required=before_stops + 1: _event_count(
-                        rows,
-                        provider_identity=identities[-1],
-                        kind="Stop",
-                    )
-                    == required,
+                    lambda rows, required=before_stops + 1: (
+                        _event_count(
+                            rows,
+                            provider_identity=identities[-1],
+                            kind="Stop",
+                        )
+                        == required
+                    ),
                 )
                 if not _wait_for(
                     lambda: "Implement this plan?" in tui.capture_view(),
                     UI_TIMEOUT_SECONDS,
                 ):
-                    raise LiveStudyError("native plan implementation picker did not open")
+                    raise LiveStudyError(
+                        "native plan implementation picker did not open"
+                    )
                 if index == 0:
                     observations.assertions["source_named_before_rollover"] = (
                         app_server.set_name(identities[-1], "spike-thread-a")
@@ -653,8 +671,9 @@ def run_live_study(
                 tui.key("Down", "Enter")
                 events = _wait_event(
                     layout.private_events,
-                    lambda rows: _find_new_clear_identity(rows, set(identities))
-                    is not None,
+                    lambda rows: (
+                        _find_new_clear_identity(rows, set(identities)) is not None
+                    ),
                 )
                 destination = _find_new_clear_identity(events, set(identities))
                 if destination is None:
@@ -662,12 +681,14 @@ def run_live_study(
                 identities.append(destination)
                 events = _wait_event(
                     layout.private_events,
-                    lambda rows, identity=destination: _event_count(
-                        rows,
-                        provider_identity=identity,
-                        kind="UserPromptSubmit",
-                    )
-                    == 1,
+                    lambda rows, identity=destination: (
+                        _event_count(
+                            rows,
+                            provider_identity=identity,
+                            kind="UserPromptSubmit",
+                        )
+                        == 1
+                    ),
                 )
                 destination_events = [
                     event
@@ -694,12 +715,14 @@ def run_live_study(
                 )
                 _wait_event(
                     layout.private_events,
-                    lambda rows, identity=destination: _event_count(
-                        rows,
-                        provider_identity=identity,
-                        kind="Stop",
-                    )
-                    == 1,
+                    lambda rows, identity=destination: (
+                        _event_count(
+                            rows,
+                            provider_identity=identity,
+                            kind="Stop",
+                        )
+                        == 1
+                    ),
                 )
                 result_tip_checks.append(tui.stable_tip())
                 observations.assertions[f"destination_{index + 1}_nameable"] = (
@@ -846,9 +869,7 @@ def run_live_study(
         root = layout.root
         layout.cleanup()
         observations.cleanup["temporary_root_deleted"] = not root.exists()
-        observations.timings_ms["total"] = int(
-            (time.monotonic() - started) * 1_000
-        )
+        observations.timings_ms["total"] = int((time.monotonic() - started) * 1_000)
     if status is StudyStatus.PASS and (
         not all(observations.cleanup.values())
         or not all(observations.isolation.values())

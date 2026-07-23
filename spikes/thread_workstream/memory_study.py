@@ -82,8 +82,7 @@ def run_study() -> tuple[
     )
 
     assertions = {
-        "live_reference_full_continuity": live.profile
-        is ContinuityProfile.FULL,
+        "live_reference_full_continuity": live.profile is ContinuityProfile.FULL,
         "source_scope_exact": bool(live.source and live.source.scope_exact),
         "destination_scope_exact": bool(
             live.destination and live.destination.scope_exact

@@ -28,7 +28,10 @@ def test_clean_break_metadata_maps_only_replacement_runtime() -> None:
     assert "docs/phase-6e1-acceptance.md" in sdist["only-include"]
     assert "docs/phase-6f-acceptance.md" in sdist["only-include"]
     assert "docs/phase-6f2-acceptance.md" in sdist["only-include"]
+    assert "docs/thread-workstream-redesign-proposal.md" in sdist["only-include"]
+    assert "docs/thread-workstream-redesign-decision.md" in sdist["only-include"]
     assert "docs/usage-tracking-discovery.md" in sdist["only-include"]
+    assert not any(item.startswith("spikes/") for item in sdist["only-include"])
     assert "docs/phase-6e-activation.md" not in sdist["only-include"]
     assert "scripts/phase6e_cutover.py" not in sdist["only-include"]
     requirements = (ROOT / "requirements-offline.txt").read_text().splitlines()

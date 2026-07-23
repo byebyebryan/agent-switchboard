@@ -175,9 +175,7 @@ class HealthyReferenceAdapter:
 
     def observe(self, project_scope: str) -> MemoryObservation:
         started = time.monotonic()
-        health = json.loads(
-            self._read(f"{self._base_url}/api/health").decode("utf-8")
-        )
+        health = json.loads(self._read(f"{self._base_url}/api/health").decode("utf-8"))
         version = health.get("version")
         if isinstance(version, str) and version:
             self.installed_version = version
@@ -187,13 +185,10 @@ class HealthyReferenceAdapter:
             and health.get("mcpReady") is True
         )
         query = urllib.parse.urlencode({"project": project_scope})
-        context = self._read(
-            f"{self._base_url}/api/context/inject?{query}"
-        ).lower()
+        context = self._read(f"{self._base_url}/api/context/inject?{query}").lower()
         scope_marker = project_scope.casefold().encode("utf-8")
-        planning_context = (
-            b"workstream" in context
-            and (b"rollover" in context or b"clear context" in context)
+        planning_context = b"workstream" in context and (
+            b"rollover" in context or b"clear context" in context
         )
         return MemoryObservation(
             available=bool(context.strip()),

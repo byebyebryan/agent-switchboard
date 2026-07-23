@@ -108,7 +108,9 @@ class IsolationLayout:
             self.repository,
             self.private_events.parent,
         )
-        if self.root == Path("/") or not all(_inside(path, self.root) for path in roots):
+        if self.root == Path("/") or not all(
+            _inside(path, self.root) for path in roots
+        ):
             raise IsolationError("study roots must remain below the temporary root")
         marker = self.repository / MARKER_NAME
         if (
@@ -133,7 +135,10 @@ class IsolationLayout:
             raise IsolationError("study Codex home overlaps the selected user home")
         for name in ("SWB_V3_CONFIG_ROOT", "SWB_V3_STATE_ROOT"):
             inherited = os.environ.get(name)
-            if inherited and self.switchboard_state.resolve() == Path(inherited).resolve():
+            if (
+                inherited
+                and self.switchboard_state.resolve() == Path(inherited).resolve()
+            ):
                 raise IsolationError("study Switchboard state overlaps inherited state")
 
     def provider_environment(self) -> dict[str, str]:

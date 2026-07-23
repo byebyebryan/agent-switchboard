@@ -79,17 +79,14 @@ def run_study() -> tuple[str, str, StudyStatus, dict[str, bool], dict[str, bool]
             and first.location != second.location
             and len(discover_worktrees(layout.repository)) == initial_count + 2
         )
-        assertions["provider_working_directory_exact"] = (
-            subprocess.run(
-                ["pwd"],
-                cwd=manager.switch(first),
-                check=True,
-                capture_output=True,
-                text=True,
-                timeout=10,
-            ).stdout.strip()
-            == str(first.location)
-        )
+        assertions["provider_working_directory_exact"] = subprocess.run(
+            ["pwd"],
+            cwd=manager.switch(first),
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        ).stdout.strip() == str(first.location)
         assertions["workstream_switching_exact"] = (
             manager.switch(second) == second.location
             and manager.switch(shared) == layout.repository
@@ -127,8 +124,7 @@ def run_study() -> tuple[str, str, StudyStatus, dict[str, bool], dict[str, bool]
             ).stdout.splitlines()
         )
         assertions["exact_clean_managed_retirement"] = (
-            not first.location.exists()
-            and first.branch not in retained_branches
+            not first.location.exists() and first.branch not in retained_branches
         )
 
         dirty_file = second.location / "dirty.txt"
@@ -162,9 +158,7 @@ def run_study() -> tuple[str, str, StudyStatus, dict[str, bool], dict[str, bool]
             "retirement_ownership_forbidden",
         )
         assertions["mismatched_claim_rejected"] = _rejected(
-            lambda: manager.retire(
-                replace(second, branch="asb-spike/forged")
-            ),
+            lambda: manager.retire(replace(second, branch="asb-spike/forged")),
             "managed_claim_mismatch",
         )
         source = Path(__file__).with_name("worktrees.py").read_text()

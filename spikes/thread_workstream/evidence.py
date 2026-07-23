@@ -72,6 +72,12 @@ def _privacy_scan(value: object, *, key_path: tuple[str, ...] = ()) -> None:
             raise EvidenceError("evidence strings must be single-line")
 
 
+def audit_sanitized_evidence(value: object) -> None:
+    """Fail if a retained evidence value contains a private field or value."""
+
+    _privacy_scan(value)
+
+
 def assert_private_file(path: Path) -> None:
     """Require a bounded regular file readable only by its owner."""
 
@@ -126,12 +132,9 @@ class StudyResult:
     def as_dict(self) -> dict[str, Any]:
         if not self.study or not self.provider or not self.installed_version:
             raise EvidenceError("study identity is incomplete")
-        if (
-            len(self.contract_fingerprint) != 64
-            or any(
-                character not in "0123456789abcdef"
-                for character in self.contract_fingerprint
-            )
+        if len(self.contract_fingerprint) != 64 or any(
+            character not in "0123456789abcdef"
+            for character in self.contract_fingerprint
         ):
             raise EvidenceError("contract fingerprint must be lowercase SHA-256")
         if self.status.value not in ALLOWED_STATUSES:
@@ -218,6 +221,7 @@ __all__ = [
     "StudyResult",
     "StudyStatus",
     "assert_private_file",
+    "audit_sanitized_evidence",
     "sanitize_hook_order",
     "write_private_json",
 ]

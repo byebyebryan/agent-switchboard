@@ -26,6 +26,7 @@ from spikes.thread_workstream.evidence import (
     StudyResult,
     StudyStatus,
     assert_private_file,
+    audit_sanitized_evidence,
     sanitize_hook_order,
     write_private_json,
 )
@@ -154,9 +155,7 @@ def test_sanitized_result_rejects_provider_private_data(tmp_path: Path) -> None:
         with pytest.raises(EvidenceError):
             passing_result(limitations=[value]).as_dict()
     with pytest.raises(EvidenceError):
-        passing_result(
-            assertions={"provider_session_id_matches": True}
-        ).as_dict()
+        passing_result(assertions={"provider_session_id_matches": True}).as_dict()
 
     destination = tmp_path / "result.json"
     passing_result().write(destination)
@@ -285,9 +284,7 @@ def test_retained_trust_history_fixture_is_sanitized_and_passing() -> None:
     assert all(retained["assertions"].values())
     assert all(retained["isolation"].values())
     assert all(retained["cleanup"].values())
-    assert retained["limitations"] == [
-        "historical resume hook was not observed"
-    ]
+    assert retained["limitations"] == ["historical resume hook was not observed"]
     encoded = fixture.read_text()
     assert "/home/" not in encoded
     assert "/tmp/" not in encoded
@@ -448,12 +445,7 @@ def test_input_fence_drops_attempted_historical_input(tmp_path: Path) -> None:
     process = subprocess.Popen(
         [
             sys.executable,
-            str(
-                ROOT
-                / "spikes"
-                / "thread_workstream"
-                / "input_fence.py"
-            ),
+            str(ROOT / "spikes" / "thread_workstream" / "input_fence.py"),
             "--status",
             str(status),
             "--",
@@ -622,3 +614,15 @@ def test_retained_memory_fixture_is_sanitized_and_passing() -> None:
     assert "/tmp/" not in encoded
     assert "bounded accepted plan" not in encoded
     assert "memory_content" not in encoded
+
+
+def test_all_retained_thread_workstream_evidence_passes_privacy_audit() -> None:
+    fixture_root = ROOT / "spikes" / "fixtures" / "thread-workstream"
+    fixtures = sorted(fixture_root.rglob("*.json"))
+    assert len(fixtures) == 4
+    for fixture in fixtures:
+        retained = json.loads(fixture.read_text())
+        audit_sanitized_evidence(retained)
+        assert retained["status"] == "pass"
+        assert retained["assisted"] is False
+        assert all(retained["privacyAudit"].values())

@@ -157,7 +157,10 @@ class ManagedWorktrees:
     def create(self, slug: str, *, recorded_commit: str) -> WorktreeClaim:
         if (
             not slug
-            or any(character not in "abcdefghijklmnopqrstuvwxyz0123456789-" for character in slug)
+            or any(
+                character not in "abcdefghijklmnopqrstuvwxyz0123456789-"
+                for character in slug
+            )
             or slug.startswith("-")
             or slug.endswith("-")
         ):

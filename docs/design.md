@@ -2,17 +2,15 @@
 
 Date: 2026-07-22
 
-Status: Phase 6F.2 complete and accepted; Phase 6G paused for redesign studies
+Status: Phase 6F.2 accepted; Phase 6G paused, redesign contract unapproved
 
 Target release: `0.3.4`
 
-> **Proposed redesign under study:** the
-> [Thread and Workstream Redesign](thread-workstream-redesign-proposal.md)
-> records a possible clean-break successor based on provider-native thread
-> rollover, persistent result-tip visibility, workstreams, and managed
-> worktrees. It is non-normative and changes no accepted Phase 6 contract.
-> Phase 6G implementation is paused until its feasibility spikes and design
-> gate complete.
+> **Redesign decision:** the
+> [Thread and Workstream Redesign Decision](thread-workstream-redesign-decision.md)
+> accepts the provider-native thread/workstream direction after its bounded
+> studies passed. The proposal remains non-normative, no production contract
+> is approved, and Phase 6G implementation stays paused.
 
 The implemented `0.2.0` task-first product is historical input, not a
 compatibility boundary. Phase 6 replaced its registry, protocols, command

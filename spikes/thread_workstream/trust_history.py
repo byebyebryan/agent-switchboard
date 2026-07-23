@@ -70,7 +70,9 @@ def _provider_birth(event: Mapping[str, Any]) -> int | None:
 
 def _provider_exists(app_server: CodexAppServer, identity: str) -> bool:
     try:
-        return app_server.thread_read(identity, include_turns=False).get("id") == identity
+        return (
+            app_server.thread_read(identity, include_turns=False).get("id") == identity
+        )
     except RuntimeError:
         return False
 
@@ -84,10 +86,7 @@ def _event_after(
 ) -> tuple[int, Mapping[str, Any]]:
     for index in range(start + 1, len(events)):
         event = events[index]
-        if (
-            event.get("provider_identity") == identity
-            and event.get("event") == kind
-        ):
+        if event.get("provider_identity") == identity and event.get("event") == kind:
             return index, event
     raise LiveStudyError("live adoption event order was incomplete")
 
@@ -205,17 +204,14 @@ def _trust_and_history_probe_impl(
                     provider_ancestor=input_birth == tui.provider_birth,
                     provider_thread_exists=_provider_exists(app_server, destination),
                     carried_plan_digest=(
-                        _digest(carried_plan)
-                        if isinstance(carried_plan, str)
-                        else None
+                        _digest(carried_plan) if isinstance(carried_plan, str) else None
                     ),
                 )
             )
         )
 
-    capability_rotation = (
-        len(receipts) == 2
-        and all(receipt.capability_rotated for receipt in receipts)
+    capability_rotation = len(receipts) == 2 and all(
+        receipt.capability_rotated for receipt in receipts
     )
     semantic_lineage = all(
         receipt.classification is TransitionClassification.TASK_TRANSITION
@@ -270,14 +266,16 @@ def _trust_and_history_probe_impl(
         "#{pane_id}",
     ).stdout.strip()
     navigator_visible = _wait_for(
-        lambda: "Transition: confirmed"
-        in _run(
-            layout.tmux_socket,
-            "capture-pane",
-            "-p",
-            "-t",
-            navigator_pane,
-        ).stdout,
+        lambda: (
+            "Transition: confirmed"
+            in _run(
+                layout.tmux_socket,
+                "capture-pane",
+                "-p",
+                "-t",
+                navigator_pane,
+            ).stdout
+        ),
         10,
     )
     provider_tip_after_navigator = tui.capture()
@@ -349,18 +347,22 @@ def _trust_and_history_probe_impl(
             "#{pane_id}",
         ).stdout.strip()
         fence_started = _wait_for(
-            lambda: fence_status.exists()
-            and _private_status(fence_status).get("childStarted") is True,
+            lambda: (
+                fence_status.exists()
+                and _private_status(fence_status).get("childStarted") is True
+            ),
             15,
         )
         resume_observed = _wait_for(
-            lambda: _event_count(
-                _read_events(layout.private_events),
-                provider_identity=source,
-                kind="SessionStart",
-                source="resume",
-            )
-            == before_resumes + 1,
+            lambda: (
+                _event_count(
+                    _read_events(layout.private_events),
+                    provider_identity=source,
+                    kind="SessionStart",
+                    source="resume",
+                )
+                == before_resumes + 1
+            ),
             30,
         )
         if not resume_observed:
@@ -390,9 +392,11 @@ def _trust_and_history_probe_impl(
             "Enter",
         )
         input_dropped = _wait_for(
-            lambda: fence_status.exists()
-            and isinstance(_private_status(fence_status).get("droppedBytes"), int)
-            and _private_status(fence_status)["droppedBytes"] >= len(forbidden),
+            lambda: (
+                fence_status.exists()
+                and isinstance(_private_status(fence_status).get("droppedBytes"), int)
+                and _private_status(fence_status)["droppedBytes"] >= len(forbidden)
+            ),
             10,
         )
         time.sleep(2)
@@ -442,8 +446,10 @@ def _trust_and_history_probe_impl(
             check=False,
         )
         _wait_for(
-            lambda: fence_status.exists()
-            and _private_status(fence_status).get("childStarted") is False,
+            lambda: (
+                fence_status.exists()
+                and _private_status(fence_status).get("childStarted") is False
+            ),
             5,
         )
         fence_stopped = (
@@ -486,8 +492,7 @@ def _trust_and_history_probe_impl(
         "historical_turns_unchanged": before_turns == after_turns,
         "historical_no_input_submitted": before_inputs == after_inputs,
         "active_tip_remained_current": (
-            machine.current.provider_identity == identities[2]
-            and target == "thread-c"
+            machine.current.provider_identity == identities[2] and target == "thread-c"
         ),
         "returned_in_one_action": action_count == 1 and active_window == "provider",
         "provider_tip_unchanged_after_history": (
