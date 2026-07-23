@@ -46,8 +46,8 @@ Generation and CLI tests prove:
 
 The existing Phase 6D workflow acceptance remains the task-transition gate: one
 workspace pushes one child, completion returns exactly to the parent, and the
-fixed control turn is submitted once. Phase 6F, not this closure slice, lifts
-that one-child bound.
+fixed control turn is submitted once. Phase 6G, after the TUI-first Phase 6F
+adoption gate, lifts that one-child bound.
 
 ## Validation gates
 

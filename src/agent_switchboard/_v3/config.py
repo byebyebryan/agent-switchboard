@@ -81,7 +81,7 @@ class DefaultsConfig:
 
 @dataclass(frozen=True, slots=True)
 class ViewsConfig:
-    cli_default_mode: ViewMode = ViewMode.DIRECT
+    cli_default_mode: ViewMode = ViewMode.NAVIGATOR
     desktop_default_mode: ViewMode = ViewMode.NAVIGATOR
 
 
@@ -559,7 +559,9 @@ def _parse_views(raw: object) -> ViewsConfig:
     _known(table, {"cli_default_mode", "desktop_default_mode"}, "views")
     return ViewsConfig(
         _enum(
-            table.get("cli_default_mode", "direct"), "views.cli_default_mode", ViewMode
+            table.get("cli_default_mode", "navigator"),
+            "views.cli_default_mode",
+            ViewMode,
         ),
         _enum(
             table.get("desktop_default_mode", "navigator"),

@@ -471,10 +471,10 @@ HostStateCache
 ```
 
 Recoveries caused by external side-effect uncertainty are durable and have
-stable IDs. Pure projection warnings may remain derived. DMS may execute only
-`safe_auto`; `open_view` focuses the core recovery panel, and `manual` is
-informational until the user enters core. Checkout/background ambiguity is
-never a DMS mutation.
+stable IDs. Pure projection warnings may remain derived. An optional frontend
+adapter may execute only `safe_auto`; `open_view` focuses the core recovery
+panel, and `manual` is informational until the user enters core.
+Checkout/background ambiguity is never an adapter mutation.
 
 One unexpired desktop attachment lease exists per view. Presentation fallback
 with the same semantic request may claim it. A concurrent different request
@@ -526,13 +526,13 @@ live local HostState with individually validated cached remote states. Structura
 are ordered by host ID then stable entity ID. Cached/remote state never grants
 mutation authority. Every host row carries its owner generation ID and an
 explicit `stale` boolean in addition to reachability. The top-level generation
-is always the local generation and is the only valid DMS cache provenance.
+is always the local generation and is the only valid frontend-cache provenance.
 
 View rows are presentation-ready summaries authored by core. In addition to
 identity, mode, state, revision, and active frame/project IDs, they carry title,
 breadcrumb, activity, attention, transition/control state, and last activity.
-DMS does not re-derive any of these fields and NavigatorState never contains a
-desktop token.
+Frontends do not re-derive any of these fields and NavigatorState never
+contains a desktop token.
 
 Both envelopes retain the existing safety ceilings: 8 MiB encoded JSON, depth
 32, 64 KiB per string, 100,000 array items, and 256 object keys. Bounded
@@ -557,15 +557,15 @@ error                 required only for blocked
 ```
 
 The core command has already committed or revalidated the semantic view action
-before returning this desktop directive. `switch` is not a DMS directive.
+before returning this desktop directive. `switch` is not a frontend directive.
 Mutation requests carry expected revisions where the caller addresses an exact
 view/frame; the result does not call a precondition “expected.” High-level
 project entry resolves a live route and applies its own revision CAS.
 
-The DMS focus-miss retry reuses the request ID with desktop focus disabled.
-Because presentation capability is excluded from the semantic fingerprint,
-this retry may receive the one attach lease without repeating project/frame
-navigation.
+An optional desktop adapter's focus-miss retry reuses the request ID with
+desktop focus disabled. Because presentation capability is excluded from the
+semantic fingerprint, this retry may receive the one attach lease without
+repeating project/frame navigation.
 
 ## Config v3 Defaults
 
@@ -578,7 +578,7 @@ host_id = "<non-nil UUID>"
 display_name = "<bounded name>"
 
 [views]
-cli_default_mode = "direct"
+cli_default_mode = "navigator"
 desktop_default_mode = "navigator"
 
 [automation]

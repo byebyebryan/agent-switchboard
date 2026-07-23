@@ -1,24 +1,28 @@
 # Agent Switchboard Design
 
-Date: 2026-07-21
+Date: 2026-07-22
 
-Status: Phase 6E.1 operational closure complete; Phase 6F recursive frames are next
+Status: Phase 6E.1 operational closure complete; Phase 6F TUI-first adoption is in progress
 
 Target release: `0.3.0`
 
 The implemented `0.2.0` task-first product is historical input, not a
 compatibility boundary. Phase 6 replaced its registry, protocols, command
-surface, terminal UI, and DMS model in one completed clean break. Normative
-storage/state rules are in [State and Control-Turn Contract](state-contract.md),
+surface, terminal UI, and optional desktop-adapter model in one completed
+technical clean break. This did not cut the user's normal workflow over to
+Switchboard; native tooling remains primary until a separate adoption gate.
+Normative storage/state rules are in
+[State and Control-Turn Contract](state-contract.md),
 user behavior is in [View and Frame Workflow](view-workflow.md), and delivery is
 in [Phase 6 Plan](phase-6-plan.md).
 
 ## Summary
 
 Switchboard owns durable user views around unmodified Codex and Claude Code
-terminal UIs. A view is a host-local navigation cursor backed by tmux. It may
-show a compact navigator beside the active provider pane or operate as one
-direct provider pane with no Switchboard UI process.
+terminal UIs. A view is a host-local navigation cursor backed by tmux. Its
+primary mode shows a compact resident navigator beside the active provider
+pane. Direct mode keeps the same durable view and active provider as one pane
+with no Switchboard UI process.
 
 The durable unit of user work is a `Frame`. Each project has one workspace root
 frame per host. Focused tasks are child frames. A frame may roll through several
@@ -36,7 +40,8 @@ handoffs, visible fixed control turns, and trusted post-turn transitions.
 - Enter a project workspace without first creating or selecting a task.
 - Move transparently from workspace to focused task and back again.
 - Preserve native provider UI state while switching projects and tasks.
-- Offer a persistent navigator without requiring it in direct mode.
+- Make the persistent navigator the primary project/task switching surface
+  while preserving a minimal direct mode.
 - Use agents at semantic task boundaries without adding model latency to plain
   navigation or lifecycle operations.
 - Keep provider sessions, panes, views, frames, and checkouts as separate
@@ -72,8 +77,14 @@ It never kills a tmux server or uses a provider-wide outage as an activation
 mechanism.
 
 Global provider hooks must no-op when pane-local Switchboard authority is wholly
-absent. DMS is optional: SSH users attach directly to a persistent tmux view.
-The full operational contract is [Runtime Operations and Safety](operations.md).
+absent. Before explicit adoption, Switchboard testing uses isolated provider
+homes, tmux servers, state roots, views, and new test sessions. Existing native
+sessions and normal provider hook configuration remain untouched.
+
+SSH users attach directly to a persistent tmux view. DMS and other desktop
+adapters are deferred convenience entry points, not runtime or acceptance
+dependencies. The full operational contract is
+[Runtime Operations and Safety](operations.md).
 
 ## Core Model
 
@@ -331,20 +342,21 @@ parking, closing, and recovery; no daemon remains.
 
 ## Frontends
 
-The Textual frontend is replaced by a resident compact sidebar showing current
+The primary frontend is the resident compact Textual sidebar showing current
 breadcrumb, projects, open frames, attention, transition/control status, and
 recovery. Focused settings/history/recovery may use a popup or temporary
 full-window view. There is no Open/Inbox/Closed administrative application.
 
-DMS is entry/recovery only:
+Direct mode is the minimal frontend. The native provider occupies the whole
+view, while agent tools, commands, and trusted managed-session hooks perform
+the same frame transitions. Returning to navigator mode recreates only the
+sidebar.
 
-- `Views`: focus/attach the exact current view;
-- `Projects`: explicitly navigate the owning view or create one; and
-- `Recovery`: run safe idempotent repairs or open the core recovery panel.
-
-One canonical DMS desktop client exists per `(HostId, ViewId)`. Other ordinary
-tmux clients remain supported but do not share that desktop identity. Ambiguous
-matching desktop windows block rather than launch another.
+DMS work is frozen during TUI-first adoption. A later desktop adapter may offer
+`Views`, `Projects`, and safe recovery as a dumb entry/focus convenience over
+the same bounded public directives. It must not own navigation semantics,
+provider lifecycle, tmux, or acceptance. No DMS service or plugin restart is a
+core development or release step.
 
 ## Remote Hosts
 
@@ -399,8 +411,8 @@ The exact staged activation/rollback sequence is in the Phase 6 plan.
 - Agent mutation authority is exact-frame/session/pane/generation scoped.
 - The only terminal control prompt is fixed, visible, literal, and versioned.
 - Hook payloads retain identity/status evidence, never prompt/response content.
-- DMS projections exclude paths, credentials, SSH/tmux targets, prompts,
-  transcripts, provider argv, and agent capability material.
+- Optional frontend projections exclude paths, credentials, SSH/tmux targets,
+  prompts, transcripts, provider argv, and agent capability material.
 - Provider metadata writes are presentation-only, never routing authority.
 - Offline conversion never mutates its source and activation fails closed on a
   torn generation.
@@ -418,6 +430,8 @@ The exact staged activation/rollback sequence is in the Phase 6 plan.
   child on exact handoff claim.
 - Projects navigate; Views focus as-is.
 - WorkContext claims are temporary, generation-fenced, and host-global.
-- DMS is a dumb entry/recovery picker with one canonical desktop client.
+- The resident TUI is primary; direct mode is the no-TUI alternative.
+- DMS is deferred as a dumb optional entry/focus adapter and is not an
+  acceptance gate.
 - Snapshot v2 and Fleet v1 end at the `0.2` boundary.
 - Recursive task flow is enabled only after one-child ownership acceptance.

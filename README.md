@@ -1,15 +1,19 @@
 # Switchboard
 
 Switchboard is a persistent user view over provider-native coding-agent
-sessions. It owns host-local project/task frames and tmux presentation while
-Codex and Claude Code continue to own conversation history and terminal UI.
+sessions. Its primary interface is a tmux-resident navigator beside the active
+native provider pane; direct single-pane mode remains available when no
+Switchboard UI is wanted. Switchboard owns host-local project/task frames and
+tmux presentation while Codex and Claude Code continue to own conversation
+history and terminal UI.
 
 ## Release shape
 
 Core `0.3.0` is the clean-break Phase 6 generation. It exposes only Config v3,
 registry schema v1, HostState/NavigatorState/PresentationDirective v1, and the
-view/frame workflow. Snapshot/Fleet, task-first CRUD, the administrative TUI,
-old migrations, and compatibility aliases are not installed.
+view/frame workflow. Snapshot/Fleet, task-first CRUD, the old administrative
+TUI, old migrations, and compatibility aliases are not installed. The compact
+resident navigator is the current primary UI.
 
 The offline `cutover export` command is the only component that understands an
 exact Config v2/schema-v10 source. It requires a quiescent legacy registry and
@@ -46,11 +50,17 @@ state is presentation-only; every mutation executes and revalidates on its
 owner host. Provider versions are strict observations rather than allowlists:
 missing/malformed executables and behavioral or identity mismatch fail closed.
 
-The `0.3.0` artifact is paired with DMS adapter `0.5.0`. Their one-time Phase 6E
-activation and Phase 6E.1 operational closure are complete. The coordinator is
-intentionally not shipped: `init` and `reset` publish fresh committed
-generations without provider or tmux lifecycle operations. Existing Codex and
-Claude Code sessions never need to stop.
+Phase 6E used DMS adapter `0.5.0` for a one-time technical activation rehearsal;
+that adapter is no longer a release, development, or acceptance dependency.
+DMS integration is deferred as an optional convenience entry point after the
+TUI-first workflow is accepted.
+
+Switchboard is still in pre-adoption validation. Normal work continues through
+native Codex, Claude Code, and tmux. Testing uses isolated Switchboard roots,
+tmux servers, views, and provider sessions; it does not stop existing agents,
+restart user tmux, edit normal provider hooks, or restart DMS. `init` and
+`reset` publish fresh committed generations without provider or tmux lifecycle
+operations.
 
 Design and operations:
 

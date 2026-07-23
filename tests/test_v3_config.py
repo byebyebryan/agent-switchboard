@@ -121,7 +121,7 @@ def test_minimal_v3_configuration_has_phase6_defaults() -> None:
         ProviderId.CLAUDE,
     ]
     assert all(provider.enabled for provider in config.providers)
-    assert config.views.cli_default_mode is ViewMode.DIRECT
+    assert config.views.cli_default_mode is ViewMode.NAVIGATOR
     assert config.views.desktop_default_mode is ViewMode.NAVIGATOR
     assert config.automation.task_push is TaskPushPolicy.CONSERVATIVE
     assert config.automation.complete_return is CompleteReturnPolicy.SYNTHESIZE

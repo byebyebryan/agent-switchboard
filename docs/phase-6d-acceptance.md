@@ -110,8 +110,9 @@ with real tmux; the earlier retained provider probes establish the exact
 
 Phase 6D remains private. It does not install replacement hooks, register a new
 public `swbctl`, activate Config v3, change live user state, or change DMS.
-Phase 6E completed the one-time coordinated core/DMS clean break. Its provider
-quiescence was historical activation machinery, not a reusable operating model.
+Phase 6E completed a one-time coordinated core/DMS technical activation
+rehearsal. Its provider quiescence was historical activation machinery, not a
+workflow cutover or reusable operating model.
 Post-activation work follows [Runtime Operations and Safety](operations.md):
 Switchboard may discard its own state but never requires existing agents to
 stop.

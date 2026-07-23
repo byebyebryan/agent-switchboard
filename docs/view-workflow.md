@@ -34,8 +34,9 @@ current work in this project.” These are separate facts.
 
 ## Defaults
 
-- A new DMS desktop view starts in navigator mode.
-- A new CLI/SSH view starts in direct mode.
+- A new CLI/SSH view starts in navigator mode.
+- Direct mode is an explicit minimal/no-TUI choice.
+- A future optional desktop adapter may also request navigator mode.
 - Reopening a view preserves its mode.
 - `Views` focuses as-is; `Projects` explicitly navigates.
 - Automatic task push is conservative and project-configurable.
@@ -49,7 +50,7 @@ current work in this project.” These are separate facts.
 ## Happy Path: Project to Task to Project
 
 ```text
-DMS or CLI opens project
+CLI/TUI opens project
   -> core focuses/creates its host-local view
   -> view presents the project's current open frame or workspace
   -> user asks for a substantial outcome
@@ -81,7 +82,7 @@ Project activation is explicit navigation:
    view, falling back to the workspace frame.
 4. Commit the target with a live view-revision CAS, then focus/attach the view.
 5. If the workspace has no placement, single-flight creation of one
-   navigator-mode DMS view or direct-mode CLI view.
+   navigator-mode CLI view unless direct mode was explicitly requested.
 6. Missing defaults, checkout conflicts, or stale ownership become bounded
    blocked/recovery results.
 
@@ -283,20 +284,22 @@ preserved/restored as display state and never changes durable mode.
 - A view never navigates to a remote frame; remote selection opens a separate
   SSH-backed host-local view.
 
-An SSH client does not require DMS. `swbctl view list` discovers the durable
-local views and `swbctl view attach --view VIEW` revalidates one view, acquires
-its own bounded attachment lease, and execs the exact tmux attach command. It
-never starts or resumes a provider. A provider `frame reopen` reports success
-only after the exact surface has moved from holding into `view.main`.
+An SSH client uses the primary terminal-native path. `swbctl view list`
+discovers durable local views and `swbctl view attach --view VIEW` revalidates
+one view, acquires its own bounded attachment lease, and execs the exact tmux
+attach command. It never starts or resumes a provider. A provider `frame
+reopen` reports success only after the exact surface has moved from holding
+into `view.main`.
 
-## DMS Entry and Recovery
+## Optional Desktop Entry and Recovery
 
-DMS lists Views, Projects, then structural Recovery. It never lists normal tasks
-or provider sessions.
+A future dumb desktop adapter may list Views, Projects, then structural
+Recovery. It never lists normal tasks or provider sessions and does not
+participate in the TUI-first adoption gate.
 
 - View selection preserves active frame/mode.
 - Project selection performs the explicit project route.
-- One canonical DMS desktop client exists per view; other tmux clients do not
+- One canonical desktop-adapter client exists per view; other tmux clients do not
   share its compositor identity.
 - Concurrent launch fallback uses one expiring desktop lease.
 - Multiple matching canonical windows block instead of launching another.
@@ -341,8 +344,8 @@ Phase 6D implementation and guarded installed-provider evidence are recorded in
 
 ## Acceptance Scenarios
 
-1. DMS Project entry navigates to that project; View entry focuses as-is.
-2. CLI Project entry uses the same route with direct-mode creation default.
+1. TUI Project entry navigates to that project; View entry focuses as-is.
+2. CLI Project entry uses the same route with navigator-mode creation default.
 3. Reopening preserves view mode and active frame.
 4. Push releases exactly one child brief only after foreground transfer.
 5. Retried push creates no duplicate frame, UUID, launch, pane, or handoff.

@@ -2,18 +2,23 @@
 
 Date: 2026-07-22
 
-Status: Phase 6A.1 through 6E.1 complete; Phase 6F is next
+Status: Phase 6A.1 through 6E.1 complete; Phase 6F TUI-first adoption is in progress
 
 Target core release: `0.3.0`
 
-Target DMS adapter release: `0.5.0`
+Historical Phase 6E DMS rehearsal adapter: `0.5.0` (deferred, not paired)
 
 ## Outcome
 
 Phase 6 replaced the `0.2` task-first product with durable host-local views,
-unified workspace/task frames, a resident optional navigator, direct mode, and
-agent-driven foreground transitions. Core and DMS completed their one-time
-coordinated activation. No old public contract remains active.
+unified workspace/task frames, a resident navigator, direct mode, and
+agent-driven foreground transitions. Core and DMS completed a one-time
+technical activation rehearsal, but Switchboard has not replaced the user's
+normal native workflow. No old Switchboard public contract remains active.
+
+The resident TUI is now the primary product surface. Direct mode is the
+minimal/no-TUI alternative. DMS is demoted to a deferred convenience adapter
+and is no longer a paired release, development dependency, or acceptance gate.
 
 The architecture is in [the design](design.md), exact user behavior is in
 [View and Frame Workflow](view-workflow.md), and canonical ownership, state,
@@ -40,6 +45,10 @@ This policy describes historical data conversion, not future operations. The
 coordinator is retired. Development resets discard Switchboard-owned state and
 never quiesce existing providers; see
 [Runtime Operations and Safety](operations.md).
+
+The completed technical activation did not authorize workflow adoption.
+Native Codex, Claude Code, and tmux sessions remain the active workflow until a
+future explicit user cutover after Phase 6F acceptance.
 
 ## Replacement Contracts
 
@@ -75,10 +84,11 @@ leaseExpiresAt        required only for attach
 error                 required only for blocked
 ```
 
-`focus` targets the one canonical DMS desktop client. `attach` grants one
-expiring lease after focus miss. `blocked` is bounded and actionable. DMS never
-receives a tmux target, provider command, semantic `switch`, or authority to
-repeat navigation.
+`focus` targets one canonical optional desktop client. `attach` grants one
+expiring lease after focus miss. `blocked` is bounded and actionable. A
+frontend never receives a tmux target, provider command, semantic `switch`, or
+authority to repeat navigation. This contract remains available for a later
+desktop adapter but is not part of the current TUI-first gate.
 
 ### Canonical mutable state
 
@@ -170,7 +180,7 @@ config_version = 3
 generation_id = "<opaque-id>"
 
 [views]
-cli_default_mode = "direct"
+cli_default_mode = "navigator"
 desktop_default_mode = "navigator"
 
 [automation]
@@ -284,9 +294,9 @@ Exit: deterministic failures and guarded installed Codex/Claude acceptance prove
 one workspace-child-parent flow, semantic parent synthesis, exact child close,
 and no duplicate prompt or runtime.
 
-### Phase 6E: coordinated activation — complete
+### Phase 6E: technical activation rehearsal — complete
 
-- Core `0.3.0` and DMS `0.5.0` committed on both hosts with exact artifact,
+- Core `0.3.0` and DMS `0.5.0` rehearsed on both hosts with exact artifact,
   staged-read, DMS cold/warm cache, and remote online/offline evidence.
 - The selected Codex UUID resumed and the old installed contracts disappeared.
 - Post-activation acceptance found and fixed unmanaged global-hook failure and
@@ -295,9 +305,11 @@ and no duplicate prompt or runtime.
   source-distribution surfaces. Git history and the private activation
   workspace retain the exact evidence.
 
-Exit: installed core and DMS expose no old command/protocol/cache route;
-local/two-host acceptance passed; operational ownership now follows
-[Runtime Operations and Safety](operations.md).
+Exit: installed core and DMS exposed no old command/protocol/cache route and
+local/two-host technical acceptance passed. This was not user-workflow
+adoption. Operational ownership now follows
+[Runtime Operations and Safety](operations.md), and DMS is no longer a paired
+release gate.
 
 ### Phase 6E.1: operational closure — complete
 
@@ -316,7 +328,29 @@ Exit: empty roots become a usable committed generation without CutoverBundle;
 reset abandons Switchboard state without stopping user work; exact acceptance is
 recorded in [Phase 6E.1 Acceptance](phase-6e1-acceptance.md).
 
-### Phase 6F: recursive task frames
+### Phase 6F: TUI-first coexistence and adoption gate
+
+- Make navigator mode the default for new CLI/SSH views while keeping direct
+  mode one explicit toggle away.
+- Provide a one-command terminal entry path that opens or reuses a project/view
+  and attaches its persistent tmux navigator without a desktop adapter.
+- Complete the resident navigator's project, view, task, attention, transition,
+  history, and recovery interactions against NavigatorState and owner-routed
+  actions.
+- Prove the happy path from the primary TUI: project to task, task close/return,
+  continued project work, project-to-project switching, task-to-task switching,
+  detach, reattach, and navigator/direct toggles.
+- Validate only with temporary roots, an isolated tmux server, and disposable
+  Switchboard-managed provider sessions. Do not install normal-provider hooks,
+  restart DMS, or stop/restart/detach/resume any existing agent session.
+- Keep DMS frozen; no adapter version, cache, compositor, or service result may
+  participate in the exit gate.
+
+Exit: the terminal-native navigator is sufficient for daily local use, direct
+mode preserves the same view/runtime, failure leaves native work intact, and
+the user can make a separate explicit decision about workflow adoption.
+
+### Phase 6G: recursive task frames
 
 - Lift the initial one-child limit to a bounded recursive stack.
 - Generalize WorkContext claim and foreground transfer across ancestors.
@@ -345,10 +379,11 @@ Retain only in history, the non-packaged archive, or cutover fixtures: Phase
 0-5 records, rejected provider/supervisor evidence, old fixtures required by the
 offline exporter, and sanitized rehearsal bundles.
 
-## Post-activation operations
+## Pre-adoption and post-rehearsal operations
 
 There is no reusable live-cutover runbook. Switchboard configuration, registry,
-cache, generated view, and DMS state remain disposable during development.
+cache, generated view, and optional-adapter state remain disposable during
+development.
 Existing provider sessions and unrelated tmux state remain outside every reset,
 upgrade, rollback, and cleanup boundary.
 
@@ -375,11 +410,11 @@ or resuming another provider process.
 - Workflow: workspace entry, push, claim, Back, Complete-return synthesis,
   Human close, Cancel, supersession, park safety, one-child depth, and uncertain
   live submission without retry.
-- Frontends: compact navigator, direct recovery, DMS model v1, Projects
-  navigation, Views focus, cold/warm cache provenance, one desktop client,
-  Ghostty attach lease, niri focus, and remote view presentation.
+- Frontends: compact navigator, direct recovery, Projects navigation, Views
+  focus, one-command terminal entry, local/remote view presentation, and no
+  desktop-adapter dependency.
 - Clean break: removed commands are unknown, old DB/config fail with one
   cutover-required diagnostic, old DMS cache is ignored, and built artifacts
   contain no old active protocol/frontend modules.
 - Packaging: full tests, lint, `git diff --check`, two byte-identical builds,
-  content audit, clean-wheel install, and installed paired smoke tests.
+  content audit, clean-wheel install, and isolated init/reset/navigator smokes.

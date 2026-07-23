@@ -14,6 +14,28 @@ must never require an existing agent session to stop, restart, detach, or
 resume. If Switchboard cannot change safely while agents continue running,
 Switchboard remains offline or on its prior version until a safe path exists.
 
+## Pre-adoption coexistence
+
+Switchboard has not replaced the user's native workflow. Until an explicit
+adoption decision follows TUI-first acceptance, normal Codex, Claude Code, and
+tmux work continues independently of Switchboard.
+
+The default development boundary is:
+
+- temporary Switchboard config/state roots and an isolated tmux socket;
+- disposable Switchboard views and new test provider sessions only;
+- temporary provider homes for hook and launch acceptance;
+- no stop, close, restart, detach, resume, or hook edit for an existing native
+  agent session; and
+- no DMS plugin replacement, service restart, cache requirement, or compositor
+  action as a core test or release prerequisite.
+
+An explicitly selected Switchboard-managed test view may be disrupted by the
+test that owns it. That authority does not extend to another view, the user's
+normal tmux server, a discovered provider session, or any host-wide agent
+process. A full workflow cutover is a future user decision, not something an
+installer, migration, acceptance script, or release may infer.
+
 ## Ownership boundary
 
 Switchboard may observe provider sessions discovered through bounded provider
@@ -25,10 +47,10 @@ and only through the user or agent action that owns that lifecycle operation.
 It never kills a tmux server or treats an unrelated provider process as cleanup.
 
 Switchboard configuration, registries, caches, generated views, releases, and
-DMS state may be discarded during development. A reset removes only those
-Switchboard-owned resources. Provider history, provider processes, user tmux
-sessions, repositories, checkouts, and unrelated hook configuration remain
-outside the reset boundary.
+optional-adapter state may be discarded during development. A reset removes
+only those Switchboard-owned resources. Provider history, provider processes,
+user tmux sessions, repositories, checkouts, and unrelated hook configuration
+remain outside the reset boundary.
 
 Remote hosts update independently. No release or reset requires a coordinated
 agent outage across hosts.
@@ -52,11 +74,10 @@ Therefore:
 A broken hook is contained by removing only Switchboard-owned handlers. Agent
 sessions continue running while the hook is repaired and tested in isolation.
 
-## SSH-first view access
+## TUI-first view access
 
-DMS is an optional desktop picker, not an attachment requirement. From a plain
-SSH shell, list durable views and attach directly through the owner-host tmux
-server:
+The resident navigator is the primary interface. From a plain SSH shell, list
+durable views and attach directly through the owner-host tmux server:
 
 ```sh
 swbctl view list
@@ -72,11 +93,16 @@ Do not run `codex resume` or `claude --resume` after Switchboard has already
 opened the managed surface; that would create a second runtime for the same
 provider session.
 
+Direct mode remains available for a single native-provider pane. DMS is
+deferred as a later optional desktop entry/focus adapter and is not required to
+create, attach, recover, test, or release a view.
+
 ## Development and release workflow
 
-Builds, migrations, DMS adapters, hook behavior, and tmux mechanics are first
-validated against temporary config/state roots and isolated tmux servers. Live
-acceptance uses new disposable Switchboard views and test provider sessions.
+Builds, migrations, hook behavior, navigator behavior, and tmux mechanics are
+first validated against temporary config/state roots and isolated tmux servers.
+Live acceptance uses new disposable Switchboard views and test provider
+sessions. DMS adapter work is deferred and does not participate in these gates.
 
 An installed managed session may keep using the immutable release it started
 with. A new release becomes the route for new Switchboard actions without
@@ -109,7 +135,8 @@ a new empty committed generation and retains the previous generation on disk.
 It does not retire a view, move or kill a pane, stop a provider, edit hooks,
 restart DMS, or kill a tmux server. Old managed views consequently become
 unmanaged but remain attachable through tmux; their provider processes continue
-unchanged. DMS observes the new generation on its next ordinary refresh.
+unchanged. A future optional adapter observes the new generation on its next
+ordinary refresh.
 
 Hook installation remains a separate opt-in operation after initialization:
 
