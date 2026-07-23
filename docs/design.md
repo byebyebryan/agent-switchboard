@@ -12,6 +12,8 @@ Proposed foreground task/session automation:
 
 Related research: [Open-source product landscape](product-landscape.md)
 
+Usage research: [Cross-host usage tracking discovery](usage-tracking-discovery.md)
+
 Implementation evidence: [Phase 0 validation](phase-0-validation.md)
 
 ## Summary
