@@ -212,8 +212,14 @@ Rerouting that action is therefore proposed only if a spike proves all of:
 - exact-once creation and submission to the destination thread; and
 - restoration of source input when any step is uncertain.
 
-Until that proof exists, native clear-context rollover is the preferred Codex
-path and ordinary implementation remains in the source thread.
+The
+[execution-intent timing study](spikes/execution-intent-timing.md)
+subsequently proved that the fixed ordinary implementation input can be held
+before sampling while the current structured Plan item remains retrievable.
+The blocked input text does not enter source history and produces no model
+`Stop`, although Codex appends one content-free turn. Combined with the
+previously proved transition transaction, ordinary Plan implementation is now
+a viable automatic cutover trigger subject to a production capability gate.
 
 ### Generic conversational rollover
 
@@ -224,6 +230,13 @@ prompt in the current thread.
 Model-based classification is not part of the input hot path until latency,
 false-positive, cancellation, and exact-once delivery studies pass. Structured
 signals such as an accepted provider Plan item take priority over inference.
+
+The live timing study confirmed that a conversational `Stop` result and the
+next user acceptance are both observable without a structured Plan item.
+Natural language alone remains advisory. A provider-neutral
+**implement selected plan in a fresh thread** action can make an exact assistant
+result or plan document authoritative without inference; that installed action
+is not yet implemented.
 
 ## User-Initiated Transitions
 
@@ -404,8 +417,11 @@ Prove against the installed Codex contract:
 
 ### S2: Codex ordinary-implementation interception
 
-Determine whether **implement this plan** can safely be standardized as a fresh
-thread:
+Status: trigger timing passed; destination transition reuses already-proven
+cutover mechanics.
+
+The study determined whether **implement this plan** can safely be standardized
+as a fresh thread:
 
 1. observe the Plan -> Default transition and exact prompt hook;
 2. retrieve the approved Plan item through a supported structured interface;
@@ -414,7 +430,11 @@ thread:
 5. inject failures before and after each external boundary; and
 6. restore source usability without an ambiguous duplicate turn.
 
-Failure of S2 narrows initial support to the native clear-context choice.
+The live input was held before sampling, the exact structured Plan item remained
+available, and source text/model execution did not occur. Automated fault tests
+proved exact-once delivery and recovery around the existing transaction. The
+sanitized result is
+`spikes/fixtures/thread-workstream/codex/0.145.0/execution-trigger.json`.
 
 ### S3: Claude Code equivalent study
 
