@@ -2,9 +2,7 @@
 
 Date: 2026-07-22
 
-Status: Phase 6A.1 through 6E.1 complete; Phase 6F implementation closure
-complete and isolated managed-session acceptance pending; Phase 6G is blocked
-on that gate
+Status: Phase 6A.1 through 6F complete; Phase 6G is next
 
 Target core release: `0.3.2`
 
@@ -332,7 +330,7 @@ recorded in [Phase 6E.1 Acceptance](phase-6e1-acceptance.md).
 
 ### Phase 6F: TUI-first coexistence and adoption gate
 
-Status: implementation complete; isolated managed-session acceptance pending.
+Status: complete and accepted.
 Evidence is in
 [Phase 6F Acceptance](phase-6f-acceptance.md).
 
@@ -360,9 +358,9 @@ Exit: the terminal-native navigator is sufficient for daily local use, direct
 mode preserves the same view/runtime, failure leaves native work intact, and
 the user can make a separate explicit decision about workflow adoption.
 
-Phase 6G must not begin until the isolated managed-session path proves trusted
-hook delivery and the workspace-to-task-to-workspace lifecycle without touching
-native sessions outside the disposable view.
+The isolated managed-session path proved trusted hook delivery and the
+workspace-to-task-to-workspace lifecycle without touching native sessions
+outside the disposable view. Phase 6G is therefore unblocked.
 
 Phase 6F task-to-task navigation means selecting among existing open sibling
 frames. It does not lift the one-child creation/return bound. Recursive

@@ -2,13 +2,12 @@
 
 Date: 2026-07-22
 
-Status: implementation closure complete; isolated managed-session acceptance pending
+Status: complete and accepted
 
-Phase 6F makes the resident navigator and terminal-native managed-session path
-complete enough for an isolated acceptance trial. Workflow adoption remains a
-later explicit user decision. Acceptance does not restart DMS, replace the
-user's tmux server, or claim authority over existing Codex or Claude Code
-sessions.
+Phase 6F completes the resident navigator and terminal-native managed-session
+path. Workflow adoption remains a later explicit user decision. Acceptance did
+not restart DMS, replace the user's tmux server, or claim authority over
+existing Codex or Claude Code sessions.
 
 ## Implemented behavior
 
@@ -74,9 +73,16 @@ The `0.3.2` closure candidate includes:
 - strict tool-argument validation that accepts the protocol-reserved MCP
   request metadata envelope used by live Codex tool calls.
 
-The exact closure implementation commit
-`cb28da06d5f2f79864be3e11ebeeef3aec8608ad` passed all 117 local tests,
-repository-wide Ruff lint/format, compile checks, and `git diff --check`.
+The final accepted implementation is commit
+`a0858a6` (`Refresh time for long-lived MCP tools`). It includes the workspace
+startup closure at `cb28da0`, MCP protocol negotiation at `441dd23`, explicit
+Codex MCP authority forwarding at `0645e3d`, protocol-reserved request metadata
+support at `cfe936b`, and a per-call clock for long-lived MCP servers. The last
+fix matters when a parent provider process predates the child completion
+transition it later claims.
+
+The exact candidate passed all 125 local tests, repository-wide Ruff
+lint/format, compile checks, and `git diff --check`.
 
 Existing coverage still includes:
 
@@ -105,8 +111,20 @@ The wheel was installed into a clean virtual environment with Textual `8.2.8`.
 The installed `swbctl 0.3.0` and navigator module loaded successfully, and a
 temporary configuration completed fresh `init`, canonical `state navigator`,
 and compare-and-swap `reset` without hooks, providers, DMS, or persistent state.
-The committed `0.3.2` source must repeat the reproducible artifact audit and
-clean-install smoke before live acceptance.
+The accepted `0.3.2` source repeated the reproducible artifact audit. Two
+isolated builds with `SOURCE_DATE_EPOCH=1784073600` were byte-identical and
+passed exact member, source-byte, metadata, migration, removed-module, CRC, and
+archive-safety checks:
+
+- wheel SHA-256:
+  `911f90dec540ed375b8e2ff8c474b5834bfbc54bf14e04d6c58e8c9400919f72`;
+- sdist SHA-256:
+  `da547880e51885136ba52e2c6cd1fcc2203ec1c89eda9467677684319c0fdc1a`;
+- 24 package files, 29 wheel files, and 42 sdist files.
+
+The wheel was installed into a clean immutable virtual environment with
+Textual `8.2.8`. Installed `swbctl 0.3.2` and
+`agent_switchboard.navigator` loaded successfully.
 
 ## Prior disposable provider and remote-owner evidence
 
@@ -132,25 +150,46 @@ installed `swbctl` route was deliberately not replaced for acceptance; fixed
 SSH argv, owner identity, attach construction, and exact-client replacement are
 covered by deterministic production-path tests.
 
-## Pending managed-session gate
+## Managed-session acceptance
 
-Using a disposable project/worktree, isolated Switchboard roots, an isolated
-tmux socket, and new provider UUIDs:
+The final trial used a disposable directory, fresh Config/State roots, an
+isolated tmux socket, and new Codex provider UUIDs. The user reviewed and
+trusted the installed Switchboard-owned hooks, then detached from the managed
+view.
 
-1. install the committed `0.3.2` candidate as the route for new Switchboard
-   actions without stopping native sessions;
-2. install only Switchboard-owned global hook handlers, pinned to that immutable
-   release, and review Codex trust manually through `/hooks`;
-3. enter the project in navigator mode and start its empty workspace with `n`;
-4. prove trusted `SessionStart`, prompt, tool, and `Stop` delivery is confined to
-   the managed pane while pre-existing sessions remain unmanaged;
-5. execute workspace -> task -> Complete-return -> workspace, then detach,
-   reattach, and toggle navigator/direct mode; and
-6. remove the disposable roots/socket/session and preserve only bounded
-   acceptance evidence.
+The first lifecycle attempt exposed one real defect: `AgentToolService` fixed
+its timestamp when the stdio MCP server started. A long-lived parent could
+therefore receive a later completion prompt but fail its handoff claim with a
+timestamp older than the transition. Commit `a0858a6` changed the default MCP
+clock to read once per tool call while retaining deterministic injected clocks
+for tests.
 
-Any failed candidate state may be discarded. Existing agent sessions, normal
-tmux, and unrelated provider configuration are never stopped for this gate.
+The clean rerun proved:
+
+1. public `view open` created a navigator view and public `frame start` launched
+   an empty managed workspace;
+2. the parent called `task_push`, trusted `Stop` committed the transition, and
+   a new managed child called `transition_claim`;
+3. after the child's claim turn settled, `task_complete_return` committed a
+   completion handoff and returned the same view to the exact parent provider
+   UUID;
+4. the long-lived parent claimed the handoff successfully; both transitions
+   ended `completed`, `committed`, and control-turn `settled`;
+5. the child frame closed as `completed`, its provider session became
+   `stopped`, and its surface became `dead`, while the parent stayed live,
+   resumable, ready, and turn-complete;
+6. navigator mode showed a resident 32-column navigator beside the active
+   agent, direct mode expanded that same agent to the full 160x50 client, and
+   returning to navigator restored the split;
+7. detach left the view ready and reattach restored the same navigator plus
+   parent panes; and
+8. the normal tmux server still had the same three native Codex panes and PIDs
+   (`9854`, `10311`, and `10828`) after acceptance.
+
+The trusted hook configuration was not rewritten for the rerun. Its existing
+immutable `0.3.2` handler remained compatible, while newly launched managed
+sessions used the fixed `a0858a6` MCP runtime. This avoided another trust cycle
+and did not alter unmanaged sessions.
 
 ## Safety and adoption boundary
 
@@ -164,6 +203,6 @@ No acceptance step:
 - touched the DMS repository, plugin, cache, or service; or
 - required coordinated host downtime.
 
-Phase 6F implementation is closed, but acceptance is not. Native tooling
-remains the active workflow until the user explicitly chooses adoption. Phase
-6G remains blocked until the disposable managed lifecycle above passes.
+Phase 6F is complete and accepted. Native tooling remains the active workflow
+until the user explicitly chooses adoption. Phase 6G is unblocked and is the
+next roadmap batch.

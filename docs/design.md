@@ -2,7 +2,7 @@
 
 Date: 2026-07-22
 
-Status: Phase 6F implementation closure complete; isolated managed-session acceptance pending
+Status: Phase 6F complete and accepted; Phase 6G is next
 
 Target release: `0.3.2`
 
@@ -455,4 +455,4 @@ The exact staged activation/rollback sequence is in the Phase 6 plan.
 - DMS is deferred as a dumb optional entry/focus adapter and is not an
   acceptance gate.
 - Snapshot v2 and Fleet v1 end at the `0.2` boundary.
-- Recursive task flow is enabled only after one-child ownership acceptance.
+- One-child ownership is accepted; recursive task flow remains Phase 6G work.
