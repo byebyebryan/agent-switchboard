@@ -71,6 +71,7 @@ Design and operations:
 - [Phase 6 Clean-Break Plan](docs/phase-6-plan.md)
 - [Phase 6E.1 Acceptance](docs/phase-6e1-acceptance.md)
 - [CutoverBundle v1 and Activation](docs/cutover-bundle-v1.md)
+- [Deferred Cross-host Usage Discovery](docs/usage-tracking-discovery.md)
 
 Historical `0.2` records remain outside the installed package under
 [`docs/archive/0.2`](docs/archive/0.2/README.md).

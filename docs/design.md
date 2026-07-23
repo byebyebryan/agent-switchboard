@@ -16,6 +16,11 @@ Normative storage/state rules are in
 user behavior is in [View and Frame Workflow](view-workflow.md), and delivery is
 in [Phase 6 Plan](phase-6-plan.md).
 
+Deferred research is recorded in
+[Cross-host usage tracking discovery](usage-tracking-discovery.md). It supplies
+provider evidence and open questions only; no usage phase, public contract, or
+implementation is approved.
+
 ## Summary
 
 Switchboard owns durable user views around unmodified Codex and Claude Code
