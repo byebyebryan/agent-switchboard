@@ -2,7 +2,7 @@
 
 Date: 2026-07-22
 
-Status: Phase 6F.2 implementation candidate; live closure acceptance pending
+Status: Phase 6F.2 complete and accepted; Phase 6G is next
 
 Target release: `0.3.4`
 

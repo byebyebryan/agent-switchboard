@@ -60,13 +60,13 @@ that adapter is no longer a release, development, or acceptance dependency.
 DMS integration is deferred as an optional convenience entry point after the
 TUI-first workflow is accepted.
 
-Phase 6F.2 repairs the automatic completion-control boundary exposed by the
-first persistent user-view loop. Workflow adoption remains a separate user
-decision. Normal work continues through native Codex, Claude Code, and tmux.
-Testing uses isolated Switchboard roots, tmux servers, views, and provider
-sessions; it does not stop existing agents, restart user tmux, edit normal
-provider hooks, or restart DMS. `init` and `reset` publish fresh committed
-generations without provider or tmux lifecycle operations.
+Phase 6F.2 is accepted: complete-return control is submitted automatically,
+closing tasks are non-navigable, and settled control recoveries clean
+themselves up. Workflow adoption remains a separate user decision. Normal work
+continues through native Codex, Claude Code, and tmux. Testing uses isolated
+Switchboard roots, tmux servers, views, and provider sessions; it does not stop
+existing agents, restart user tmux, or restart DMS. `init` and `reset` publish
+fresh committed generations without provider or tmux lifecycle operations.
 
 Design and operations:
 
@@ -76,6 +76,7 @@ Design and operations:
 - [Runtime Operations and Safety](docs/operations.md)
 - [Phase 6 Clean-Break Plan](docs/phase-6-plan.md)
 - [Phase 6F Acceptance](docs/phase-6f-acceptance.md)
+- [Phase 6F.2 Acceptance](docs/phase-6f2-acceptance.md)
 - [Phase 6E.1 Acceptance](docs/phase-6e1-acceptance.md)
 - [CutoverBundle v1 and Activation](docs/cutover-bundle-v1.md)
 - [Deferred Cross-host Usage Discovery](docs/usage-tracking-discovery.md)

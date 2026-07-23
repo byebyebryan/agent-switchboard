@@ -120,6 +120,12 @@ state. A mismatch is projected as `degraded` with one bounded warning. Explicit
 view entry remains the recovery boundary that may invalidate stale locators,
 create a replacement shell, and require exact provider UUID resumption.
 
+`swbctl reconcile --json` never resubmits a control turn. It marks only overdue
+submitted turns uncertain and resolves only `control_submit_uncertain` records
+whose exact control turn and transition have already settled. This permits a
+new runtime to clean a stale recovery left by an older immutable handler
+without stopping or resuming either provider session.
+
 ## Development and release workflow
 
 Builds, migrations, hook behavior, navigator behavior, and tmux mechanics are

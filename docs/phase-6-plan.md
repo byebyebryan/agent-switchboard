@@ -2,7 +2,7 @@
 
 Date: 2026-07-22
 
-Status: Phase 6A.1 through 6F.1 complete; Phase 6F.2 acceptance is next
+Status: Phase 6A.1 through 6F.2 complete and accepted; Phase 6G is next
 
 Target core release: `0.3.4`
 
@@ -389,7 +389,8 @@ healthy exact tmux evidence, and native sessions retain their PIDs and panes.
 
 ### Phase 6F.2: automatic completion-control closure
 
-Status: implementation candidate; live acceptance pending.
+Status: complete and accepted. Evidence is recorded in
+[Phase 6F.2 Acceptance](phase-6f2-acceptance.md).
 
 - Submit the fixed live control turn as one bracketed paste plus one separate
   submit key while the exact target pane remains user-input fenced.

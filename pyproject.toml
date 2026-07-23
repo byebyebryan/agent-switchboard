@@ -39,6 +39,7 @@ only-include = [
   "docs/phase-6e1-acceptance.md",
   "docs/phase-6f-acceptance.md",
   "docs/phase-6f1-acceptance.md",
+  "docs/phase-6f2-acceptance.md",
   "docs/usage-tracking-discovery.md",
   "requirements-offline.txt",
   "scripts/build_offline_bundle.py",
