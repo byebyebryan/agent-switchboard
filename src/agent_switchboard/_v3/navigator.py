@@ -351,6 +351,12 @@ def create_navigator_app(
                     if lifecycle == "closed":
                         history.add_option(Option(label, disabled=True))
                     elif frame["role"] == "task":
+                        closing = lifecycle == "closing"
+                        if closing:
+                            label = (
+                                f"{frame['activity'][:1]} {frame['title']} "
+                                f"[{project.name}/finishing]"
+                            )
                         task_id = (
                             None
                             if project.view_id is None
@@ -360,8 +366,8 @@ def create_navigator_app(
                         tasks.add_option(
                             Option(
                                 label,
-                                id=task_id,
-                                disabled=not available or task_id is None,
+                                id=None if closing else task_id,
+                                disabled=closing or not available or task_id is None,
                             )
                         )
             if not any(

@@ -6,6 +6,7 @@ import shutil
 import signal
 import struct
 import subprocess
+import sys
 import termios
 import time
 from fcntl import ioctl
@@ -239,6 +240,84 @@ def test_observing_missing_server_does_not_create_it(tmp_path: Path) -> None:
 
     assert caught.value.code == "tmux_unavailable"
     assert not socket.exists()
+
+
+def test_control_prompt_is_bracket_pasted_submitted_and_refenced(
+    tmp_path: Path,
+) -> None:
+    socket = tmp_path / "control.sock"
+    tmux = TmuxExecutor(socket)
+    ready = tmp_path / "ready"
+    captured = tmp_path / "captured"
+    probe = tmp_path / "bracketed-paste-probe.py"
+    probe.write_text(
+        """\
+import os
+import select
+import sys
+import time
+import tty
+from pathlib import Path
+
+tty.setraw(sys.stdin.fileno())
+os.write(sys.stdout.fileno(), b"\\x1b[?2004h")
+Path(sys.argv[1]).write_text("ready", encoding="utf-8")
+payload = b""
+deadline = time.monotonic() + 5
+while time.monotonic() < deadline:
+    readable, _, _ = select.select([sys.stdin.fileno()], [], [], 0.1)
+    if not readable:
+        continue
+    payload += os.read(sys.stdin.fileno(), 4096)
+    if payload.endswith(b"\\r"):
+        break
+Path(sys.argv[2]).write_bytes(payload)
+time.sleep(60)
+""",
+        encoding="utf-8",
+    )
+    literal = "Call transition_claim() and follow the returned instructions."
+    try:
+        tmux.server_evidence(HOST, observed_at=10)
+        tmux.create_shell(
+            prefix="test",
+            generation_id=GENERATION,
+            view_id=VIEW,
+            frame_id=FRAME,
+            mode=ViewMode.DIRECT,
+            sidebar_command=("sleep", "60"),
+        )
+        surface = tmux.spawn_surface(
+            prefix="test",
+            generation_id=GENERATION,
+            view_id=VIEW,
+            frame_id=FRAME,
+            surface_id=SURFACE,
+            command=(sys.executable, str(probe), str(ready), str(captured)),
+        )
+        assert surface.input_off
+        assert wait_for(ready.exists)
+        time.sleep(0.1)
+
+        observed = tmux.submit_control_prompt(
+            generation_id=GENERATION,
+            view_id=VIEW,
+            pane_id=surface.pane_id,
+            literal=literal,
+        )
+
+        assert observed.input_off
+        assert wait_for(captured.exists)
+        assert captured.read_bytes() == (
+            b"\x1b[200~" + literal.encode("utf-8") + b"\x1b[201~\r"
+        )
+        buffers = tmux.run(
+            "list-buffers", "-F", "#{buffer_name}", check=False
+        ).stdout.splitlines()
+        assert not [name for name in buffers if name.startswith("swb-control-")]
+    finally:
+        if socket.exists():
+            tmux.run("kill-server", check=False)
 
 
 def test_exact_client_switch_and_replacement_are_single_client_scoped(

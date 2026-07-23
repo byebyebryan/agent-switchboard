@@ -2,9 +2,9 @@
 
 Date: 2026-07-22
 
-Status: Phase 6F.1 complete and accepted; Phase 6G is next
+Status: Phase 6F.2 implementation candidate; live closure acceptance pending
 
-Target release: `0.3.3`
+Target release: `0.3.4`
 
 The implemented `0.2.0` task-first product is historical input, not a
 compatibility boundary. Phase 6 replaced its registry, protocols, command
@@ -413,10 +413,14 @@ The exact staged activation/rollback sequence is in the Phase 6 plan.
 - Preparation failure leaves source/view unchanged.
 - A missed hook leaves durable prepared/uncertain state and cannot move a
   changed view.
-- A submitted control turn is never submitted again automatically.
+- A submitted control turn is never submitted again automatically. Live
+  delivery uses one ephemeral named tmux buffer with bracketed-paste framing,
+  one submit key, immediate buffer deletion, and input fencing.
 - A child cannot receive its brief before WorkContext foreground transfer.
 - A parent claim closes the completed child; parent synthesis can retry from the
   immutable handoff.
+- A settled late claim resolves its exact `control_submit_uncertain` recovery;
+  reconciliation closes equivalent records left by an older runtime.
 - Human close never removes the active pane before a parent/placeholder exists.
 - Sidebar failure preserves provider pane; navigator may restart from state.
 - Locator crashes reconcile from intent, server generation, and pane metadata.

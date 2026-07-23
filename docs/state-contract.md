@@ -4,7 +4,7 @@ Date: 2026-07-21
 
 Status: Phase 6B.1 implementation contract locked, implemented, and validated
 
-Target release: `0.3.3`
+Target release: `0.3.4`
 
 This document is the storage and state-machine authority for the view-first
 replacement. [The design](design.md) owns product boundaries,
@@ -429,10 +429,11 @@ again automatically.
 
 For live input, the target must be an exact managed parked pane, input-disabled,
 ready after a trusted foreground `Stop`, free of permission state, and covered
-by the executing transition. A single tmux command queue moves/selects it,
-enables input, sends the literal template plus Enter, and disables input again.
-The exact `UserPromptSubmit` observation or a bounded watchdog re-enables input.
-Timeout exposes a pending handoff/brief and marks the turn uncertain.
+by the executing transition. A single tmux command queue creates one uniquely
+named ephemeral buffer, enables input, bracket-pastes the literal template,
+deletes that buffer, sends one Enter, and disables input again. The exact
+`UserPromptSubmit` observation or a bounded watchdog re-enables input. Timeout
+exposes a pending handoff/brief and marks the turn uncertain.
 
 For `resume_initial`, the same template is the provider CLI's initial prompt on
 the exact provider UUID. Attach gating still requires the authorized target pane
@@ -483,6 +484,10 @@ stable IDs. Pure projection warnings may remain derived. An optional frontend
 adapter may execute only `safe_auto`; `open_view` focuses the core recovery
 panel, and `manual` is informational until the user enters core.
 Checkout/background ambiguity is never an adapter mutation.
+When a timed-out control is later claimed and its transition settles, the exact
+`control_submit_uncertain` recovery resolves in the same transaction.
+Reconciliation resolves only equivalent older records whose control and
+transition are already both settled.
 
 One unexpired desktop attachment lease exists per view. Presentation fallback
 with the same semantic request may claim it. A concurrent different request

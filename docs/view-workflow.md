@@ -251,13 +251,16 @@ A live target is eligible only when:
 - the executing transition and WorkContext generations still match; and
 - no submission has been attempted for this ControlTurn.
 
-One tmux command queue swaps/selects the target, enables input, sends the literal
-template and Enter, then disables input. An exact `UserPromptSubmit` observation
-or bounded watchdog re-enables it. No clipboard/paste buffer is used.
+One tmux command queue swaps/selects the target, creates a uniquely named
+ephemeral buffer, enables input, bracket-pastes the literal template, deletes
+the buffer, sends Enter, and disables input. An exact `UserPromptSubmit`
+observation or bounded watchdog re-enables it. The buffer is never shared,
+retained, or reused.
 
 A timeout after submission becomes `uncertain`: re-enable user input, retain the
-handoff/brief, surface recovery, and do not inject again. A later exact claim or
-hook may settle the same turn.
+handoff/brief, surface recovery, and do not inject again. A later exact claim
+and hook may settle the same turn; successful settlement resolves that exact
+timeout recovery.
 
 ## Human Close
 

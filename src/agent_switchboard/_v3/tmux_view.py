@@ -13,6 +13,7 @@ import shlex
 import subprocess
 import time
 from collections.abc import Mapping
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
@@ -838,7 +839,7 @@ class TmuxExecutor:
         pane_id: str,
         literal: str,
     ) -> PaneObservation:
-        """Submit one fixed literal in one tmux queue, then input-fence it."""
+        """Bracket-paste and submit one fixed literal while input remains fenced."""
 
         target = self._pane(pane_id)
         if (
@@ -850,28 +851,46 @@ class TmuxExecutor:
             raise TmuxViewError(
                 "control_target_unready", "control target is not exact and fenced"
             )
-        self.run(
-            "select-pane",
-            "-e",
-            "-t",
-            pane_id,
-            ";",
-            "send-keys",
-            "-t",
-            pane_id,
-            "-l",
-            literal,
-            ";",
-            "send-keys",
-            "-t",
-            pane_id,
-            "Enter",
-            ";",
-            "select-pane",
-            "-d",
-            "-t",
-            pane_id,
+        buffer_name = (
+            f"swb-control-{str(view_id).replace('-', '')}-"
+            f"{pane_id.removeprefix('%')}-{uuid4().hex}"
         )
+        try:
+            self.run(
+                "set-buffer",
+                "-b",
+                buffer_name,
+                literal,
+                ";",
+                "select-pane",
+                "-e",
+                "-t",
+                pane_id,
+                ";",
+                "paste-buffer",
+                "-p",
+                "-d",
+                "-b",
+                buffer_name,
+                "-t",
+                pane_id,
+                ";",
+                "send-keys",
+                "-t",
+                pane_id,
+                "Enter",
+                ";",
+                "select-pane",
+                "-d",
+                "-t",
+                pane_id,
+            )
+        except Exception:
+            with suppress(Exception):
+                self.run("select-pane", "-d", "-t", pane_id)
+            with suppress(Exception):
+                self.run("delete-buffer", "-b", buffer_name)
+            raise
         observed = self._pane(pane_id)
         if not observed.input_off:
             raise TmuxViewError(

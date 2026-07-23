@@ -2,9 +2,9 @@
 
 Date: 2026-07-22
 
-Status: Phase 6A.1 through 6F.1 complete; Phase 6G is next
+Status: Phase 6A.1 through 6F.1 complete; Phase 6F.2 acceptance is next
 
-Target core release: `0.3.3`
+Target core release: `0.3.4`
 
 Historical Phase 6E DMS rehearsal adapter: `0.5.0` (deferred, not paired)
 
@@ -386,6 +386,26 @@ Status: complete and accepted. Evidence is recorded in
 Exit: stale persisted ownership is visible before attachment, the installed
 generation has no imported runtime claims, a fresh navigator view reports
 healthy exact tmux evidence, and native sessions retain their PIDs and panes.
+
+### Phase 6F.2: automatic completion-control closure
+
+Status: implementation candidate; live acceptance pending.
+
+- Submit the fixed live control turn as one bracketed paste plus one separate
+  submit key while the exact target pane remains user-input fenced.
+- Delete the ephemeral named tmux buffer in the same command queue and retain
+  the existing at-most-once watchdog boundary.
+- Show `closing` tasks as disabled `finishing` rows instead of routing an
+  impossible focus action into `transition_busy`.
+- Resolve `control_submit_uncertain` automatically when its exact transition
+  later claims and settles, and reconcile equivalent completed legacy records.
+- Prove the original failure path against an isolated native Codex TUI:
+  project pushes child, child completes, parent claims without user Enter, the
+  task closes, and no open recovery remains.
+
+Exit: a complete-return control turn submits without user intervention, the
+child closes and stops, the transition/control turn settle, no stale recovery
+remains, and unrelated tmux/provider sessions retain their exact identities.
 
 ### Phase 6G: recursive task frames
 

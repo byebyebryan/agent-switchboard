@@ -14,7 +14,7 @@ ROOT = Path(__file__).parents[1]
 def test_clean_break_metadata_maps_only_replacement_runtime() -> None:
     metadata = tomllib.loads((ROOT / "pyproject.toml").read_text())
     project = metadata["project"]
-    assert project["version"] == __version__ == "0.3.3"
+    assert project["version"] == __version__ == "0.3.4"
     assert project["dependencies"] == ["textual>=8.2.8,<9"]
     assert "optional-dependencies" not in project
     assert project["scripts"] == {"swbctl": "agent_switchboard.cli:main"}
@@ -55,7 +55,7 @@ def test_public_help_and_version(capsys: pytest.CaptureFixture[str]) -> None:
     with pytest.raises(SystemExit) as caught:
         main(["--version"])
     assert caught.value.code == 0
-    assert capsys.readouterr().out.strip() == "swbctl 0.3.3"
+    assert capsys.readouterr().out.strip() == "swbctl 0.3.4"
     with pytest.raises(SystemExit) as caught:
         main(["--help"])
     assert caught.value.code == 0

@@ -801,6 +801,27 @@ def test_uncertain_control_watchdog_never_submits_twice(tmp_path: Path) -> None:
             workflow.trusted_stop(parent_token, now=5_062).state
             is TransitionState.COMPLETED
         )
+        recovery = workflow.registry.connection.execute(
+            "SELECT recovery_id, state FROM recoveries "
+            "WHERE kind = 'control_submit_uncertain' "
+            "AND subject_type = 'transition' AND subject_id = ?",
+            (str(complete.transition_id),),
+        ).fetchone()
+        assert recovery is not None
+        assert recovery["state"] == "resolved"
+
+        # Reconcile a legacy record persisted by a release that completed the
+        # transition without resolving its earlier timeout recovery.
+        with workflow.registry.transaction(immediate=True) as connection:
+            connection.execute(
+                "UPDATE recoveries SET state = 'open' WHERE recovery_id = ?",
+                (recovery["recovery_id"],),
+            )
+        assert workflow.reconcile_control_turns(now=5_063) == ()
+        assert (
+            workflow.registry.get_recovery(recovery["recovery_id"]).state.value
+            == "resolved"
+        )
     finally:
         workflow.opened.close()
         if tmux.socket_path is not None:

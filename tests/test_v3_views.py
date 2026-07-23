@@ -762,6 +762,60 @@ def test_navigator_starts_the_empty_foreground_workspace(tmp_path: Path) -> None
         app.opened.close()
 
 
+def test_navigator_disables_a_task_while_completion_is_finishing(
+    tmp_path: Path,
+) -> None:
+    app, tmux = runtime(tmp_path)
+    calls: list[list[str]] = []
+
+    async def action_runner(arguments: list[str]) -> ActionOutcome:
+        calls.append(list(arguments))
+        return ActionOutcome(True, payload={"entered": True})
+
+    try:
+        opened = app.create_project_view(
+            PROJECT_A,
+            request_id=RequestId("f2f2f2f2-2222-4222-8222-222222222222"),
+            mode=ViewMode.NAVIGATOR,
+            view_id=VIEW,
+            now=20,
+        )
+        frame_id = opened.view.active_frame_id
+        assert frame_id is not None
+        seed_task_placeholder(app, tmux, frame_id, now=21)
+        with app.registry.transaction(immediate=True) as connection:
+            connection.execute(
+                "UPDATE frames SET lifecycle_state = 'closing', updated_at = ? "
+                "WHERE frame_id = ?",
+                (22, str(TASK)),
+            )
+        tui = create_navigator_app(
+            app.paths,
+            opened.view.view_id,
+            action_runner=action_runner,
+            opened_factory=lambda _paths: app.opened,
+        )
+
+        async def exercise() -> None:
+            async with tui.run_test() as pilot:
+                task_list = tui.query_one("#task-list")
+                assert task_list.option_count == 1
+                option = task_list.get_option_at_index(0)
+                assert option.disabled
+                assert option.id is None
+                assert "finishing" in str(option.prompt)
+                tui.action_show_tab("tasks")  # type: ignore[attr-defined]
+                task_list.focus()
+                await pilot.press("enter")
+                await pilot.pause()
+                assert calls == []
+
+        asyncio.run(exercise())
+    finally:
+        stop_tmux(tmux)
+        app.opened.close()
+
+
 def test_server_generation_loss_recreates_shell_and_fences_old_identity(
     tmp_path: Path,
 ) -> None:

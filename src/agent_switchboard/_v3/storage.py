@@ -4688,6 +4688,11 @@ class Registry:
                 "WHERE transition_id = ?",
                 (timestamp, str(transition_id)),
             )
+            self._resolve_completed_control_recoveries_tx(
+                connection,
+                timestamp,
+                transition_id=transition_id,
+            )
             connection.execute(
                 "UPDATE request_records SET state = 'completed', "
                 "result_type = 'transition', result_id = ?, completed_at = ? "
@@ -4700,6 +4705,46 @@ class Registry:
                 ),
             )
         return self.get_transition(transition_id)
+
+    @staticmethod
+    def _resolve_completed_control_recoveries_tx(
+        connection: sqlite3.Connection,
+        timestamp: int,
+        *,
+        transition_id: TransitionId | None = None,
+    ) -> int:
+        parameters: list[object] = [timestamp]
+        transition_filter = ""
+        if transition_id is not None:
+            transition_filter = "AND subject_id = ? "
+            parameters.append(str(transition_id))
+        return connection.execute(
+            "UPDATE recoveries SET state = 'resolved', updated_at = ? "
+            "WHERE state = 'open' AND kind = 'control_submit_uncertain' "
+            "AND subject_type = 'transition' "
+            f"{transition_filter}"
+            "AND EXISTS ("
+            "SELECT 1 FROM view_transitions AS vt "
+            "JOIN control_turns AS ct ON ct.transition_id = vt.transition_id "
+            "WHERE vt.transition_id = recoveries.subject_id "
+            "AND vt.state = 'completed' AND ct.state = 'settled'"
+            ")",
+            parameters,
+        ).rowcount
+
+    def resolve_completed_control_recoveries(
+        self,
+        *,
+        now: int | None = None,
+    ) -> int:
+        """Resolve only timed-out controls whose exact transition later settled."""
+
+        timestamp = _timestamp(now)
+        with self.transaction(immediate=True) as connection:
+            return self._resolve_completed_control_recoveries_tx(
+                connection,
+                timestamp,
+            )
 
     def open_recovery(self, recovery: Recovery) -> Recovery:
         self._require_local_host(recovery.host_id)

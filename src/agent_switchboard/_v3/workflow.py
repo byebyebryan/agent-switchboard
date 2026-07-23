@@ -2299,10 +2299,12 @@ class WorkflowRuntime:
             "ORDER BY transition_id",
             (now - self.config.control_turns.watchdog_timeout_seconds * 1_000,),
         ).fetchall()
-        return tuple(
+        controls = tuple(
             self.control_watchdog(TransitionId(row["transition_id"]), now=now)
             for row in rows
         )
+        self.registry.resolve_completed_control_recoveries(now=now)
+        return controls
 
     def claim(self, raw_capability: str, *, now: int) -> TransitionClaim:
         """Release one semantic payload to the exact active target capability."""
