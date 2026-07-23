@@ -70,6 +70,8 @@ fresh committed generations without provider or tmux lifecycle operations.
 
 Design and operations:
 
+- [Proposed Thread and Workstream Redesign](docs/thread-workstream-redesign-proposal.md)
+  (non-normative; feasibility studies pending)
 - [Agent Switchboard Design](docs/design.md)
 - [State and Control-Turn Contract](docs/state-contract.md)
 - [View and Frame Workflow](docs/view-workflow.md)

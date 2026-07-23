@@ -2,11 +2,18 @@
 
 Date: 2026-07-22
 
-Status: Phase 6A.1 through 6F.2 complete and accepted; Phase 6G is next
+Status: Phase 6A.1 through 6F.2 complete and accepted; Phase 6G paused
 
 Target core release: `0.3.4`
 
 Historical Phase 6E DMS rehearsal adapter: `0.5.0` (deferred, not paired)
+
+> **Roadmap review:** Phase 6A.1 through 6F.2 remain accepted history. Phase 6G
+> implementation is paused while the non-normative
+> [Thread and Workstream Redesign](thread-workstream-redesign-proposal.md)
+> tests provider-native fresh-thread handoff, persistent history, external
+> memory, and managed worktrees. The proposal does not change the installed
+> Phase 6 contract.
 
 ## Outcome
 
@@ -409,6 +416,9 @@ child closes and stops, the transition/control turn settle, no stale recovery
 remains, and unrelated tmux/provider sessions retain their exact identities.
 
 ### Phase 6G: recursive task frames
+
+Status: paused before implementation pending the proposed thread/workstream
+studies.
 
 - Lift the initial one-child limit to a bounded recursive stack.
 - Generalize WorkContext claim and foreground transfer across ancestors.

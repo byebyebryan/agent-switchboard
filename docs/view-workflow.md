@@ -2,7 +2,14 @@
 
 Date: 2026-07-22
 
-Status: Phase 6F.2 complete and accepted; Phase 6G recursion is next
+Status: Phase 6F.2 complete and accepted; Phase 6G paused for redesign studies
+
+> **Accepted historical workflow:** this document remains the implemented
+> Phase 6 behavior. The non-normative
+> [Thread and Workstream Redesign](thread-workstream-redesign-proposal.md)
+> studies a replacement that preserves completed result tips and adopts
+> provider-native fresh-thread transitions. Phase 6G implementation is paused
+> pending those studies.
 
 ## Purpose
 
