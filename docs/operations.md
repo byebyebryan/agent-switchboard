@@ -76,15 +76,21 @@ sessions continue running while the hook is repaired and tested in isolation.
 
 ## TUI-first view access
 
-The resident navigator is the primary interface. From a plain SSH shell, list
-durable views and attach directly through the owner-host tmux server:
+The resident navigator is the primary interface. From a plain shell, enter a
+project, exact view/frame, or recovery through the owner host:
 
 ```sh
+swbctl view enter --host <host-id> --project <project-id>
+swbctl view enter --host <host-id> --view <view-id> --mode direct
 swbctl view list
 swbctl view attach --view <view-id>
 ```
 
-`view attach` revalidates the view, creates and claims its own bounded local
+`view enter` creates/reuses and prepares the target, then attaches from a plain
+shell, stays in place for the current managed view, switches one exact local
+tmux client, or owner-preflights and replaces that client for a configured
+remote. It never derives SSH endpoints from UI state. `view attach` remains the
+lower-level exact-view path: it revalidates, creates and claims its own bounded local
 attachment lease, and then execs the exact tmux attachment. It never starts or
 resumes a provider. `frame reopen` must finish provider launch and project the
 exact surface into the persistent view before it reports success.

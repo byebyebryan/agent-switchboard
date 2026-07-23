@@ -1,8 +1,8 @@
 # View and Frame Workflow
 
-Date: 2026-07-21
+Date: 2026-07-22
 
-Status: accepted Phase 6A.1 interaction contract; implementation pending
+Status: implemented through Phase 6F terminal-native acceptance
 
 ## Purpose
 
@@ -89,6 +89,14 @@ Project activation is explicit navigation:
 Different request IDs opening the same unowned project converge on the one
 workspace reservation. Clicking a project never focuses a view still displaying
 an unrelated project.
+
+The one-command terminal route is `view enter`. From a plain shell it execs the
+exact local tmux attach or configured SSH attach. From a managed view it stays
+in place for the same view, switches only the exact invoking client for another
+local view, or preflights the remote owner before replacing that client with
+SSH. Multiple/no exact client matches block. Four nested cross-host replacements
+are allowed; the fifth tells the user to detach the outer connection and enter
+the desired host directly.
 
 ## Manual Focus
 
@@ -284,12 +292,12 @@ preserved/restored as display state and never changes durable mode.
 - A view never navigates to a remote frame; remote selection opens a separate
   SSH-backed host-local view.
 
-An SSH client uses the primary terminal-native path. `swbctl view list`
-discovers durable local views and `swbctl view attach --view VIEW` revalidates
-one view, acquires its own bounded attachment lease, and execs the exact tmux
-attach command. It never starts or resumes a provider. A provider `frame
-reopen` reports success only after the exact surface has moved from holding
-into `view.main`.
+An SSH client uses the primary terminal-native path. `swbctl view enter`
+resolves a project, exact view/frame, or recovery and preserves the selected
+navigator/direct mode. `swbctl view list` discovers durable local views and
+`swbctl view attach --view VIEW` remains the lower-level exact attach command.
+Neither starts or resumes a provider. A provider `frame reopen` reports success
+only after the exact surface has moved from holding into `view.main`.
 
 ## Optional Desktop Entry and Recovery
 
@@ -359,3 +367,7 @@ Phase 6D implementation and guarded installed-provider evidence are recorded in
 13. Shared-checkout ambiguity blocks automation and requires core confirmation.
 14. Remote selection opens a separate SSH-backed view.
 15. No normal path invokes Snapshot/Fleet/task-first/DMS compatibility.
+16. `Views`, `Projects`, and open `Tasks` can switch among existing sibling
+    frames; closed frames remain read-only `History`.
+17. Recursive task creation and task-to-child-task return are not implied by
+    sibling navigation; they remain Phase 6G.

@@ -2,7 +2,7 @@
 
 Date: 2026-07-22
 
-Status: Phase 6E.1 operational closure complete; Phase 6F TUI-first adoption is in progress
+Status: Phase 6F terminal-native acceptance complete; workflow adoption remains explicit
 
 Target release: `0.3.0`
 
@@ -282,6 +282,9 @@ reachability/staleness, warnings, and truncation. Its top-level generation ID is
 the local cache provenance; each host row retains its owner generation ID and
 stale bit. Core authors view titles, breadcrumbs, activity, attention,
 transition/control state, and last-activity summaries.
+Open and closed frame summaries remain bounded and include lifecycle, current
+provider/runtime/activity, and session count. Closed rows are history-only and
+never become project entry routes.
 
 `PresentationDirective v1` replaces the proposed `ViewAction v1`. Core commits
 or revalidates semantic navigation, then returns `focus`, `attach`, or `blocked`
@@ -297,6 +300,11 @@ swbctl reset --confirm-generation GENERATION [--config CONFIG_V3_TEMPLATE]
 swbctl state host --json
 swbctl state navigator [--refresh] --json
 
+swbctl view enter --host HOST \
+  (--project PROJECT [--reuse-view VIEW] | --view VIEW [--frame FRAME] | \
+   --recovery RECOVERY) \
+  [--mode navigator|direct] [--request-id UUID] \
+  [--confirm-background-transfer]
 swbctl view open --host HOST (--view VIEW | --project PROJECT) --request-id UUID \
   [--can-focus-desktop] [--can-launch-terminal] --json
 swbctl view recover --host HOST --recovery RECOVERY --request-id UUID --json
@@ -328,6 +336,7 @@ Canonical tools are:
 switchboard_current()
 switchboard_context()
 switchboard_history(...)
+switchboard_mode(mode)
 task_push(title, brief, purpose?, provider?, park_safe)
 task_back()
 task_complete_return(summary, next_action, park_safe)
@@ -347,15 +356,19 @@ parking, closing, and recovery; no daemon remains.
 
 ## Frontends
 
-The primary frontend is the resident compact Textual sidebar showing current
-breadcrumb, projects, open frames, attention, transition/control status, and
-recovery. Focused settings/history/recovery may use a popup or temporary
-full-window view. There is no Open/Inbox/Closed administrative application.
+The primary frontend is the resident compact Textual sidebar. Its `Views`,
+`Projects`, `Tasks`, `History`, `Recovery`, and `Settings` panels retain the
+current breadcrumb plus activity, attention, transition/control, and action
+status. Actions run through one bounded asynchronous core command at a time.
+Closed frames are read-only history. There is no Open/Inbox/Closed
+administrative application.
 
 Direct mode is the minimal frontend. The native provider occupies the whole
 view, while agent tools, commands, and trusted managed-session hooks perform
 the same frame transitions. Returning to navigator mode recreates only the
-sidebar.
+sidebar. A capability-bound `switchboard_mode("navigator")` call provides this
+return in one ordinary agent tool turn; no global key binding or skill is
+required.
 
 DMS work is frozen during TUI-first adoption. A later desktop adapter may offer
 `Views`, `Projects`, and safe recovery as a dumb entry/focus convenience over
@@ -374,6 +387,9 @@ local view never swaps a remote pane.
 Remote collection and owner routing use configured host IDs mapped to fixed SSH
 endpoints. Reads are bounded and concurrent, with validated last-good caches;
 mutation commands are fixed argv and never derive an endpoint from UI data.
+Terminal entry preflights the remote owner before replacing only the invoking
+tmux client. Cross-host client replacement is bounded to four nested hops; the
+fifth blocks with an explicit detach-and-enter-directly instruction.
 
 ## Registry and Configuration Baseline
 

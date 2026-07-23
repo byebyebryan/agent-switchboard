@@ -534,6 +534,12 @@ breadcrumb, activity, attention, transition/control state, and last activity.
 Frontends do not re-derive any of these fields and NavigatorState never
 contains a desktop token.
 
+Each project frame summary carries frame/title/role/parent/lifecycle/activity,
+an optional bounded current-session summary (`provider`, `runtimePresence`,
+`resumability`, `activity`, `updatedAt`), and `sessionCount`. Closed frames are
+retained for read-only History, but project entry and active navigation resolve
+only open frames.
+
 Both envelopes retain the existing safety ceilings: 8 MiB encoded JSON, depth
 32, 64 KiB per string, 100,000 array items, and 256 object keys. Bounded
 non-sensitive future fields are accepted and omitted during canonical

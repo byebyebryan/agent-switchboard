@@ -28,6 +28,11 @@ swbctl reset --confirm-generation GENERATION [--config CONFIG_V3_TEMPLATE]
 swbctl state host --json
 swbctl state navigator [--refresh] --json
 
+swbctl view enter --host HOST \
+  (--project PROJECT [--reuse-view VIEW] | --view VIEW [--frame FRAME] | \
+   --recovery RECOVERY) \
+  [--mode navigator|direct] [--request-id UUID] \
+  [--confirm-background-transfer]
 swbctl view open --host HOST (--view VIEW | --project PROJECT) --request-id UUID \
   [--can-focus-desktop] [--can-launch-terminal] --json
 swbctl view recover --host HOST --recovery RECOVERY --request-id UUID \
@@ -55,7 +60,8 @@ that adapter is no longer a release, development, or acceptance dependency.
 DMS integration is deferred as an optional convenience entry point after the
 TUI-first workflow is accepted.
 
-Switchboard is still in pre-adoption validation. Normal work continues through
+Phase 6F terminal-native acceptance is complete, but workflow adoption remains
+a separate user decision. Normal work continues through
 native Codex, Claude Code, and tmux. Testing uses isolated Switchboard roots,
 tmux servers, views, and provider sessions; it does not stop existing agents,
 restart user tmux, edit normal provider hooks, or restart DMS. `init` and
@@ -69,6 +75,7 @@ Design and operations:
 - [View and Frame Workflow](docs/view-workflow.md)
 - [Runtime Operations and Safety](docs/operations.md)
 - [Phase 6 Clean-Break Plan](docs/phase-6-plan.md)
+- [Phase 6F Acceptance](docs/phase-6f-acceptance.md)
 - [Phase 6E.1 Acceptance](docs/phase-6e1-acceptance.md)
 - [CutoverBundle v1 and Activation](docs/cutover-bundle-v1.md)
 - [Deferred Cross-host Usage Discovery](docs/usage-tracking-discovery.md)

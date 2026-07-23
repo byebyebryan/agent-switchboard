@@ -2,7 +2,7 @@
 
 Date: 2026-07-22
 
-Status: Phase 6A.1 through 6E.1 complete; Phase 6F TUI-first adoption is in progress
+Status: Phase 6A.1 through 6F complete; workflow adoption remains explicit; Phase 6G is next
 
 Target core release: `0.3.0`
 
@@ -48,7 +48,7 @@ never quiesce existing providers; see
 
 The completed technical activation did not authorize workflow adoption.
 Native Codex, Claude Code, and tmux sessions remain the active workflow until a
-future explicit user cutover after Phase 6F acceptance.
+separate explicit user cutover after Phase 6F acceptance.
 
 ## Replacement Contracts
 
@@ -330,6 +330,9 @@ recorded in [Phase 6E.1 Acceptance](phase-6e1-acceptance.md).
 
 ### Phase 6F: TUI-first coexistence and adoption gate
 
+Status: complete. Exact evidence is in
+[Phase 6F Acceptance](phase-6f-acceptance.md).
+
 - Make navigator mode the default for new CLI/SSH views while keeping direct
   mode one explicit toggle away.
 - Provide a one-command terminal entry path that opens or reuses a project/view
@@ -349,6 +352,10 @@ recorded in [Phase 6E.1 Acceptance](phase-6e1-acceptance.md).
 Exit: the terminal-native navigator is sufficient for daily local use, direct
 mode preserves the same view/runtime, failure leaves native work intact, and
 the user can make a separate explicit decision about workflow adoption.
+
+Phase 6F task-to-task navigation means selecting among existing open sibling
+frames. It does not lift the one-child creation/return bound. Recursive
+workspace/task ancestry remains exclusively Phase 6G.
 
 ### Phase 6G: recursive task frames
 
