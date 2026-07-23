@@ -17,6 +17,7 @@ from spikes.thread_workstream.evidence import (
 from spikes.thread_workstream.isolation import reject_repository
 
 FINGERPRINT = "a" * 64
+ROOT = Path(__file__).parents[1]
 
 
 def passing_result(**overrides: object) -> StudyResult:
@@ -150,3 +151,27 @@ def test_isolation_rejects_wrong_marker_external_or_remote_repository(
             layout.validate()
     finally:
         layout.cleanup()
+
+
+def test_retained_native_rollover_fixture_is_sanitized_and_passing() -> None:
+    fixture = (
+        ROOT
+        / "spikes"
+        / "fixtures"
+        / "thread-workstream"
+        / "codex"
+        / "0.145.0"
+        / "native-rollover.json"
+    )
+    retained = json.loads(fixture.read_text())
+    assert retained["status"] == "pass"
+    assert retained["assisted"] is False
+    assert all(retained["assertions"].values())
+    assert all(retained["isolation"].values())
+    assert all(retained["cleanup"].values())
+    encoded = fixture.read_text()
+    assert "/home/" not in encoded
+    assert "/tmp/" not in encoded
+    assert "11111111-1111-4111-8111-111111111111" not in encoded
+    assert "provider_input" not in encoded
+    assert "provider_cwd" not in encoded

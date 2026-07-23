@@ -123,6 +123,18 @@ class CodexAppServer:
             raise AppServerError("thread/read did not preserve exact identity")
         return thread
 
+    def thread_list(self) -> list[dict[str, Any]]:
+        result = self.request(
+            "thread/list",
+            {"limit": 20},
+        )
+        data = result.get("data")
+        if not isinstance(data, list) or not all(
+            isinstance(thread, dict) for thread in data
+        ):
+            raise AppServerError("thread/list returned invalid data")
+        return data
+
     def set_name(self, provider_identity: str, name: str) -> bool:
         self.request(
             "thread/name/set",

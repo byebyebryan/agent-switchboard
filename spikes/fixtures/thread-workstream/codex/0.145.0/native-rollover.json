@@ -1,0 +1,70 @@
+{
+  "assertions": {
+    "accepted_plans_carried_exactly": true,
+    "clear_precedes_destination_input": true,
+    "destination_1_nameable": true,
+    "destination_2_nameable": true,
+    "disposable_repository_unchanged": true,
+    "no_post_result_management_traffic": true,
+    "one_destination_submission_per_rollover": true,
+    "provider_working_directory_exact": true,
+    "result_tips_stable_before_next_action": true,
+    "same_launch_and_surface": true,
+    "same_managed_pane": true,
+    "same_process_working_directory": true,
+    "same_tmux_generation": true,
+    "same_tui_process": true,
+    "source_1_resumable": true,
+    "source_2_resumable": true,
+    "source_first_input_observed": true,
+    "source_named_before_rollover": true,
+    "three_distinct_provider_identities": true
+  },
+  "assisted": false,
+  "cleanup": {
+    "private_capture_deleted": true,
+    "private_tmux_endpoint_deleted": true,
+    "private_tmux_server_stopped": true,
+    "temporary_root_deleted": true,
+    "unrelated_agent_processes_unchanged": true,
+    "unrelated_tmux_panes_unchanged": true
+  },
+  "contractFingerprint": "4242b14096f29619f86c3d27a832d853ceaa55cbf60bd4ae3fafda446b1e8a5c",
+  "eventOrder": [
+    "thread-a:SessionStart:startup",
+    "thread-a:UserPromptSubmit",
+    "thread-a:Stop",
+    "thread-b:SessionStart:clear",
+    "thread-b:UserPromptSubmit",
+    "thread-b:Stop",
+    "thread-b:UserPromptSubmit",
+    "thread-b:Stop",
+    "thread-c:SessionStart:clear",
+    "thread-c:UserPromptSubmit",
+    "thread-c:Stop"
+  ],
+  "installedVersion": "codex-cli 0.145.0",
+  "isolation": {
+    "disposable_directory_trust_only": true,
+    "disposable_repository": true,
+    "private_provider_home": true,
+    "private_switchboard_state": true,
+    "private_tmux_server": true
+  },
+  "limitations": [],
+  "privacyAudit": {
+    "credentialsExcluded": true,
+    "providerIdentifiersExcluded": true,
+    "providerInputExcluded": true,
+    "providerOutputExcluded": true,
+    "runtimeLocationsExcluded": true,
+    "runtimeProcessIdentifiersExcluded": true
+  },
+  "provider": "codex",
+  "schemaVersion": 1,
+  "status": "pass",
+  "study": "codex-native-repeated-rollover",
+  "timingsMs": {
+    "total": 49996
+  }
+}

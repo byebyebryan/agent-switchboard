@@ -10,6 +10,7 @@ import os
 import shlex
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import time
@@ -40,7 +41,7 @@ EVENT_TIMEOUT_SECONDS = 300.0
 UI_TIMEOUT_SECONDS = 30.0
 QUIET_SECONDS = 2.0
 PLAN_TRANSFER_PREFIX = (
-    "A previous agent produced the plan below to accomplish the user's task.\n"
+    "A previous agent produced the plan below to accomplish the user's task. "
     "Implement the plan in a fresh context. Treat the plan as the source of "
     "user intent, re-read files as needed, and carry the work through "
     "implementation and verification."
@@ -210,6 +211,7 @@ class PrivateTmuxTui:
     pane: str
     provider_pid: int
     provider_birth: int
+    disposable_trust_accepted: bool
 
     @classmethod
     def launch(
@@ -305,12 +307,34 @@ class PrivateTmuxTui:
                 "#{pane_pid}",
             ).stdout.strip()
         )
-        return cls(
+        tui = cls(
             layout.tmux_socket,
             pane,
             provider_pid,
             _process_birth(provider_pid),
+            False,
         )
+        trust_prompt = "Do you trust the contents of this directory?"
+        if _wait_for(
+            lambda: trust_prompt in tui.capture_view()
+            or "\N{SINGLE RIGHT-POINTING ANGLE QUOTATION MARK}"
+            in tui.capture_view(),
+            UI_TIMEOUT_SECONDS,
+        ) and trust_prompt in tui.capture_view():
+            layout.validate()
+            reject_repository(
+                layout.repository,
+                expected_root=layout.root,
+                expected_token=layout.marker_token,
+            )
+            tui.key("Enter")
+            if not _wait_for(
+                lambda: trust_prompt not in tui.capture_view(),
+                UI_TIMEOUT_SECONDS,
+            ):
+                raise LiveStudyError("disposable directory trust did not settle")
+            tui.disposable_trust_accepted = True
+        return tui
 
     def capture(self) -> str:
         return _run(
@@ -320,6 +344,26 @@ class PrivateTmuxTui:
             "-e",
             "-S",
             "-200",
+            "-t",
+            self.pane,
+        ).stdout
+
+    def capture_plain(self) -> str:
+        return _run(
+            self.socket,
+            "capture-pane",
+            "-p",
+            "-S",
+            "-200",
+            "-t",
+            self.pane,
+        ).stdout
+
+    def capture_view(self) -> str:
+        return _run(
+            self.socket,
+            "capture-pane",
+            "-p",
             "-t",
             self.pane,
         ).stdout
@@ -368,6 +412,18 @@ class PrivateTmuxTui:
         return first == self.capture()
 
     def stop(self) -> None:
+        socket_result = _run(
+            self.socket,
+            "display-message",
+            "-p",
+            "#{socket_path}",
+            check=False,
+        )
+        socket_path = (
+            Path(socket_result.stdout.strip())
+            if socket_result.returncode == 0 and socket_result.stdout.strip()
+            else None
+        )
         self.key("C-c")
         if not _wait_for(
             lambda: _run(
@@ -381,6 +437,13 @@ class PrivateTmuxTui:
             3.0,
         ):
             _run(self.socket, "kill-server", check=False)
+        if (
+            socket_path is not None
+            and socket_path.name == self.socket
+            and socket_path.exists()
+            and stat.S_ISSOCK(socket_path.stat().st_mode)
+        ):
+            socket_path.unlink()
 
 
 def _event_count(
@@ -463,6 +526,7 @@ def run_live_study(
     layout = IsolationLayout.create(keep_private_events=keep_private_events)
     observations = LiveObservations()
     tui: PrivateTmuxTui | None = None
+    private_socket_path: Path | None = None
     status = StudyStatus.FALSIFIED
     preexisting_agents = _selected_agent_processes()
     preexisting_panes = _default_tmux_panes()
@@ -491,46 +555,71 @@ def run_live_study(
             codex=codex,
             environment=environment,
         )
+        observations.isolation["disposable_directory_trust_only"] = (
+            tui.disposable_trust_accepted
+        )
+        launch_facts = tui.current_facts()
         generation_before = _run(
             layout.tmux_socket,
             "display-message",
             "-p",
             "#{socket_path}\t#{pid}\t#{start_time}",
         ).stdout.strip()
-        events = _wait_event(
-            layout.private_events,
-            lambda rows: _event_count(rows, kind="SessionStart", source="startup")
-            == 1,
-        )
-        source_identity = events[0].get("provider_identity")
-        if not isinstance(source_identity, str):
-            raise LiveStudyError("startup event lacked exact provider identity")
-        identities = [source_identity]
+        private_socket_path = Path(generation_before.split("\t", 1)[0])
         with CodexAppServer(codex, environment) as app_server:
-            observations.assertions["source_named_before_rollover"] = (
-                app_server.set_name(source_identity, "spike-thread-a")
-            )
+            identities: list[str] = []
             result_tip_checks: list[bool] = []
             plan_matches: list[bool] = []
             exactly_once: list[bool] = []
             for index, request in enumerate(PLAN_REQUESTS):
-                tui.paste_and_enter("/plan")
                 if not _wait_for(
-                    lambda: "Plan mode" in tui.capture(),
+                    lambda: "\N{SINGLE RIGHT-POINTING ANGLE QUOTATION MARK}"
+                    in tui.capture_view()
+                    and "esc to interrupt" not in tui.capture_view().lower(),
+                    UI_TIMEOUT_SECONDS,
+                ):
+                    raise LiveStudyError("Codex TUI composer did not become idle")
+                time.sleep(QUIET_SECONDS)
+                tui.key("BTab")
+                if not _wait_for(
+                    lambda: "Plan mode" in tui.capture_view(),
                     UI_TIMEOUT_SECONDS,
                 ):
                     raise LiveStudyError("Codex TUI did not enter Plan mode")
-                before_prompts = _event_count(
-                    _read_events(layout.private_events),
-                    provider_identity=identities[-1],
-                    kind="UserPromptSubmit",
-                )
-                before_stops = _event_count(
-                    _read_events(layout.private_events),
-                    provider_identity=identities[-1],
-                    kind="Stop",
-                )
+                if identities:
+                    before_prompts = _event_count(
+                        _read_events(layout.private_events),
+                        provider_identity=identities[-1],
+                        kind="UserPromptSubmit",
+                    )
+                    before_stops = _event_count(
+                        _read_events(layout.private_events),
+                        provider_identity=identities[-1],
+                        kind="Stop",
+                    )
+                else:
+                    before_prompts = 0
+                    before_stops = 0
                 tui.paste_and_enter(request)
+                if not identities:
+                    events = _wait_event(
+                        layout.private_events,
+                        lambda rows: _event_count(
+                            rows,
+                            kind="UserPromptSubmit",
+                        )
+                        == 1,
+                    )
+                    initial_prompts = [
+                        event
+                        for event in events
+                        if event.get("event") == "UserPromptSubmit"
+                        and isinstance(event.get("provider_identity"), str)
+                    ]
+                    if len(initial_prompts) != 1:
+                        raise LiveStudyError("source prompt identity is ambiguous")
+                    source_identity = initial_prompts[0]["provider_identity"]
+                    identities.append(source_identity)
                 _wait_event(
                     layout.private_events,
                     lambda rows, required=before_stops + 1: _event_count(
@@ -541,10 +630,14 @@ def run_live_study(
                     == required,
                 )
                 if not _wait_for(
-                    lambda: "Implement this plan?" in tui.capture(),
+                    lambda: "Implement this plan?" in tui.capture_view(),
                     UI_TIMEOUT_SECONDS,
                 ):
                     raise LiveStudyError("native plan implementation picker did not open")
+                if index == 0:
+                    observations.assertions["source_named_before_rollover"] = (
+                        app_server.set_name(identities[-1], "spike-thread-a")
+                    )
                 tui.key("Down", "Enter")
                 events = _wait_event(
                     layout.private_events,
@@ -620,11 +713,22 @@ def run_live_study(
             observations.assertions.update(
                 {
                     "three_distinct_provider_identities": len(set(identities)) == 3,
+                    "source_first_input_observed": _event_count(
+                        final_events,
+                        provider_identity=identities[0],
+                        kind="UserPromptSubmit",
+                    )
+                    == 1,
                     "same_managed_pane": facts[3] == tui.pane,
                     "same_tui_process": facts[:2]
                     == (tui.provider_pid, tui.provider_birth),
-                    "same_provider_cwd": Path(facts[2]).resolve()
-                    == layout.repository.resolve(),
+                    "same_process_working_directory": facts[2] == launch_facts[2],
+                    "provider_working_directory_exact": all(
+                        isinstance(event.get("provider_cwd"), str)
+                        and Path(event["provider_cwd"]).resolve()
+                        == layout.repository.resolve()
+                        for event in final_events
+                    ),
                     "same_launch_and_surface": all(
                         event.get("launch_token")
                         == environment["ASB_SPIKE_LAUNCH_TOKEN"]
@@ -634,7 +738,7 @@ def run_live_study(
                         for event in final_events
                     ),
                     "same_tmux_generation": generation_after == generation_before,
-                    "clear_precedes_destination_prompt": all(
+                    "clear_precedes_destination_input": all(
                         next(
                             index
                             for index, event in enumerate(final_events)
@@ -675,7 +779,11 @@ def run_live_study(
         fingerprint = "0" * 64
         status = StudyStatus.BLOCKED
         observations.limitations.append("provider contract unavailable")
-    except (LiveStudyError, OSError, subprocess.SubprocessError, ValueError):
+    except LiveStudyError as error:
+        fingerprint = locals().get("fingerprint", "0" * 64)
+        status = StudyStatus.FALSIFIED
+        observations.limitations.append(str(error))
+    except (OSError, subprocess.SubprocessError, ValueError):
         fingerprint = locals().get("fingerprint", "0" * 64)
         status = StudyStatus.FALSIFIED
         observations.limitations.append("automatic native rollover invariant failed")
@@ -691,6 +799,16 @@ def run_live_study(
                 check=False,
             ).returncode
             != 0
+        )
+        if (
+            private_socket_path is not None
+            and private_socket_path.name == layout.tmux_socket
+            and private_socket_path.exists()
+            and stat.S_ISSOCK(private_socket_path.stat().st_mode)
+        ):
+            private_socket_path.unlink()
+        observations.cleanup["private_tmux_endpoint_deleted"] = (
+            private_socket_path is None or not private_socket_path.exists()
         )
         observations.cleanup["private_capture_deleted"] = layout.erase_private_events()
         observations.cleanup["unrelated_agent_processes_unchanged"] = (

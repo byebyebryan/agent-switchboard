@@ -22,6 +22,17 @@ The harness and its fail-closed privacy/isolation checks run with:
 .venv/bin/pytest -q tests/test_v3_thread_workstream_spikes.py
 ```
 
+The unassisted repeated native Codex gate runs with:
+
+```sh
+.venv/bin/python -m spikes.thread_workstream.codex_rollover \
+  --output spikes/fixtures/thread-workstream/codex/0.145.0/native-rollover.json
+```
+
+The retained `0.145.0` result is a Gate 1 pass. Its procedure, limitations, and
+decision impact are recorded in
+`docs/spikes/codex-native-rollover.md`.
+
 ## Local checks
 
 ```sh
