@@ -86,6 +86,29 @@ def test_fixed_ssh_argv_has_no_shell_or_ui_derived_endpoint() -> None:
     )
     with pytest.raises(RemoteError, match="unsafe"):
         action_argv(remote, ("view", "open", "--bad-option"))
+    entered = action_argv(
+        remote,
+        (
+            "view",
+            "enter",
+            "--host",
+            str(REMOTE),
+            "--view",
+            VIEW,
+            "--frame",
+            "55555555-5555-4555-8555-555555555555",
+            "--mode",
+            "navigator",
+            "--request-id",
+            REQUEST,
+            "--hop-depth",
+            "2",
+            "--preflight-only",
+            "--confirm-background-transfer",
+        ),
+    )
+    assert entered[7] == "snap.lan"
+    assert entered[8:11] == ("swbctl", "view", "enter")
 
 
 def test_refresh_pins_validated_host_and_retains_last_good_on_failure() -> None:

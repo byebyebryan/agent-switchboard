@@ -53,8 +53,13 @@ from agent_switchboard._v3.generation import (
     OpenGeneration,
 )
 from agent_switchboard._v3.navigator import NavigatorModel
-from agent_switchboard._v3.protocol import DirectiveKind, build_navigator_from_registry
+from agent_switchboard._v3.protocol import (
+    DirectiveKind,
+    PresentationDirective,
+    build_navigator_from_registry,
+)
 from agent_switchboard._v3.storage import Registry
+from agent_switchboard._v3.terminal_entry import EntryTarget, TerminalEntryRuntime
 from agent_switchboard._v3.tmux_view import TmuxExecutor
 from agent_switchboard._v3.views import ViewRuntime, ViewRuntimeError
 
@@ -426,6 +431,212 @@ def test_focus_restores_source_without_recovery_before_commit(
             "SELECT COUNT(*) FROM recoveries"
         ).fetchone()[0]
         assert recovery_count == 0
+    finally:
+        stop_tmux(tmux)
+
+
+def test_terminal_entry_prepares_plain_attach_and_managed_same_view(
+    tmp_path: Path,
+) -> None:
+    app, tmux = runtime(tmp_path)
+    try:
+        request = RequestId("bbbbbbbb-1111-4111-8111-111111111111")
+        plain = TerminalEntryRuntime(app, environment={}).enter(
+            HOST,
+            EntryTarget(project_id=PROJECT_A),
+            request_id=request,
+            mode=ViewMode.DIRECT,
+            confirm_background_transfer=False,
+            preflight_only=False,
+            hop_depth=None,
+            now=20,
+        )
+        assert plain.exec_argv is not None
+        assert plain.exec_argv[-1].endswith(":main")
+        view = app.registry.get_view(plain.view_id)
+        shell = tmux.inspect_shell("v3test", GENERATION, view.view_id, ViewMode.DIRECT)
+        assert (
+            tmux.pane_hop_depth(
+                generation_id=GENERATION,
+                view_id=view.view_id,
+                pane_id=shell.active.pane_id,
+            )
+            == 0
+        )
+
+        managed = TerminalEntryRuntime(
+            app,
+            environment={
+                "TMUX": f"{tmux.socket_path},123,0",
+                "TMUX_PANE": shell.active.pane_id,
+            },
+        ).enter(
+            HOST,
+            EntryTarget(view_id=view.view_id),
+            request_id=RequestId("bbbbbbbb-2222-4222-8222-222222222222"),
+            mode=ViewMode.DIRECT,
+            confirm_background_transfer=False,
+            preflight_only=False,
+            hop_depth=None,
+            now=21,
+        )
+        assert managed.view_id == view.view_id
+        assert managed.exec_argv is None
+    finally:
+        stop_tmux(tmux)
+
+
+def test_terminal_entry_owner_preflight_records_bounded_hop_depth(
+    tmp_path: Path,
+) -> None:
+    app, tmux = runtime(tmp_path)
+    try:
+        result = TerminalEntryRuntime(app, environment={}).enter(
+            HOST,
+            EntryTarget(project_id=PROJECT_A),
+            request_id=RequestId("cccccccc-1111-4111-8111-111111111111"),
+            mode=ViewMode.NAVIGATOR,
+            confirm_background_transfer=False,
+            preflight_only=True,
+            hop_depth=3,
+            now=20,
+        )
+        assert result.directive is not None
+        assert result.directive.kind is DirectiveKind.ATTACH
+        view = app.registry.get_view(result.view_id)
+        shell = tmux.inspect_shell(
+            "v3test", GENERATION, view.view_id, ViewMode.NAVIGATOR
+        )
+        assert (
+            tmux.pane_hop_depth(
+                generation_id=GENERATION,
+                view_id=view.view_id,
+                pane_id=shell.active.pane_id,
+            )
+            == 3
+        )
+    finally:
+        stop_tmux(tmux)
+
+
+def test_terminal_entry_blocks_fifth_cross_host_hop_before_network(
+    tmp_path: Path,
+) -> None:
+    app, tmux = runtime(tmp_path)
+    try:
+        opened = app.create_project_view(
+            PROJECT_A,
+            request_id=RequestId("dddddddd-1111-4111-8111-111111111111"),
+            mode=ViewMode.DIRECT,
+            view_id=VIEW,
+            now=20,
+        )
+        shell = tmux.inspect_shell("v3test", GENERATION, VIEW, ViewMode.DIRECT)
+        tmux.set_pane_hop_depth(
+            generation_id=GENERATION,
+            view_id=VIEW,
+            pane_id=shell.active.pane_id,
+            depth=4,
+        )
+        entry = TerminalEntryRuntime(
+            app,
+            environment={
+                "TMUX": f"{tmux.socket_path},123,0",
+                "TMUX_PANE": shell.active.pane_id,
+            },
+        )
+        with pytest.raises(ViewRuntimeError) as blocked:
+            entry.enter(
+                HostId("eeeeeeee-1111-4111-8111-111111111111"),
+                EntryTarget(view_id=opened.view.view_id),
+                request_id=RequestId("dddddddd-2222-4222-8222-222222222222"),
+                mode=ViewMode.DIRECT,
+                confirm_background_transfer=False,
+                preflight_only=False,
+                hop_depth=None,
+                now=21,
+            )
+        assert blocked.value.code == "cross_host_hop_limit"
+        assert "detach" in blocked.value.message
+    finally:
+        stop_tmux(tmux)
+
+
+def test_terminal_entry_remote_preflights_owner_then_returns_fixed_attach(
+    tmp_path: Path,
+) -> None:
+    remote_host = HostId("eeeeeeee-1111-4111-8111-111111111111")
+    remote_view = ViewId("ffffffff-1111-4111-8111-111111111111")
+    request = RequestId("eeeeeeee-2222-4222-8222-222222222222")
+
+    class FakeRemote:
+        arguments: tuple[str, ...] | None = None
+
+        async def directive(self, host_id: HostId, arguments: list[str]):
+            assert host_id == remote_host
+            self.arguments = tuple(arguments)
+            return PresentationDirective(
+                str(request),
+                str(remote_host),
+                DirectiveKind.ATTACH,
+                str(remote_view),
+                4,
+                "desktop-token",
+                10_000,
+            )
+
+        def attach_command(
+            self, host_id: HostId, *, view_id: str, request_id: str
+        ) -> tuple[str, ...]:
+            assert host_id == remote_host
+            assert view_id == str(remote_view)
+            assert request_id == str(request)
+            return ("ssh", "-tt", "snap.lan", "swbctl", "view", "attach")
+
+    app, tmux = runtime(tmp_path)
+    fake = FakeRemote()
+    try:
+        result = TerminalEntryRuntime(
+            app,
+            environment={},
+            remote_runtime=fake,  # type: ignore[arg-type]
+        ).enter(
+            remote_host,
+            EntryTarget(project_id=PROJECT_A, reuse_view_id=VIEW),
+            request_id=request,
+            mode=ViewMode.NAVIGATOR,
+            confirm_background_transfer=True,
+            preflight_only=False,
+            hop_depth=None,
+            now=20,
+        )
+        assert result.view_id == remote_view
+        assert result.exec_argv == (
+            "ssh",
+            "-tt",
+            "snap.lan",
+            "swbctl",
+            "view",
+            "attach",
+        )
+        assert fake.arguments == (
+            "view",
+            "enter",
+            "--host",
+            str(remote_host),
+            "--project",
+            str(PROJECT_A),
+            "--reuse-view",
+            str(VIEW),
+            "--mode",
+            "navigator",
+            "--request-id",
+            str(request),
+            "--hop-depth",
+            "1",
+            "--preflight-only",
+            "--confirm-background-transfer",
+        )
     finally:
         stop_tmux(tmux)
         app.opened.close()

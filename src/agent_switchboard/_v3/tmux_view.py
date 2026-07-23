@@ -28,6 +28,7 @@ SURFACE_ID_OPTION: Final = "@agent_switchboard_surface_id"
 ROLE_OPTION: Final = "@agent_switchboard_role"
 GENERATION_OPTION: Final = "@agent_switchboard_generation_id"
 ZOOM_OPTION: Final = "@agent_switchboard_zoomed"
+HOP_DEPTH_OPTION: Final = "@agent_switchboard_hop_depth"
 ROLE_SIDEBAR: Final = "sidebar"
 ROLE_ACTIVE: Final = "active"
 ROLE_PLACEHOLDER: Final = "placeholder"
@@ -102,6 +103,35 @@ class TmuxExecutor:
             command.extend(("-S", self.socket_path))
         command.extend(arguments)
         return command
+
+    @staticmethod
+    def inherited_context(
+        environment: Mapping[str, str],
+    ) -> tuple[str, str] | None:
+        """Return the exact inherited tmux socket and pane, if both are valid."""
+
+        raw_tmux = environment.get("TMUX")
+        pane_id = environment.get("TMUX_PANE")
+        if raw_tmux is None and pane_id is None:
+            return None
+        if raw_tmux is None or pane_id is None:
+            raise TmuxViewError(
+                "tmux_context_invalid", "TMUX and TMUX_PANE must appear together"
+            )
+        parts = raw_tmux.rsplit(",", 2)
+        if (
+            len(parts) != 3
+            or not Path(parts[0]).is_absolute()
+            or not parts[1].isdigit()
+            or not parts[2].isdigit()
+            or not pane_id.startswith("%")
+            or not pane_id[1:].isdigit()
+            or len(pane_id) > 64
+        ):
+            raise TmuxViewError(
+                "tmux_context_invalid", "inherited tmux context is malformed"
+            )
+        return parts[0], pane_id
 
     def run(
         self,
@@ -638,6 +668,139 @@ class TmuxExecutor:
                 "pane_input_uncertain", "pane input fencing did not settle"
             )
         return observed
+
+    def pane_hop_depth(
+        self,
+        *,
+        generation_id: GenerationId,
+        view_id: ViewId,
+        pane_id: str,
+    ) -> int:
+        target = self._pane(pane_id)
+        if target.view_id != str(view_id) or target.generation_id != str(generation_id):
+            raise TmuxViewError("pane_authority", "pane authority differs")
+        raw = self.run(
+            "show-options",
+            "-p",
+            "-v",
+            "-t",
+            pane_id,
+            HOP_DEPTH_OPTION,
+            check=False,
+        ).stdout.strip()
+        if not raw:
+            return 0
+        if not raw.isdigit() or not 0 <= int(raw) <= 4:
+            raise TmuxViewError(
+                "hop_depth_invalid", "managed pane hop depth is invalid"
+            )
+        return int(raw)
+
+    def set_pane_hop_depth(
+        self,
+        *,
+        generation_id: GenerationId,
+        view_id: ViewId,
+        pane_id: str,
+        depth: int,
+    ) -> PaneObservation:
+        target = self._pane(pane_id)
+        if target.view_id != str(view_id) or target.generation_id != str(generation_id):
+            raise TmuxViewError("pane_authority", "pane authority differs")
+        if isinstance(depth, bool) or not 0 <= depth <= 4:
+            raise TmuxViewError(
+                "hop_depth_invalid", "hop depth must be between 0 and 4"
+            )
+        self.run(
+            "set-option",
+            "-p",
+            "-t",
+            pane_id,
+            HOP_DEPTH_OPTION,
+            str(depth),
+        )
+        if (
+            self.pane_hop_depth(
+                generation_id=generation_id,
+                view_id=view_id,
+                pane_id=pane_id,
+            )
+            != depth
+        ):
+            raise TmuxViewError(
+                "hop_depth_uncertain", "managed pane hop depth did not settle"
+            )
+        return self._pane(pane_id)
+
+    def exact_client_for_pane(self, pane_id: str) -> str:
+        """Resolve the sole client currently displaying one exact source pane."""
+
+        self._pane(pane_id)
+        result = self.run(
+            "list-clients",
+            "-F",
+            "#{client_name}\t#{pane_id}",
+            check=False,
+        )
+        matches: list[str] = []
+        if result.returncode == 0:
+            for row in result.stdout.splitlines():
+                fields = row.split("\t")
+                if len(fields) != 2:
+                    raise TmuxViewError(
+                        "tmux_client_invalid", "tmux client evidence is malformed"
+                    )
+                if fields[1] == pane_id:
+                    matches.append(fields[0])
+        if len(matches) != 1 or not matches[0]:
+            raise TmuxViewError(
+                "managed_client_ambiguous",
+                "no single tmux client displays the invoking managed pane",
+            )
+        return matches[0]
+
+    def switch_exact_client(
+        self,
+        *,
+        client_name: str,
+        source_pane_id: str,
+        target_session: str,
+    ) -> None:
+        if self.exact_client_for_pane(source_pane_id) != client_name:
+            raise TmuxViewError(
+                "managed_client_ambiguous", "tmux client changed before switching"
+            )
+        self.run("has-session", "-t", f"={target_session}")
+        self.run("switch-client", "-c", client_name, "-t", f"={target_session}")
+        rows = self.run(
+            "list-clients", "-F", "#{client_name}\t#{session_name}"
+        ).stdout.splitlines()
+        matches = [
+            row.split("\t", 1)[1] for row in rows if row.startswith(f"{client_name}\t")
+        ]
+        if matches != [target_session]:
+            raise TmuxViewError(
+                "client_switch_uncertain", "tmux client switch did not settle"
+            )
+
+    def replace_exact_client(
+        self,
+        *,
+        client_name: str,
+        source_pane_id: str,
+        command: tuple[str, ...],
+    ) -> None:
+        if self.exact_client_for_pane(source_pane_id) != client_name:
+            raise TmuxViewError(
+                "managed_client_ambiguous", "tmux client changed before replacement"
+            )
+        self.run(
+            "detach-client",
+            "-t",
+            client_name,
+            "-E",
+            self._command(command),
+        )
 
     def submit_control_prompt(
         self,

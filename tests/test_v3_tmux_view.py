@@ -19,7 +19,9 @@ from agent_switchboard._v3.tmux_view import TmuxExecutor, TmuxViewError
 GENERATION = GenerationId("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
 HOST = HostId("11111111-1111-4111-8111-111111111111")
 VIEW = ViewId("22222222-2222-4222-8222-222222222222")
+VIEW_TWO = ViewId("22222222-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
 FRAME = "33333333-3333-4333-8333-333333333333"
+FRAME_TWO = "33333333-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
 SURFACE = "44444444-4444-4444-8444-444444444444"
 
 pytestmark = pytest.mark.skipif(shutil.which("tmux") is None, reason="tmux required")
@@ -221,6 +223,72 @@ def test_server_restart_changes_generation_and_invalidates_old_shell(
         with pytest.raises(TmuxViewError):
             tmux.inspect_shell("test", GENERATION, VIEW, ViewMode.DIRECT)
     finally:
+        subprocess.run(
+            ["tmux", "-S", str(socket), "kill-server"],
+            check=False,
+            capture_output=True,
+        )
+
+
+def test_exact_client_switch_and_replacement_are_single_client_scoped(
+    tmp_path: Path,
+) -> None:
+    socket = tmp_path / "tmux.sock"
+    tmux = TmuxExecutor(socket)
+    client: subprocess.Popen[bytes] | None = None
+    master: int | None = None
+    try:
+        tmux.server_evidence(HOST, observed_at=10)
+        first = tmux.create_shell(
+            prefix="test",
+            generation_id=GENERATION,
+            view_id=VIEW,
+            frame_id=FRAME,
+            mode=ViewMode.DIRECT,
+            sidebar_command=("sleep", "60"),
+        )
+        second = tmux.create_shell(
+            prefix="test",
+            generation_id=GENERATION,
+            view_id=VIEW_TWO,
+            frame_id=FRAME_TWO,
+            mode=ViewMode.DIRECT,
+            sidebar_command=("sleep", "60"),
+        )
+        master, slave = pty.openpty()
+        environment = dict(os.environ)
+        environment["TERM"] = "xterm-256color"
+        environment.pop("TMUX", None)
+        client = subprocess.Popen(
+            tmux.attach_argv("test", VIEW),
+            stdin=slave,
+            stdout=slave,
+            stderr=slave,
+            close_fds=True,
+            env=environment,
+        )
+        os.close(slave)
+        assert wait_for(lambda: tmux.run("list-clients", check=False).returncode == 0)
+        client_name = tmux.exact_client_for_pane(first.active.pane_id)
+        tmux.switch_exact_client(
+            client_name=client_name,
+            source_pane_id=first.active.pane_id,
+            target_session=tmux.names("test", VIEW_TWO).view_session,
+        )
+        assert tmux.exact_client_for_pane(second.active.pane_id) == client_name
+        tmux.replace_exact_client(
+            client_name=client_name,
+            source_pane_id=second.active.pane_id,
+            command=("/usr/bin/true",),
+        )
+        assert client.wait(timeout=3) == 0
+        client = None
+    finally:
+        if client is not None:
+            client.terminate()
+            client.wait(timeout=3)
+        if master is not None:
+            os.close(master)
         subprocess.run(
             ["tmux", "-S", str(socket), "kill-server"],
             check=False,

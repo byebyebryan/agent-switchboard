@@ -62,6 +62,7 @@ from .protocol import (
 from .provider_runtime import ProviderRuntimeError, probe_contract
 from .remote import RemoteError, RemoteRuntime
 from .storage import ConflictError
+from .terminal_entry import EntryTarget, TerminalEntryRuntime
 from .tmux_view import TmuxExecutor, TmuxViewError
 from .trusted_hook import HookInputError, handle_trusted_event, read_hook_json
 from .views import ViewRuntime, ViewRuntimeError
@@ -294,6 +295,51 @@ def _view(arguments: argparse.Namespace) -> int:
             return 0
         if arguments.view_command == "show":
             _print(_view_dict(opened.registry.get_view(ViewId(arguments.view))))
+            return 0
+        if arguments.view_command == "enter":
+            if arguments.reuse_view is not None and arguments.project is None:
+                raise ValueError("--reuse-view requires --project")
+            if arguments.frame is not None and arguments.view is None:
+                raise ValueError("--frame requires --view")
+            request_id = _request(arguments.request_id)
+            result = TerminalEntryRuntime(runtime).enter(
+                HostId(arguments.host),
+                EntryTarget(
+                    project_id=(
+                        None
+                        if arguments.project is None
+                        else ProjectId(arguments.project)
+                    ),
+                    reuse_view_id=(
+                        None
+                        if arguments.reuse_view is None
+                        else ViewId(arguments.reuse_view)
+                    ),
+                    view_id=(
+                        None if arguments.view is None else ViewId(arguments.view)
+                    ),
+                    frame_id=(
+                        None if arguments.frame is None else FrameId(arguments.frame)
+                    ),
+                    recovery_id=(
+                        None
+                        if arguments.recovery is None
+                        else RecoveryId(arguments.recovery)
+                    ),
+                ),
+                request_id=request_id,
+                mode=ViewMode(arguments.mode),
+                confirm_background_transfer=arguments.confirm_background_transfer,
+                preflight_only=arguments.preflight_only,
+                hop_depth=arguments.hop_depth,
+                now=timestamp,
+            )
+            if result.directive is not None:
+                print(result.directive.to_json())
+                return 0
+            if result.exec_argv is not None:
+                os.execvp(result.exec_argv[0], result.exec_argv)
+            _print({"viewId": str(result.view_id), "entered": True})
             return 0
         if arguments.view_command == "open":
             host_id = HostId(arguments.host)
@@ -849,6 +895,24 @@ def _parser() -> argparse.ArgumentParser:
     show = view_sub.add_parser("show")
     show.add_argument("--view", required=True)
     show.add_argument("--at", type=int)
+    enter = view_sub.add_parser("enter")
+    enter.add_argument("--host", required=True)
+    enter_target = enter.add_mutually_exclusive_group(required=True)
+    enter_target.add_argument("--project")
+    enter_target.add_argument("--view")
+    enter_target.add_argument("--recovery")
+    enter.add_argument("--reuse-view")
+    enter.add_argument("--frame")
+    enter.add_argument(
+        "--mode",
+        choices=[item.value for item in ViewMode],
+        default=ViewMode.NAVIGATOR.value,
+    )
+    enter.add_argument("--request-id")
+    enter.add_argument("--confirm-background-transfer", action="store_true")
+    enter.add_argument("--hop-depth", type=int, help=argparse.SUPPRESS)
+    enter.add_argument("--preflight-only", action="store_true", help=argparse.SUPPRESS)
+    enter.add_argument("--at", type=int)
     open_command = view_sub.add_parser("open")
     open_command.add_argument("--host", required=True)
     open_target = open_command.add_mutually_exclusive_group(required=True)
