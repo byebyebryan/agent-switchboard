@@ -2,14 +2,15 @@
 
 Date: 2026-07-22
 
-Status: complete; workflow adoption remains a separate user decision
+Status: implementation closure complete; isolated managed-session acceptance pending
 
-Phase 6F makes the resident navigator and terminal-native entry path complete
-enough for an explicit adoption decision. It does not install a new workflow,
-edit normal provider hooks, restart DMS, replace the user's tmux server, or
-claim authority over existing Codex or Claude Code sessions.
+Phase 6F makes the resident navigator and terminal-native managed-session path
+complete enough for an isolated acceptance trial. Workflow adoption remains a
+later explicit user decision. Acceptance does not restart DMS, replace the
+user's tmux server, or claim authority over existing Codex or Claude Code
+sessions.
 
-## Accepted behavior
+## Implemented behavior
 
 - `view enter` resolves a project, exact view/frame, or recovery on its owner
   host and selects navigator or direct mode in one command.
@@ -30,6 +31,12 @@ claim authority over existing Codex or Claude Code sessions.
   `Recovery`, and `Settings`. Breadcrumb, activity, attention,
   transition/control, and action status remain visible while one bounded
   asynchronous action runs.
+- `n` starts the configured provider in an empty foreground workspace. The
+  equivalent owner-local command is `frame start`; project/view entry remains
+  navigation-only and does not add a provider picker.
+- First-session membership, launch/surface staging, placement ownership, and
+  WorkContext acquisition commit atomically. Pre-execution failure restores the
+  exact empty workspace; ambiguity after provider execution opens recovery.
 - Local state refreshes once per second. Remote state refreshes at the
   configured interval or explicitly with `r`. Structured action failures remain
   visible; unsafe background transfer is retried only after `y` confirmation.
@@ -45,9 +52,29 @@ ancestry; that remains Phase 6G.
 
 ## Automated evidence
 
-The exact implementation commit `0477332b440802e3501b8499ea6bc37b404c15ee`
-passed the complete 113-test suite on both the local host and `snap.lan`.
-Coverage includes:
+The earlier terminal-shell implementation commit
+`0477332b440802e3501b8499ea6bc37b404c15ee` passed 113 tests on both the local
+host and `snap.lan`. That evidence did not start a managed workspace from the
+public TUI and therefore did not close Phase 6F.
+
+The `0.3.1` closure suite adds:
+
+- fresh project-view to managed workspace start without direct registry
+  seeding;
+- exact pre-provider rollback of session, surface, placement, WorkContext, and
+  staged pane;
+- immediate task-push eligibility after first-session binding;
+- navigator `n` routing through public `frame start`;
+- imported-session WorkContext reacquisition;
+- stopped provider-session bookkeeping on completed/dismissed child cleanup;
+  and
+- ten-second default hooks pinned to the resolved immutable release path.
+
+The exact closure implementation commit
+`cb28da06d5f2f79864be3e11ebeeef3aec8608ad` passed all 117 local tests,
+repository-wide Ruff lint/format, compile checks, and `git diff --check`.
+
+Existing coverage still includes:
 
 - authority-safe focus, explicit background confirmation, atomic foreground
   transfer, exact rollback, and uncertainty recovery;
@@ -60,21 +87,24 @@ Coverage includes:
 - the existing workspace/one-child Back, Human close, Complete-return,
   control-turn, recovery, and provider command contracts.
 
-Both hosts also passed Ruff, compile checks, and `git diff --check`. No test
-used the user's normal tmux server or persistent Switchboard roots.
+Remote suite results and managed lifecycle evidence are recorded only after the
+closure candidate is installed. No test may use the user's normal tmux server
+or native sessions.
 
-## Artifact and clean-install evidence
+## Prior artifact and clean-install evidence
 
-Two builds with the same fixed source epoch produced byte-identical wheel and
-sdist artifacts. The distribution verifier passed exact member, source-byte,
-metadata, migration, removed-module, CRC, and archive-safety audits.
+The earlier `0.3.0` build produced byte-identical wheel and sdist artifacts,
+and the distribution verifier passed exact member, source-byte, metadata,
+migration, removed-module, CRC, and archive-safety audits.
 
 The wheel was installed into a clean virtual environment with Textual `8.2.8`.
 The installed `swbctl 0.3.0` and navigator module loaded successfully, and a
 temporary configuration completed fresh `init`, canonical `state navigator`,
 and compare-and-swap `reset` without hooks, providers, DMS, or persistent state.
+The committed `0.3.1` source must repeat the reproducible artifact audit and
+clean-install smoke before live acceptance.
 
-## Disposable provider and remote-owner evidence
+## Prior disposable provider and remote-owner evidence
 
 Provider probes used unique temporary homes and tmux sockets, started no prompt
 and made no model request:
@@ -84,10 +114,11 @@ and made no model request:
 | Codex | `0.145.0` | local | native `codex` pane remained live in isolated tmux |
 | Claude Code | `2.1.218` | `snap.lan` | native `claude` pane remained live in isolated tmux |
 
-Only a dedicated Codex auth file was copied, with mode `0600`, into its
-temporary home. No dedicated Claude credential file existed, so no persistent
-Claude configuration was copied. Both tmux servers and homes were removed by
-their owning probes.
+These were provider/shell probes, not a managed workspace lifecycle. Only a
+dedicated Codex auth file was copied, with mode `0600`, into its temporary home.
+No dedicated Claude credential file existed, so no persistent Claude
+configuration was copied. Both tmux servers and homes were removed by their
+owning probes.
 
 On `snap.lan`, the exact implementation commit used temporary Config/State
 roots and an isolated tmux socket to execute owner-local `view enter`
@@ -97,17 +128,38 @@ installed `swbctl` route was deliberately not replaced for acceptance; fixed
 SSH argv, owner identity, attach construction, and exact-client replacement are
 covered by deterministic production-path tests.
 
+## Pending managed-session gate
+
+Using a disposable project/worktree, isolated Switchboard roots, an isolated
+tmux socket, and new provider UUIDs:
+
+1. install the committed `0.3.1` candidate as the route for new Switchboard
+   actions without stopping native sessions;
+2. install only Switchboard-owned global hook handlers, pinned to that immutable
+   release, and review Codex trust manually through `/hooks`;
+3. enter the project in navigator mode and start its empty workspace with `n`;
+4. prove trusted `SessionStart`, prompt, tool, and `Stop` delivery is confined to
+   the managed pane while pre-existing sessions remain unmanaged;
+5. execute workspace -> task -> Complete-return -> workspace, then detach,
+   reattach, and toggle navigator/direct mode; and
+6. remove the disposable roots/socket/session and preserve only bounded
+   acceptance evidence.
+
+Any failed candidate state may be discarded. Existing agent sessions, normal
+tmux, and unrelated provider configuration are never stopped for this gate.
+
 ## Safety and adoption boundary
 
 No acceptance step:
 
-- edited or installed normal Codex/Claude hooks;
+- removes or modifies unrelated Codex/Claude hooks or edits provider trust
+  state programmatically;
 - stopped, restarted, detached, resumed, or sent input to an existing agent;
 - killed or replaced the user's tmux server;
 - changed installed Switchboard state or inferred adoption;
 - touched the DMS repository, plugin, cache, or service; or
 - required coordinated host downtime.
 
-Phase 6F closes the implementation and coexistence gate. Native tooling remains
-the active workflow until the user explicitly chooses adoption. Phase 6G may
-now begin as a separate recursive-frame batch without changing that boundary.
+Phase 6F implementation is closed, but acceptance is not. Native tooling
+remains the active workflow until the user explicitly chooses adoption. Phase
+6G remains blocked until the disposable managed lifecycle above passes.

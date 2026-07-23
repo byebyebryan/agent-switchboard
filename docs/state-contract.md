@@ -4,7 +4,7 @@ Date: 2026-07-21
 
 Status: Phase 6B.1 implementation contract locked, implemented, and validated
 
-Target release: `0.3.0`
+Target release: `0.3.1`
 
 This document is the storage and state-machine authority for the view-first
 replacement. [The design](design.md) owns product boundaries,
@@ -159,6 +159,14 @@ A provider session belongs to at most one frame. `(frame_id, ordinal)` and
 `session_key` are unique. Resuming the same provider UUID into another process
 does not create another membership. Provider rollover appends a membership and
 updates the frame's current session atomically.
+
+The first session in an empty workspace is a single atomic start bundle:
+provider session, ordinal-one `started` membership, frame current-session
+pointer, planned launch and surface, `active -> staged` placement, and
+`released -> held` WorkContext claim. The held foreground is the workspace
+frame. Before provider execution, exact rollback removes the bundle and restores
+an empty active placement plus released context. After execution is attempted,
+the bundle is recovery-owned and is never deleted or retried by inference.
 
 ### WorkContext
 

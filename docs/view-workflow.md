@@ -2,7 +2,7 @@
 
 Date: 2026-07-22
 
-Status: implemented through Phase 6F terminal-native acceptance
+Status: Phase 6F implementation closure complete; isolated managed-session acceptance pending
 
 ## Purpose
 
@@ -53,6 +53,7 @@ current work in this project.” These are separate facts.
 CLI/TUI opens project
   -> core focuses/creates its host-local view
   -> view presents the project's current open frame or workspace
+  -> user starts the empty workspace once; later entry reuses its exact session
   -> user asks for a substantial outcome
   -> workspace agent prepares a child frame and bounded brief
   -> trusted post-turn hook parks/fences the workspace
@@ -68,6 +69,25 @@ CLI/TUI opens project
 
 There is no task form, duplicate provider picker, ceremonial `continue`, raw
 prompt replay, hidden semantic injection, or manual tmux lookup.
+
+## Starting an Empty Workspace
+
+Project/view entry is navigation-only. If the workspace has no provider
+session, the navigator exposes `n` and the public equivalent is:
+
+```sh
+swbctl frame start --host HOST --frame FRAME --request-id UUID
+```
+
+Provider selection follows the frame/project configuration; the start command
+does not add a second provider picker. Before provider execution, core commits
+the first `FrameSession`, planned launch/surface, staged placement, and held
+WorkContext with the workspace as foreground in one transaction. A failure
+before execution removes that exact bundle and staged pane. Once provider
+execution is attempted, ambiguity opens recovery and is never silently retried.
+Success binds the exact provider UUID and capability, activates and presents the
+surface, and leaves the workspace immediately eligible for conservative task
+push.
 
 ## Entering a View or Project
 
@@ -296,8 +316,9 @@ An SSH client uses the primary terminal-native path. `swbctl view enter`
 resolves a project, exact view/frame, or recovery and preserves the selected
 navigator/direct mode. `swbctl view list` discovers durable local views and
 `swbctl view attach --view VIEW` remains the lower-level exact attach command.
-Neither starts or resumes a provider. A provider `frame reopen` reports success
-only after the exact surface has moved from holding into `view.main`.
+Neither navigation command starts or resumes a provider. Explicit `frame start`
+and `frame reopen` report success only after the exact surface has moved from
+holding into `view.main`.
 
 ## Optional Desktop Entry and Recovery
 

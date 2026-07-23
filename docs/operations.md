@@ -69,7 +69,11 @@ Therefore:
   evidence is invalid, the hook fails closed with one bounded, content-free
   diagnostic; and
 - hook installation and removal edits only handlers owned by the current
-  Switchboard hook identity and preserves all unrelated provider settings.
+  Switchboard hook identity and preserves all unrelated provider settings;
+- installation records the resolved immutable `swbctl` release path, not its
+  mutable public symlink, and uses a ten-second provider timeout by default; and
+- Codex hook trust remains an explicit `/hooks` review. Switchboard never edits
+  Codex trust state programmatically.
 
 A broken hook is contained by removing only Switchboard-owned handlers. Agent
 sessions continue running while the hook is repaired and tested in isolation.
@@ -84,6 +88,8 @@ swbctl view enter --host <host-id> --project <project-id>
 swbctl view enter --host <host-id> --view <view-id> --mode direct
 swbctl view list
 swbctl view attach --view <view-id>
+swbctl frame start --host <host-id> --frame <workspace-frame-id> \
+  --request-id <uuid>
 ```
 
 `view enter` creates/reuses and prepares the target, then attaches from a plain
@@ -92,8 +98,10 @@ tmux client, or owner-preflights and replaces that client for a configured
 remote. It never derives SSH endpoints from UI state. `view attach` remains the
 lower-level exact-view path: it revalidates, creates and claims its own bounded local
 attachment lease, and then execs the exact tmux attachment. It never starts or
-resumes a provider. `frame reopen` must finish provider launch and project the
-exact surface into the persistent view before it reports success.
+resumes a provider. An empty foreground workspace is started explicitly with
+`frame start`, or with `n` in the navigator. `frame start` and `frame reopen`
+must finish provider launch and project the exact surface into the persistent
+view before either reports success.
 
 Do not run `codex resume` or `claude --resume` after Switchboard has already
 opened the managed surface; that would create a second runtime for the same

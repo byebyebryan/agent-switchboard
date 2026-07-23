@@ -9,7 +9,7 @@ history and terminal UI.
 
 ## Release shape
 
-Core `0.3.0` is the clean-break Phase 6 generation. It exposes only Config v3,
+Core `0.3.1` is the current clean-break Phase 6 generation. It exposes only Config v3,
 registry schema v1, HostState/NavigatorState/PresentationDirective v1, and the
 view/frame workflow. Snapshot/Fleet, task-first CRUD, the old administrative
 TUI, old migrations, and compatibility aliases are not installed. The compact
@@ -40,7 +40,7 @@ swbctl view recover --host HOST --recovery RECOVERY --request-id UUID \
 swbctl view attach --view VIEW [--host HOST] [--request-id UUID]
 
 swbctl view list|show|focus|mode|retire
-swbctl frame list|show|push|back|complete|close|reopen
+swbctl frame list|show|start|push|back|complete|close|reopen
 swbctl project ...
 swbctl session show|stop ...
 swbctl hooks ...
@@ -60,8 +60,8 @@ that adapter is no longer a release, development, or acceptance dependency.
 DMS integration is deferred as an optional convenience entry point after the
 TUI-first workflow is accepted.
 
-Phase 6F terminal-native acceptance is complete, but workflow adoption remains
-a separate user decision. Normal work continues through
+Phase 6F implementation closure is complete; isolated managed-session
+acceptance and workflow adoption remain separate user decisions. Normal work continues through
 native Codex, Claude Code, and tmux. Testing uses isolated Switchboard roots,
 tmux servers, views, and provider sessions; it does not stop existing agents,
 restart user tmux, edit normal provider hooks, or restart DMS. `init` and

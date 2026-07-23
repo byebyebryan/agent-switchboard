@@ -2,9 +2,9 @@
 
 Date: 2026-07-22
 
-Status: Phase 6F terminal-native acceptance complete; workflow adoption remains explicit
+Status: Phase 6F implementation closure complete; isolated managed-session acceptance pending
 
-Target release: `0.3.0`
+Target release: `0.3.1`
 
 The implemented `0.2.0` task-first product is historical input, not a
 compatibility boundary. Phase 6 replaced its registry, protocols, command
@@ -310,7 +310,7 @@ swbctl view open --host HOST (--view VIEW | --project PROJECT) --request-id UUID
 swbctl view recover --host HOST --recovery RECOVERY --request-id UUID --json
 swbctl view attach --view VIEW [--host HOST] [--request-id UUID]
 swbctl view list|show|focus|mode|retire
-swbctl frame list|show|push|back|complete|close|reopen
+swbctl frame list|show|start|push|back|complete|close|reopen
 swbctl project ...
 swbctl session show|stop ...
 swbctl hooks ...

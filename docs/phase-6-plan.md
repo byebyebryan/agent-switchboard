@@ -2,9 +2,11 @@
 
 Date: 2026-07-22
 
-Status: Phase 6A.1 through 6F complete; workflow adoption remains explicit; Phase 6G is next
+Status: Phase 6A.1 through 6E.1 complete; Phase 6F implementation closure
+complete and isolated managed-session acceptance pending; Phase 6G is blocked
+on that gate
 
-Target core release: `0.3.0`
+Target core release: `0.3.1`
 
 Historical Phase 6E DMS rehearsal adapter: `0.5.0` (deferred, not paired)
 
@@ -330,7 +332,8 @@ recorded in [Phase 6E.1 Acceptance](phase-6e1-acceptance.md).
 
 ### Phase 6F: TUI-first coexistence and adoption gate
 
-Status: complete. Exact evidence is in
+Status: implementation complete; isolated managed-session acceptance pending.
+Evidence is in
 [Phase 6F Acceptance](phase-6f-acceptance.md).
 
 - Make navigator mode the default for new CLI/SSH views while keeping direct
@@ -340,6 +343,10 @@ Status: complete. Exact evidence is in
 - Complete the resident navigator's project, view, task, attention, transition,
   history, and recovery interactions against NavigatorState and owner-routed
   actions.
+- Start the configured provider from an empty workspace through one public
+  `frame start` command and the navigator `n` action. Commit session membership,
+  surface staging, placement ownership, and WorkContext claim atomically before
+  crossing the provider-execution boundary.
 - Prove the happy path from the primary TUI: project to task, task close/return,
   continued project work, project-to-project switching, task-to-task switching,
   detach, reattach, and navigator/direct toggles.
@@ -352,6 +359,10 @@ Status: complete. Exact evidence is in
 Exit: the terminal-native navigator is sufficient for daily local use, direct
 mode preserves the same view/runtime, failure leaves native work intact, and
 the user can make a separate explicit decision about workflow adoption.
+
+Phase 6G must not begin until the isolated managed-session path proves trusted
+hook delivery and the workspace-to-task-to-workspace lifecycle without touching
+native sessions outside the disposable view.
 
 Phase 6F task-to-task navigation means selecting among existing open sibling
 frames. It does not lift the one-child creation/return bound. Recursive
