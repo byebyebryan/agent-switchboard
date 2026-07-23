@@ -72,6 +72,9 @@ Therefore:
   Switchboard hook identity and preserves all unrelated provider settings;
 - installation records the resolved immutable `swbctl` release path, not its
   mutable public symlink, and uses a ten-second provider timeout by default; and
+- managed Codex launches explicitly forward only the MCP capability,
+  Config/State roots, and isolated tmux socket by variable name; capability
+  values never appear in provider argv or durable Codex configuration; and
 - Codex hook trust remains an explicit `/hooks` review. Switchboard never edits
   Codex trust state programmatically.
 

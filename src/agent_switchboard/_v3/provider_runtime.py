@@ -23,6 +23,12 @@ CONTROL_PROMPT: Final = (
 )
 CODEX_KNOWN_GOOD_VERSIONS: Final = frozenset({"0.144.6"})
 CLAUDE_KNOWN_GOOD_VERSIONS: Final = frozenset({"2.1.216"})
+CODEX_SWITCHBOARD_MCP_ENV_VARS: Final = (
+    "AGENT_SWITCHBOARD_CAPABILITY",
+    "SWB_V3_CONFIG_ROOT",
+    "SWB_V3_STATE_ROOT",
+    "SWB_V3_TMUX_SOCKET",
+)
 _VERSION_VALUE_RE: Final = re.compile(r"\d+\.\d+\.\d+(?:[-+][^\s()]+)?$")
 _VERSION_RE: Final = re.compile(
     r"(?:^|\s)(?:codex(?:-cli)?\s+)?"
@@ -198,11 +204,18 @@ def _mcp_options(
         arguments = json.dumps(
             list(command[1:]), ensure_ascii=False, separators=(",", ":")
         )
+        environment = json.dumps(
+            list(CODEX_SWITCHBOARD_MCP_ENV_VARS),
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
         return (
             "-c",
             f"mcp_servers.switchboard.command={executable}",
             "-c",
             f"mcp_servers.switchboard.args={arguments}",
+            "-c",
+            f"mcp_servers.switchboard.env_vars={environment}",
         )
     document = json.dumps(
         {
@@ -375,6 +388,7 @@ def build_fork_command(
 __all__ = [
     "CLAUDE_KNOWN_GOOD_VERSIONS",
     "CODEX_KNOWN_GOOD_VERSIONS",
+    "CODEX_SWITCHBOARD_MCP_ENV_VARS",
     "CONTROL_PROMPT",
     "ProviderCommand",
     "ProviderContract",

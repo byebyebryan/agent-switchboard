@@ -8,6 +8,7 @@ import pytest
 
 from agent_switchboard._v3.domain import ProviderId
 from agent_switchboard._v3.provider_runtime import (
+    CODEX_SWITCHBOARD_MCP_ENV_VARS,
     CONTROL_PROMPT,
     ProviderContract,
     ProviderRuntimeError,
@@ -144,11 +145,26 @@ def test_provider_commands_register_only_the_explicit_switchboard_mcp() -> None:
         injected_environment={},
         mcp_command=command,
     )
-    assert codex.argv[4:8] == (
+    assert codex.argv[4:10] == (
         "-c",
         'mcp_servers.switchboard.command="/opt/swb-python"',
         "-c",
         'mcp_servers.switchboard.args=["-m","agent_switchboard._v3","agent-mcp"]',
+        "-c",
+        (
+            "mcp_servers.switchboard.env_vars="
+            '["AGENT_SWITCHBOARD_CAPABILITY","SWB_V3_CONFIG_ROOT",'
+            '"SWB_V3_STATE_ROOT","SWB_V3_TMUX_SOCKET"]'
+        ),
+    )
+    assert "AGENT_SWITCHBOARD_LAUNCH_ID" not in codex.argv
+    assert "AGENT_SWITCHBOARD_SURFACE_ID" not in codex.argv
+    assert "SWB_V3_SESSION_KEY" not in codex.argv
+    assert CODEX_SWITCHBOARD_MCP_ENV_VARS == (
+        "AGENT_SWITCHBOARD_CAPABILITY",
+        "SWB_V3_CONFIG_ROOT",
+        "SWB_V3_STATE_ROOT",
+        "SWB_V3_TMUX_SOCKET",
     )
     claude = build_resume_command(
         ProviderContract(ProviderId.CLAUDE, "claude", "2.1.216"),
@@ -160,3 +176,4 @@ def test_provider_commands_register_only_the_explicit_switchboard_mcp() -> None:
     )
     assert claude.argv[3] == "--mcp-config"
     assert '"switchboard"' in claude.argv[4]
+    assert "AGENT_SWITCHBOARD_CAPABILITY" not in claude.argv[4]

@@ -67,8 +67,9 @@ The `0.3.2` closure candidate includes:
 - navigator `n` routing through public `frame start`;
 - imported-session WorkContext reacquisition;
 - stopped provider-session bookkeeping on completed/dismissed child cleanup;
-  and
-- ten-second default hooks pinned to the resolved immutable release path.
+  ten-second default hooks pinned to the resolved immutable release path; and
+- explicit least-privilege forwarding of pane-local MCP authority into Codex's
+  clean stdio-server environment without placing capability values in argv.
 
 The exact closure implementation commit
 `cb28da06d5f2f79864be3e11ebeeef3aec8608ad` passed all 117 local tests,
