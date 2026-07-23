@@ -4,7 +4,7 @@ Date: 2026-07-21
 
 Status: Phase 6B.1 implementation contract locked, implemented, and validated
 
-Target release: `0.3.1`
+Target release: `0.3.2`
 
 This document is the storage and state-machine authority for the view-first
 replacement. [The design](design.md) owns product boundaries,

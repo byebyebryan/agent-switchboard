@@ -4,7 +4,7 @@ Date: 2026-07-22
 
 Status: Phase 6F implementation closure complete; isolated managed-session acceptance pending
 
-Target release: `0.3.1`
+Target release: `0.3.2`
 
 The implemented `0.2.0` task-first product is historical input, not a
 compatibility boundary. Phase 6 replaced its registry, protocols, command

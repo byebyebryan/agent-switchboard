@@ -6,7 +6,7 @@ Status: Phase 6A.1 through 6E.1 complete; Phase 6F implementation closure
 complete and isolated managed-session acceptance pending; Phase 6G is blocked
 on that gate
 
-Target core release: `0.3.1`
+Target core release: `0.3.2`
 
 Historical Phase 6E DMS rehearsal adapter: `0.5.0` (deferred, not paired)
 

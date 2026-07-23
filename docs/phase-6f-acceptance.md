@@ -57,7 +57,7 @@ The earlier terminal-shell implementation commit
 host and `snap.lan`. That evidence did not start a managed workspace from the
 public TUI and therefore did not close Phase 6F.
 
-The `0.3.1` closure suite adds:
+The `0.3.2` closure candidate includes:
 
 - fresh project-view to managed workspace start without direct registry
   seeding;
@@ -101,7 +101,7 @@ The wheel was installed into a clean virtual environment with Textual `8.2.8`.
 The installed `swbctl 0.3.0` and navigator module loaded successfully, and a
 temporary configuration completed fresh `init`, canonical `state navigator`,
 and compare-and-swap `reset` without hooks, providers, DMS, or persistent state.
-The committed `0.3.1` source must repeat the reproducible artifact audit and
+The committed `0.3.2` source must repeat the reproducible artifact audit and
 clean-install smoke before live acceptance.
 
 ## Prior disposable provider and remote-owner evidence
@@ -133,7 +133,7 @@ covered by deterministic production-path tests.
 Using a disposable project/worktree, isolated Switchboard roots, an isolated
 tmux socket, and new provider UUIDs:
 
-1. install the committed `0.3.1` candidate as the route for new Switchboard
+1. install the committed `0.3.2` candidate as the route for new Switchboard
    actions without stopping native sessions;
 2. install only Switchboard-owned global hook handlers, pinned to that immutable
    release, and review Codex trust manually through `/hooks`;

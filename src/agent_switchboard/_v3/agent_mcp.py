@@ -6,11 +6,13 @@ import json
 from collections.abc import Mapping
 from typing import BinaryIO, Final
 
+from . import __version__
 from .domain import ProviderId, RequestId, TransitionId, ViewMode
 from .views import ViewRuntime
 from .workflow import WorkflowRuntime
 
 MCP_PROTOCOL_VERSION: Final = "2025-11-25"
+MCP_PROTOCOL_VERSIONS: Final = (MCP_PROTOCOL_VERSION, "2025-06-18")
 MAX_MCP_LINE_BYTES: Final = 1024 * 1024
 
 
@@ -399,6 +401,16 @@ def _write(stream: BinaryIO, value: object) -> None:
     stream.flush()
 
 
+def _negotiate_protocol(params: object) -> str:
+    initialize = _object(params, "params")
+    requested = initialize.get("protocolVersion")
+    if not isinstance(requested, str) or not requested:
+        raise McpError(-32602, "params.protocolVersion is required")
+    if requested in MCP_PROTOCOL_VERSIONS:
+        return requested
+    return MCP_PROTOCOL_VERSION
+
+
 def run_mcp_server(
     service: AgentToolService, input_stream: BinaryIO, output_stream: BinaryIO
 ) -> int:
@@ -438,17 +450,18 @@ def run_mcp_server(
             if method == "initialize":
                 if notification or initialized:
                     raise McpError(-32600, "initialize request is invalid")
+                protocol_version = _negotiate_protocol(message.get("params", {}))
                 initialized = True
                 _write(
                     output_stream,
                     _response(
                         identifier,
                         {
-                            "protocolVersion": MCP_PROTOCOL_VERSION,
+                            "protocolVersion": protocol_version,
                             "capabilities": {"tools": {"listChanged": False}},
                             "serverInfo": {
                                 "name": "agent-switchboard-v3",
-                                "version": "0.3.0",
+                                "version": __version__,
                             },
                         },
                     ),
@@ -519,6 +532,7 @@ def _error(identifier: object, code: int, message: str) -> dict[str, object]:
 __all__ = [
     "MAX_MCP_LINE_BYTES",
     "MCP_PROTOCOL_VERSION",
+    "MCP_PROTOCOL_VERSIONS",
     "TOOLS",
     "AgentToolService",
     "run_mcp_server",
