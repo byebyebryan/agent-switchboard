@@ -30,6 +30,15 @@ from spikes.thread_workstream.evidence import (
     write_private_json,
 )
 from spikes.thread_workstream.isolation import reject_repository
+from spikes.thread_workstream.memory_continuity import (
+    ContinuityProfile,
+    FailingMemoryAdapter,
+    FixedMemoryAdapter,
+    MemoryObservation,
+    TransitionCapsule,
+    evaluate_continuity,
+)
+from spikes.thread_workstream.memory_study import run_study as run_memory_study
 from spikes.thread_workstream.navigator import (
     NavigatorError,
     NavigatorState,
@@ -519,3 +528,97 @@ def test_retained_managed_worktree_fixture_is_sanitized_and_passing() -> None:
     assert "/tmp/" not in encoded
     assert "recorded_commit" not in encoded
     assert "repository_identity" not in encoded
+
+
+def memory_capsule() -> TransitionCapsule:
+    return TransitionCapsule(
+        accepted_plan="bounded accepted plan",
+        triggering_input="continue",
+        project_scope="disposable-project",
+    )
+
+
+def healthy_memory(**overrides: object) -> MemoryObservation:
+    values: dict[str, object] = {
+        "available": True,
+        "healthy": True,
+        "scope_exact": True,
+        "recent_context": True,
+        "planning_context": True,
+        "latency_ms": 1,
+    }
+    values.update(overrides)
+    return MemoryObservation(**values)  # type: ignore[arg-type]
+
+
+def test_memory_full_continuity_requires_two_timely_exact_observations() -> None:
+    outcome = evaluate_continuity(
+        memory_capsule(),
+        FixedMemoryAdapter(healthy_memory()),
+    )
+    assert outcome.profile is ContinuityProfile.FULL
+    assert outcome.plan_preserved is True
+    assert outcome.source == healthy_memory()
+    assert outcome.destination == healthy_memory()
+    assert outcome.memory_authorized_transition is False
+
+
+@pytest.mark.parametrize(
+    "adapter",
+    [
+        FailingMemoryAdapter(),
+        FixedMemoryAdapter(healthy_memory(latency_ms=2_001)),
+        FixedMemoryAdapter(healthy_memory(recent_context=False)),
+        FixedMemoryAdapter(healthy_memory(scope_exact=False)),
+    ],
+)
+def test_memory_degradation_is_immediate_only_and_plan_sufficient(
+    adapter: object,
+) -> None:
+    outcome = evaluate_continuity(
+        memory_capsule(),
+        adapter,  # type: ignore[arg-type]
+    )
+    assert outcome.profile is ContinuityProfile.IMMEDIATE_ONLY
+    assert outcome.plan_preserved is True
+    assert outcome.memory_authorized_transition is False
+
+
+def test_incomplete_immediate_capsule_blocks_without_memory_authority() -> None:
+    outcome = evaluate_continuity(
+        replace(memory_capsule(), accepted_plan=""),
+        FixedMemoryAdapter(healthy_memory()),
+    )
+    assert outcome.profile is ContinuityProfile.BLOCKED
+    assert outcome.plan_preserved is False
+    assert outcome.source is None
+    assert outcome.destination is None
+    assert outcome.memory_authorized_transition is False
+
+
+def test_live_memory_study_passes_reference_and_degradation_gates() -> None:
+    _version, _fingerprint, status, assertions, timings = run_memory_study()
+    assert status is StudyStatus.PASS
+    assert all(assertions.values())
+    assert all(value >= 0 for value in timings.values())
+
+
+def test_retained_memory_fixture_is_sanitized_and_passing() -> None:
+    fixture = (
+        ROOT
+        / "spikes"
+        / "fixtures"
+        / "thread-workstream"
+        / "memory"
+        / "external-continuity.json"
+    )
+    retained = json.loads(fixture.read_text())
+    assert retained["status"] == "pass"
+    assert all(retained["assertions"].values())
+    assert all(retained["isolation"].values())
+    assert all(retained["cleanup"].values())
+    encoded = fixture.read_text()
+    assert "/home/" not in encoded
+    assert "/tmp/" not in encoded
+    assert "bounded accepted plan" not in encoded
+    assert "memory_content" not in encoded

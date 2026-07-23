@@ -53,6 +53,18 @@ Managed-worktree ownership runs with:
 The retained result is a secondary-study pass. See
 `docs/spikes/managed-worktree-ownership.md`.
 
+External-memory continuity and deterministic degradation run with:
+
+```sh
+.venv/bin/python -m spikes.thread_workstream.memory_study \
+  --output spikes/fixtures/thread-workstream/memory/external-continuity.json
+```
+
+The retained result proves a healthy read-only reference can provide `full`
+continuity while unavailable, delayed, stale, and wrong-scope references
+accurately degrade to `immediate-only`. See
+`docs/spikes/external-memory-continuity.md`.
+
 ## Local checks
 
 ```sh

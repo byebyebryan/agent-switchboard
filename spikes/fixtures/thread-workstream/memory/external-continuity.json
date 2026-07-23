@@ -1,0 +1,55 @@
+{
+  "assertions": {
+    "accepted_plan_preserved_with_live_reference": true,
+    "accepted_plan_survives_all_degradation": true,
+    "delayed_reports_immediate_only": true,
+    "destination_scope_exact": true,
+    "live_reference_full_continuity": true,
+    "memory_never_authorizes_transition": true,
+    "recent_planning_context_before_first_turn": true,
+    "source_scope_exact": true,
+    "stale_reports_immediate_only": true,
+    "unavailable_reports_immediate_only": true,
+    "wrong_scope_reports_immediate_only": true
+  },
+  "assisted": false,
+  "cleanup": {
+    "provider_state_unchanged": true,
+    "temporary_memory_state_not_created": true
+  },
+  "contractFingerprint": "cb703c847a70dec15699809482fec5c0dad309cc9349c22382776aa72506a8e5",
+  "eventOrder": [
+    "transition-capsule-validated",
+    "source-scope-observed",
+    "destination-scope-observed",
+    "continuity-classified-before-first-turn",
+    "degradation-replayed"
+  ],
+  "installedVersion": "13.11.0",
+  "isolation": {
+    "memory_reference_read_only": true,
+    "provider_turns_not_started": true,
+    "retained_content_excluded": true
+  },
+  "limitations": [
+    "live reference proves immediate injection only",
+    "memory content quality was not evaluated"
+  ],
+  "privacyAudit": {
+    "credentialsExcluded": true,
+    "providerIdentifiersExcluded": true,
+    "providerInputExcluded": true,
+    "providerOutputExcluded": true,
+    "runtimeLocationsExcluded": true,
+    "runtimeProcessIdentifiersExcluded": true
+  },
+  "provider": "claude-mem",
+  "schemaVersion": 1,
+  "status": "pass",
+  "study": "external-memory-continuity",
+  "timingsMs": {
+    "destination_reference": 10,
+    "source_reference": 16,
+    "total": 26
+  }
+}
