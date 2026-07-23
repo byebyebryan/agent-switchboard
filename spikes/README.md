@@ -4,6 +4,24 @@ These probes test the provider and transport assumptions in
 `docs/product-landscape.md`. They retain structure, lifecycle metadata, and
 timings, but not prompts or transcript content.
 
+## Thread/workstream redesign studies
+
+`spikes/thread_workstream/` is a second, explicitly non-production evidence
+harness for the proposed thread/workstream redesign. It refuses non-disposable
+repositories, roots provider and Switchboard state below one temporary
+directory, uses a unique private tmux socket, and records raw provider events
+only in a mode-`0600` temporary file. Raw input, output, provider UUIDs, paths,
+pane/process identifiers, and credentials are deleted rather than retained.
+
+Only `pass`, `falsified`, and `blocked` sanitized results may be committed.
+Assisted or manual runs are diagnostic and cannot produce `pass`.
+
+The harness and its fail-closed privacy/isolation checks run with:
+
+```sh
+.venv/bin/pytest -q tests/test_v3_thread_workstream_spikes.py
+```
+
 ## Local checks
 
 ```sh

@@ -48,7 +48,7 @@ only-include = [
 
 [tool.pytest.ini_options]
 addopts = "-ra"
-pythonpath = ["src"]
+pythonpath = ["src", "."]
 testpaths = ["tests"]
 python_files = ["test_v3_*.py"]
 
