@@ -33,6 +33,16 @@ The retained `0.145.0` result is a Gate 1 pass. Its procedure, limitations, and
 decision impact are recorded in
 `docs/spikes/codex-native-rollover.md`.
 
+Trusted adoption plus native input-fenced history runs with:
+
+```sh
+.venv/bin/python -m spikes.thread_workstream.trust_history \
+  --output spikes/fixtures/thread-workstream/codex/0.145.0/trust-history.json
+```
+
+The retained result passes Gates 2 and 3. See
+`docs/spikes/rollover-trust-history.md`.
+
 ## Local checks
 
 ```sh

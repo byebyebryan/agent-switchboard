@@ -520,6 +520,18 @@ def run_live_study(
     codex: str,
     credential_home: Path,
     keep_private_events: bool,
+    post_rollover: Callable[
+        [
+            IsolationLayout,
+            PrivateTmuxTui,
+            Mapping[str, str],
+            CodexAppServer,
+            Sequence[str],
+            Sequence[Mapping[str, Any]],
+        ],
+        Mapping[str, bool],
+    ]
+    | None = None,
 ) -> tuple[str, str, StudyStatus, LiveObservations]:
     started = time.monotonic()
     version = provider_version(codex)
@@ -770,6 +782,20 @@ def run_live_study(
                     ).stdout,
                 }
             )
+            if post_rollover is not None:
+                additional = dict(
+                    post_rollover(
+                        layout,
+                        tui,
+                        environment,
+                        app_server,
+                        tuple(identities),
+                        tuple(final_events),
+                    )
+                )
+                if observations.assertions.keys() & additional.keys():
+                    raise LiveStudyError("post-rollover assertion name collided")
+                observations.assertions.update(additional)
         status = (
             StudyStatus.PASS
             if all(observations.assertions.values())
