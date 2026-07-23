@@ -416,7 +416,7 @@ def parse_legacy_config(data: bytes | str, *, host_id: HostId) -> LegacyConfig:
         ),
         HooksConfig(
             _integer(
-                hooks_table.get("timeout_seconds", 1),
+                hooks_table.get("timeout_seconds", 10),
                 "hooks.timeout_seconds",
                 1,
                 30,

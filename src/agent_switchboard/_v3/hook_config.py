@@ -272,7 +272,7 @@ def edit_hooks(
             current,
             operation=operation,
             provider=provider,
-            executable=executable,
+            executable=target,
             timeout=timeout_seconds,
         )
         return HookEditResult(path, updated != current, removed, installed, True)
@@ -295,7 +295,7 @@ def edit_hooks(
                 current,
                 operation=operation,
                 provider=provider,
-                executable=executable,
+                executable=target,
                 timeout=timeout_seconds,
             )
             changed = updated != current

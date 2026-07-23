@@ -166,15 +166,15 @@ def test_fresh_cli_init_reset_and_opt_in_hooks_are_self_contained(
     installed = json.loads(capsys.readouterr().out)
     assert installed["installedHandlers"] == 5
     hook_document = json.loads((codex_home / "hooks.json").read_text())
-    assert (
-        sum(
-            handler.get("statusMessage") == STATUS_MESSAGE
-            for groups in hook_document["hooks"].values()
-            for group in groups
-            for handler in group["hooks"]
-        )
-        == 5
-    )
+    owned_hooks = [
+        handler
+        for groups in hook_document["hooks"].values()
+        for group in groups
+        for handler in group["hooks"]
+        if handler.get("statusMessage") == STATUS_MESSAGE
+    ]
+    assert len(owned_hooks) == 5
+    assert {handler["timeout"] for handler in owned_hooks} == {10}
 
     assert (
         v3_main(
@@ -467,6 +467,10 @@ def test_private_cli_runs_staged_reads_then_committed_view_workflow(
             "runtimePresence": "live",
             "sessionKey": SESSION_KEY,
         }
+        assert v3_main([*base, "state", "host", "--json", "--at", "104"]) == 0
+        host_state = json.loads(capsys.readouterr().out)
+        assert host_state["workContexts"][0]["claimState"] == "held"
+        assert host_state["workContexts"][0]["foregroundFrameId"] == frame_id
         surface_panes = [
             pane
             for pane in tmux.panes()

@@ -62,6 +62,7 @@ from .domain import (
     LaunchState,
     LeaseId,
     LeaseState,
+    MembershipReason,
     PlacementId,
     PlacementState,
     Project,
@@ -626,6 +627,15 @@ class Registry:
 
     def get_launch(self, launch_id: LaunchId) -> LaunchIntent:
         return _launch(self._one("launch_intents", "launch_id", launch_id))
+
+    def find_launch_by_request(
+        self, host_id: HostId, request_id: RequestId
+    ) -> LaunchIntent | None:
+        row = self.connection.execute(
+            "SELECT * FROM launch_intents WHERE host_id = ? AND request_id = ?",
+            (str(host_id), str(request_id)),
+        ).fetchone()
+        return None if row is None else _launch(row)
 
     def get_surface(self, surface_id: SurfaceId) -> Surface:
         return _surface(self._one("surfaces", "surface_id", surface_id))
@@ -2452,6 +2462,309 @@ class Registry:
         except sqlite3.IntegrityError as error:
             raise ConflictError("launch_conflict", str(error)) from error
         return self.get_launch(launch.launch_id), self.get_surface(surface.surface_id)
+
+    def prepare_workspace_start(
+        self,
+        *,
+        session: ProviderSession,
+        membership: FrameSession,
+        launch: LaunchIntent,
+        surface: Surface,
+        placement_id: PlacementId,
+        expected_placement_generation: int,
+        expected_claim_generation: int,
+        now: int | None = None,
+    ) -> tuple[
+        ProviderSession,
+        FramePlacement,
+        WorkContext,
+        LaunchIntent,
+        Surface,
+    ]:
+        """Atomically claim an empty workspace and stage its first session."""
+
+        timestamp = _timestamp(now)
+        self._require_local_host(session.host_id)
+        if (
+            membership.session_key != session.session_key
+            or membership.ordinal != 1
+            or membership.membership_reason is not MembershipReason.STARTED
+            or launch.host_id != session.host_id
+            or launch.frame_id != membership.frame_id
+            or launch.provider is not session.provider
+            or launch.action is not LaunchAction.NEW
+            or launch.target_session_key is not None
+            or launch.state is not LaunchState.PLANNED
+            or surface.host_id != session.host_id
+            or surface.provider is not session.provider
+            or surface.launch_id != launch.launch_id
+            or surface.session_key is not None
+            or surface.lifecycle_state is not SurfaceState.PLANNED
+            or session.project_id is None
+            or session.checkout_id is None
+            or session.runtime_presence is not RuntimePresence.STOPPED
+            or session.resumability is not Resumability.RESUMABLE
+        ):
+            raise ConflictError(
+                "workspace_start_bundle",
+                "workspace start bundle identities disagree",
+            )
+        try:
+            with self.transaction(immediate=True) as connection:
+                frame = connection.execute(
+                    "SELECT * FROM frames WHERE frame_id = ?",
+                    (str(membership.frame_id),),
+                ).fetchone()
+                placement = connection.execute(
+                    "SELECT * FROM frame_placements WHERE placement_id = ?",
+                    (str(placement_id),),
+                ).fetchone()
+                if frame is None or placement is None:
+                    raise ConflictError(
+                        "not_found", "workspace frame or placement does not exist"
+                    )
+                view = connection.execute(
+                    "SELECT * FROM user_views WHERE view_id = ?",
+                    (placement["view_id"],),
+                ).fetchone()
+                context = connection.execute(
+                    "SELECT * FROM work_contexts WHERE work_context_id = ?",
+                    (frame["work_context_id"],),
+                ).fetchone()
+                if (
+                    view is None
+                    or context is None
+                    or frame["host_id"] != str(session.host_id)
+                    or frame["project_id"] != str(session.project_id)
+                    or frame["role"] != FrameRole.WORKSPACE.value
+                    or frame["lifecycle_state"] != FrameLifecycleState.OPEN.value
+                    or frame["current_session_key"] is not None
+                    or placement["host_id"] != str(session.host_id)
+                    or placement["frame_id"] != str(membership.frame_id)
+                    or placement["state"] != PlacementState.ACTIVE.value
+                    or placement["surface_id"] is not None
+                    or placement["generation"] != expected_placement_generation
+                    or view["state"] != ViewState.READY.value
+                    or view["active_frame_id"] != str(membership.frame_id)
+                    or context["host_id"] != str(session.host_id)
+                    or context["project_id"] != str(session.project_id)
+                    or context["checkout_id"] != str(session.checkout_id)
+                    or context["claim_state"] != ClaimState.RELEASED.value
+                    or context["claim_generation"] != expected_claim_generation
+                    or context["foreground_frame_id"] is not None
+                    or context["background_state"] != BackgroundState.SAFE.value
+                ):
+                    raise ConflictError(
+                        "workspace_start_precondition",
+                        "empty workspace ownership changed",
+                    )
+                connection.execute(
+                    "INSERT INTO provider_sessions VALUES "
+                    "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        str(session.session_key),
+                        str(session.host_id),
+                        session.provider.value,
+                        str(session.provider_session_id),
+                        str(session.project_id),
+                        str(session.checkout_id),
+                        session.name,
+                        session.purpose,
+                        session.pinned,
+                        session.runtime_presence.value,
+                        session.resumability.value,
+                        session.activity.value,
+                        session.activity_reason.value,
+                        session.created_at,
+                        session.provider_updated_at,
+                        session.last_observed_at,
+                        session.updated_at,
+                    ),
+                )
+                connection.execute(
+                    "INSERT INTO frame_sessions VALUES (?, ?, ?, ?, ?, ?)",
+                    (
+                        str(membership.frame_session_id),
+                        str(membership.frame_id),
+                        str(membership.session_key),
+                        membership.ordinal,
+                        membership.membership_reason.value,
+                        membership.joined_at,
+                    ),
+                )
+                connection.execute(
+                    "UPDATE frames SET current_session_key = ?, updated_at = ? "
+                    "WHERE frame_id = ?",
+                    (
+                        str(session.session_key),
+                        timestamp,
+                        str(membership.frame_id),
+                    ),
+                )
+                connection.execute(
+                    "INSERT INTO launch_intents VALUES "
+                    "(?, ?, ?, ?, ?, 'new', NULL, 'planned', "
+                    "NULL, NULL, NULL, ?, ?)",
+                    (
+                        str(launch.launch_id),
+                        str(launch.request_id),
+                        str(launch.host_id),
+                        str(launch.frame_id),
+                        launch.provider.value,
+                        launch.created_at,
+                        launch.updated_at,
+                    ),
+                )
+                connection.execute(
+                    "INSERT INTO surfaces VALUES "
+                    "(?, ?, ?, NULL, ?, 'planned', NULL, NULL, NULL, NULL, "
+                    "0, ?, ?, NULL)",
+                    (
+                        str(surface.surface_id),
+                        str(surface.host_id),
+                        surface.provider.value,
+                        str(surface.launch_id),
+                        surface.created_at,
+                        surface.updated_at,
+                    ),
+                )
+                connection.execute(
+                    "UPDATE frame_placements SET surface_id = ?, state = 'staged', "
+                    "generation = generation + 1, updated_at = ? "
+                    "WHERE placement_id = ?",
+                    (str(surface.surface_id), timestamp, str(placement_id)),
+                )
+                connection.execute(
+                    "UPDATE work_contexts SET claim_state = 'held', "
+                    "claim_generation = claim_generation + 1, "
+                    "foreground_frame_id = ?, acquired_at = ?, "
+                    "released_at = NULL, updated_at = ? "
+                    "WHERE work_context_id = ?",
+                    (
+                        str(membership.frame_id),
+                        timestamp,
+                        timestamp,
+                        frame["work_context_id"],
+                    ),
+                )
+        except sqlite3.IntegrityError as error:
+            raise ConflictError("workspace_start_conflict", str(error)) from error
+        persisted_frame = self.get_frame(membership.frame_id)
+        return (
+            self.get_provider_session(session.session_key),
+            self.get_placement(placement_id),
+            self.get_work_context(persisted_frame.work_context_id),
+            self.get_launch(launch.launch_id),
+            self.get_surface(surface.surface_id),
+        )
+
+    def rollback_workspace_start(
+        self,
+        launch_id: LaunchId,
+        *,
+        now: int | None = None,
+    ) -> None:
+        """Remove only an unexecuted, unbound first-session start bundle."""
+
+        timestamp = _timestamp(now)
+        try:
+            with self.transaction(immediate=True) as connection:
+                row = connection.execute(
+                    """
+                    SELECT launch.*, surface.surface_id,
+                           surface.lifecycle_state AS surface_state,
+                           surface.session_key AS surface_session_key,
+                           frame.current_session_key, frame.work_context_id,
+                           placement.placement_id,
+                           placement.state AS placement_state,
+                           placement.surface_id AS placement_surface_id,
+                           context.claim_state, context.foreground_frame_id,
+                           membership.frame_session_id,
+                           membership.membership_reason,
+                           membership.ordinal,
+                           session.runtime_presence
+                    FROM launch_intents AS launch
+                    JOIN surfaces AS surface ON surface.launch_id = launch.launch_id
+                    JOIN frames AS frame ON frame.frame_id = launch.frame_id
+                    JOIN frame_placements AS placement
+                      ON placement.frame_id = launch.frame_id
+                     AND placement.surface_id = surface.surface_id
+                    JOIN work_contexts AS context
+                      ON context.work_context_id = frame.work_context_id
+                    JOIN frame_sessions AS membership
+                      ON membership.frame_id = frame.frame_id
+                     AND membership.session_key = frame.current_session_key
+                    JOIN provider_sessions AS session
+                      ON session.session_key = frame.current_session_key
+                    WHERE launch.launch_id = ?
+                    """,
+                    (str(launch_id),),
+                ).fetchone()
+                if row is None:
+                    raise ConflictError(
+                        "not_found", "workspace start bundle does not exist"
+                    )
+                if (
+                    row["action"] != LaunchAction.NEW.value
+                    or row["state"] != LaunchState.PLANNED.value
+                    or row["target_session_key"] is not None
+                    or row["surface_state"] != SurfaceState.PLANNED.value
+                    or row["surface_session_key"] is not None
+                    or row["placement_state"] != PlacementState.STAGED.value
+                    or row["placement_surface_id"] != row["surface_id"]
+                    or row["claim_state"] != ClaimState.HELD.value
+                    or row["foreground_frame_id"] != row["frame_id"]
+                    or row["membership_reason"] != MembershipReason.STARTED.value
+                    or row["ordinal"] != 1
+                    or row["runtime_presence"] != RuntimePresence.STOPPED.value
+                    or row["current_session_key"] is None
+                ):
+                    raise ConflictError(
+                        "workspace_start_rollback_unsafe",
+                        "workspace start crossed the execution boundary",
+                    )
+                connection.execute(
+                    "UPDATE frame_placements SET surface_id = NULL, state = 'active', "
+                    "generation = generation + 1, last_focused_at = ?, updated_at = ? "
+                    "WHERE placement_id = ?",
+                    (
+                        timestamp,
+                        timestamp,
+                        row["placement_id"],
+                    ),
+                )
+                connection.execute(
+                    "UPDATE work_contexts SET claim_state = 'released', "
+                    "claim_generation = claim_generation + 1, "
+                    "foreground_frame_id = NULL, released_at = ?, updated_at = ? "
+                    "WHERE work_context_id = ?",
+                    (timestamp, timestamp, row["work_context_id"]),
+                )
+                connection.execute(
+                    "UPDATE frames SET current_session_key = NULL, updated_at = ? "
+                    "WHERE frame_id = ?",
+                    (timestamp, row["frame_id"]),
+                )
+                connection.execute(
+                    "DELETE FROM frame_sessions WHERE frame_session_id = ?",
+                    (row["frame_session_id"],),
+                )
+                connection.execute(
+                    "DELETE FROM surfaces WHERE surface_id = ?",
+                    (row["surface_id"],),
+                )
+                connection.execute(
+                    "DELETE FROM launch_intents WHERE launch_id = ?",
+                    (str(launch_id),),
+                )
+                connection.execute(
+                    "DELETE FROM provider_sessions WHERE session_key = ?",
+                    (row["current_session_key"],),
+                )
+        except sqlite3.IntegrityError as error:
+            raise ConflictError(
+                "workspace_start_rollback_conflict", str(error)
+            ) from error
 
     def prepare_resume_surface(
         self,

@@ -26,6 +26,7 @@ from agent_switchboard._v3.domain import (
     AgentCapability,
     CapabilityId,
     ControlTurnPolicy,
+    FrameId,
     FrameSession,
     FrameSessionId,
     LaunchAction,
@@ -49,11 +50,11 @@ from agent_switchboard._v3.domain import (
 )
 from agent_switchboard._v3.generation import GenerationPaths, OpenGeneration
 from agent_switchboard._v3.provider_runtime import ProviderContract
-from agent_switchboard._v3.storage import Registry
+from agent_switchboard._v3.storage import ConflictError, Registry
 from agent_switchboard._v3.tmux_view import TmuxExecutor
 from agent_switchboard._v3.trusted_hook import handle_trusted_event
 from agent_switchboard._v3.views import ViewRuntime
-from agent_switchboard._v3.workflow import WorkflowRuntime
+from agent_switchboard._v3.workflow import WorkflowError, WorkflowRuntime
 
 pytestmark = pytest.mark.skipif(shutil.which("tmux") is None, reason="tmux required")
 
@@ -63,6 +64,7 @@ CHILD_SESSION_ID = UUID("66666666-2222-4666-8666-222222222222")
 PARENT_TOKEN = "phase6d-parent-capability"
 CHILD_TOKEN = "phase6d-child-capability"
 RESUMED_PARENT_TOKEN = "phase6d-resumed-parent-capability"
+WORKSPACE_TOKEN = "phase6f-workspace-capability"
 
 
 class Allocator:
@@ -74,6 +76,21 @@ class Allocator:
         assert title == "Child task"
         assert contract.version == "0.144.6"
         return CHILD_SESSION_ID
+
+    def cleanup(self, provider, session_id, contract):  # type: ignore[no-untyped-def]
+        self.cleaned.append(session_id)
+
+
+class WorkspaceAllocator:
+    def __init__(self) -> None:
+        self.available = [PARENT_SESSION_ID, CHILD_SESSION_ID]
+        self.cleaned: list[UUID] = []
+
+    def allocate(self, provider, title, contract):  # type: ignore[no-untyped-def]
+        assert provider is ProviderId.CODEX
+        assert title
+        assert contract.version == "0.144.6"
+        return self.available.pop(0)
 
     def cleanup(self, provider, session_id, contract):  # type: ignore[no-untyped-def]
         self.cleaned.append(session_id)
@@ -279,6 +296,194 @@ def _runtime(tmp_path: Path) -> tuple[WorkflowRuntime, TmuxExecutor, str, str]:
     return workflow, tmux, PARENT_TOKEN, CHILD_TOKEN
 
 
+def _empty_runtime(
+    tmp_path: Path,
+) -> tuple[WorkflowRuntime, TmuxExecutor, FrameId, WorkspaceAllocator]:
+    configured = build_config(tmp_path)
+    opened = OpenGeneration(
+        configured.generation_id,
+        configured,
+        Registry(
+            tmp_path / "switchboard.db",
+            generation_id=configured.generation_id,
+            local_host_id=configured.host.host_id,
+            local_display_name=configured.host.display_name,
+            initial_activation_state=ActivationState.COMMITTED,
+            now=10,
+        ),
+        ActivationState.COMMITTED,
+    )
+    opened.registry.materialize_catalog(
+        configured.host.host_id,
+        configured.projects,
+        configured.repositories,
+        configured.project_repositories,
+        configured.checkouts,
+        now=11,
+    )
+    tmux = TmuxExecutor(tmp_path / "tmux.sock")
+    paths = GenerationPaths(tmp_path / "config", tmp_path / "state")
+    created = ViewRuntime(opened, paths, tmux=tmux).create_project_view(
+        configured.projects[0].project_id,
+        request_id=RequestId("71717171-1111-4711-8711-111111111111"),
+        mode=ViewMode.DIRECT,
+        view_id=VIEW,
+        now=20,
+    )
+    assert created.view.active_frame_id is not None
+    allocator = WorkspaceAllocator()
+    workflow = WorkflowRuntime(
+        opened,
+        paths,
+        tmux=tmux,
+        allocator=allocator,
+        contracts={
+            ProviderId.CODEX: ProviderContract(
+                ProviderId.CODEX,
+                str(_fake_provider(tmp_path)),
+                "0.144.6",
+            )
+        },
+        capability_factory=lambda: WORKSPACE_TOKEN,
+    )
+    return workflow, tmux, created.view.active_frame_id, allocator
+
+
+def test_fresh_workspace_start_claims_context_and_enables_task_push(
+    tmp_path: Path,
+) -> None:
+    workflow, tmux, frame_id, _allocator = _empty_runtime(tmp_path)
+    request = RequestId("71717171-2222-4722-8722-222222222222")
+    try:
+        started = workflow.start_workspace_session(
+            frame_id,
+            request_id=request,
+            now=21,
+        )
+        assert started.runtime_presence is RuntimePresence.LIVE
+        assert (
+            workflow.start_workspace_session(
+                frame_id,
+                request_id=request,
+                now=22,
+            )
+            == started
+        )
+        frame = workflow.registry.get_frame(frame_id)
+        assert frame.current_session_key == started.session_key
+        context = workflow.registry.get_work_context(frame.work_context_id)
+        assert context.claim_state.value == "held"
+        assert context.foreground_frame_id == frame_id
+        placement = workflow.registry.list_placements(view_id=VIEW)[0]
+        assert placement.state is PlacementState.ACTIVE
+        assert placement.surface_id is not None
+        capability = workflow.registry.validate_capability(WORKSPACE_TOKEN, now=22)
+        assert capability.frame_id == frame_id
+        pushed = workflow.task_push(
+            WORKSPACE_TOKEN,
+            title="Child task",
+            brief="Prove the fresh public workspace path can push one task.",
+            request_id=RequestId("71717171-3333-4733-8733-333333333333"),
+            now=23,
+        )
+        assert pushed.state is TransitionState.PREPARED
+    finally:
+        workflow.opened.close()
+        if tmux.socket_path is not None:
+            subprocess.run(
+                ["tmux", "-S", tmux.socket_path, "kill-server"],
+                check=False,
+                capture_output=True,
+            )
+
+
+def test_fresh_workspace_start_rolls_back_before_provider_execution(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workflow, tmux, frame_id, allocator = _empty_runtime(tmp_path)
+
+    def reject_authorization(*_args: object, **_kwargs: object) -> None:
+        raise ConflictError("injected", "authorization did not commit")
+
+    monkeypatch.setattr(workflow.registry, "advance_launch", reject_authorization)
+    try:
+        with pytest.raises(ConflictError):
+            workflow.start_workspace_session(
+                frame_id,
+                request_id=RequestId("71717171-4444-4744-8744-444444444444"),
+                now=21,
+            )
+        frame = workflow.registry.get_frame(frame_id)
+        assert frame.current_session_key is None
+        context = workflow.registry.get_work_context(frame.work_context_id)
+        assert context.claim_state.value == "released"
+        assert context.foreground_frame_id is None
+        placement = workflow.registry.list_placements(view_id=VIEW)[0]
+        assert placement.state is PlacementState.ACTIVE
+        assert placement.surface_id is None
+        assert workflow.registry.list_surfaces() == ()
+        assert allocator.cleaned == [PARENT_SESSION_ID]
+        assert not any(pane.surface_id is not None for pane in tmux.panes())
+    finally:
+        workflow.opened.close()
+        if tmux.socket_path is not None:
+            subprocess.run(
+                ["tmux", "-S", tmux.socket_path, "kill-server"],
+                check=False,
+                capture_output=True,
+            )
+
+
+def test_fresh_workspace_start_preserves_bundle_when_rollback_is_uncertain(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workflow, tmux, frame_id, allocator = _empty_runtime(tmp_path)
+
+    def reject_authorization(*_args: object, **_kwargs: object) -> None:
+        raise ConflictError("injected", "authorization did not commit")
+
+    def reject_rollback(*_args: object, **_kwargs: object) -> None:
+        raise ConflictError("injected", "rollback did not commit")
+
+    monkeypatch.setattr(workflow.registry, "advance_launch", reject_authorization)
+    monkeypatch.setattr(
+        workflow.registry,
+        "rollback_workspace_start",
+        reject_rollback,
+    )
+    try:
+        with pytest.raises(WorkflowError) as caught:
+            workflow.start_workspace_session(
+                frame_id,
+                request_id=RequestId("71717171-5555-4755-8755-555555555555"),
+                now=21,
+            )
+        assert getattr(caught.value, "code", None) == (
+            "workspace_start_rollback_uncertain"
+        )
+        frame = workflow.registry.get_frame(frame_id)
+        assert frame.current_session_key is not None
+        context = workflow.registry.get_work_context(frame.work_context_id)
+        assert context.claim_state.value == "held"
+        placement = workflow.registry.list_placements(view_id=VIEW)[0]
+        assert placement.state is PlacementState.STAGED
+        assert placement.surface_id is not None
+        assert allocator.cleaned == []
+        assert any(
+            pane.surface_id == str(placement.surface_id) for pane in tmux.panes()
+        )
+    finally:
+        workflow.opened.close()
+        if tmux.socket_path is not None:
+            subprocess.run(
+                ["tmux", "-S", tmux.socket_path, "kill-server"],
+                check=False,
+                capture_output=True,
+            )
+
+
 def test_workspace_child_complete_return_is_exact_and_single_turn(
     tmp_path: Path,
 ) -> None:
@@ -339,6 +544,13 @@ def test_workspace_child_complete_return_is_exact_and_single_turn(
         )
         child = workflow.registry.get_frame(complete.source_frame_id)
         assert child.lifecycle_state.value == "closed"
+        assert child.current_session_key is not None
+        assert (
+            workflow.registry.get_provider_session(
+                child.current_session_key
+            ).runtime_presence
+            is RuntimePresence.STOPPED
+        )
     finally:
         workflow.opened.close()
         if tmux.socket_path is not None:
@@ -494,6 +706,13 @@ def test_human_close_presents_parent_then_dismisses_exact_child(
         assert closed.lifecycle_state.value == "closed"
         assert closed.close_reason is not None
         assert closed.close_reason.value == "dismissed"
+        assert closed.current_session_key is not None
+        assert (
+            workflow.registry.get_provider_session(
+                closed.current_session_key
+            ).runtime_presence
+            is RuntimePresence.STOPPED
+        )
         assert workflow.registry.get_view(VIEW).active_frame_id == child.parent_frame_id
     finally:
         workflow.opened.close()

@@ -233,6 +233,7 @@ def create_navigator_app(
         """
         BINDINGS: ClassVar[list[Binding]] = [
             Binding("r", "refresh_state", "Refresh"),
+            Binding("n", "start_workspace", "Start"),
             Binding("d", "direct", "Direct"),
             Binding("b", "back", "Back"),
             Binding("c", "close_task", "Close"),
@@ -467,6 +468,39 @@ def create_navigator_app(
 
         def action_refresh_state(self) -> None:
             self._queue(["state", "navigator", "--refresh"], "refresh")
+
+        def action_start_workspace(self) -> None:
+            active = next(
+                (
+                    frame
+                    for project in self.model.projects
+                    for frame in project.frames
+                    if frame["frameId"] == self.model.active_frame_id
+                ),
+                None,
+            )
+            if (
+                active is None
+                or active["role"] != "workspace"
+                or active["lifecycleState"] != "open"
+                or active["currentSession"] is not None
+            ):
+                self.action_status = "start unavailable: foreground is not empty"
+                self._render_model()
+                return
+            self._queue(
+                [
+                    "frame",
+                    "start",
+                    "--host",
+                    self.model.host_id,
+                    "--frame",
+                    str(active["frameId"]),
+                    "--request-id",
+                    str(uuid4()),
+                ],
+                "start workspace",
+            )
 
         def action_direct(self) -> None:
             self._queue(

@@ -127,6 +127,7 @@ def test_minimal_v3_configuration_has_phase6_defaults() -> None:
     assert config.automation.complete_return is CompleteReturnPolicy.SYNTHESIZE
     assert config.control_turns.transport is ControlTurnPolicy.LIVE_FIRST
     assert config.control_turns.watchdog_timeout_seconds == 5
+    assert config.hooks.timeout_seconds == 10
     assert not config.memory.enabled
 
 

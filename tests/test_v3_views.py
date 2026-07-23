@@ -712,6 +712,56 @@ def test_resident_navigator_factory_runs_structured_single_actions(
         app.opened.close()
 
 
+def test_navigator_starts_the_empty_foreground_workspace(tmp_path: Path) -> None:
+    app, tmux = runtime(tmp_path)
+    calls: list[list[str]] = []
+
+    async def action_runner(arguments: list[str]) -> ActionOutcome:
+        calls.append(list(arguments))
+        return ActionOutcome(True, payload={"runtimePresence": "live"})
+
+    try:
+        opened = app.create_project_view(
+            PROJECT_A,
+            request_id=RequestId("f1f1f1f1-2222-4222-8222-222222222222"),
+            mode=ViewMode.NAVIGATOR,
+            view_id=VIEW,
+            now=20,
+        )
+        frame_id = opened.view.active_frame_id
+        assert frame_id is not None
+        tui = create_navigator_app(
+            app.paths,
+            opened.view.view_id,
+            action_runner=action_runner,
+            opened_factory=lambda _paths: app.opened,
+        )
+
+        async def exercise() -> None:
+            async with tui.run_test() as pilot:
+                await pilot.press("n")
+                await pilot.pause()
+                assert len(calls) == 1
+                assert calls[0][:7] == [
+                    "frame",
+                    "start",
+                    "--host",
+                    str(HOST),
+                    "--frame",
+                    str(frame_id),
+                    "--request-id",
+                ]
+                assert len(calls[0][7]) == 36
+                assert (  # type: ignore[attr-defined]
+                    tui.action_status == "success: start workspace"
+                )
+
+        asyncio.run(exercise())
+    finally:
+        stop_tmux(tmux)
+        app.opened.close()
+
+
 def test_server_generation_loss_recreates_shell_and_fences_old_identity(
     tmp_path: Path,
 ) -> None:

@@ -20,6 +20,7 @@ from .domain import (
     BackgroundState,
     BriefId,
     CapabilityId,
+    ClaimState,
     CloseReason,
     CompleteReturnPolicy,
     CompletionHandoff,
@@ -262,6 +263,337 @@ class WorkflowRuntime:
                 else ProviderId.CODEX
             )
         )
+
+    def start_workspace_session(
+        self,
+        frame_id: FrameId,
+        *,
+        request_id: RequestId,
+        now: int,
+    ) -> ProviderSession:
+        """Start the configured provider in one exact empty workspace."""
+
+        self._require_mutation("frame start")
+        frame = self.registry.get_frame(FrameId(frame_id))
+        request = RequestId(request_id)
+        existing = self.registry.find_launch_by_request(self.host_id, request)
+        if existing is not None:
+            if (
+                existing.frame_id != frame.frame_id
+                or existing.action is not LaunchAction.NEW
+            ):
+                raise WorkflowError(
+                    "request_conflict", "request identifies another launch"
+                )
+            if existing.state is LaunchState.BOUND:
+                surfaces = [
+                    item
+                    for item in self.registry.list_surfaces()
+                    if item.launch_id == existing.launch_id
+                    and item.session_key is not None
+                ]
+                if len(surfaces) == 1:
+                    assert surfaces[0].session_key is not None
+                    return self.registry.get_provider_session(surfaces[0].session_key)
+            raise WorkflowError(
+                "workspace_start_pending",
+                "workspace start is already pending or requires recovery",
+            )
+        context = self.registry.get_work_context(frame.work_context_id)
+        placements = [
+            item
+            for item in self.registry.list_placements()
+            if item.frame_id == frame.frame_id
+            and item.state is PlacementState.ACTIVE
+            and item.surface_id is None
+        ]
+        if (
+            frame.role is not FrameRole.WORKSPACE
+            or frame.lifecycle_state is not FrameLifecycleState.OPEN
+            or frame.current_session_key is not None
+            or context.claim_state is not ClaimState.RELEASED
+            or context.foreground_frame_id is not None
+            or context.background_state is not BackgroundState.SAFE
+            or len(placements) != 1
+        ):
+            raise WorkflowError(
+                "workspace_start_precondition",
+                "frame is not one empty, released workspace",
+            )
+        placement = placements[0]
+        view = self.registry.get_view(placement.view_id)
+        if (
+            view.state is not ViewState.READY
+            or view.active_frame_id != frame.frame_id
+            or view.tmux_server_id is None
+        ):
+            raise WorkflowError(
+                "workspace_start_view", "workspace is not the ready view foreground"
+            )
+        selected = self._provider_for_frame(frame, None)
+        contract = self._provider_contract(selected)
+        session_id = self.allocator.allocate(selected, frame.title, contract)
+        session_key = SessionKey(self.host_id, selected, session_id)
+        launch_id = _stable_id(LaunchId, self.host_id, request, "workspace-start")
+        surface_id = _stable_id(SurfaceId, self.host_id, request, "workspace-start")
+        raw = self.capability_factory()
+        if not raw or "\x00" in raw:
+            with suppress(Exception):
+                self.allocator.cleanup(selected, session_id, contract)
+            raise WorkflowError(
+                "capability_generation_failed",
+                "capability generator returned invalid data",
+            )
+        try:
+            command = build_new_command(
+                contract,
+                cwd=self.registry.checkout_path(context.checkout_id),
+                session_id=session_id,
+                prompt=None,
+                injected_environment=self._managed_environment(
+                    raw_capability=raw,
+                    launch_id=launch_id,
+                    surface_id=surface_id,
+                    session_key=session_key,
+                ),
+                mcp_command=(sys.executable, "-m", "agent_switchboard", "agent-mcp"),
+            )
+        except Exception:
+            with suppress(Exception):
+                self.allocator.cleanup(selected, session_id, contract)
+            raise
+        session = ProviderSession(
+            session_key,
+            self.host_id,
+            selected,
+            session_id,
+            frame.project_id,
+            context.checkout_id,
+            frame.title,
+            frame.purpose,
+            False,
+            RuntimePresence.STOPPED,
+            Resumability.RESUMABLE,
+            Activity.READY,
+            ActivityReason.TURN_COMPLETE,
+            now,
+            now,
+            now,
+            now,
+        )
+        membership = FrameSession(
+            _stable_id(FrameSessionId, frame.frame_id, session_key),
+            frame.frame_id,
+            session_key,
+            1,
+            MembershipReason.STARTED,
+            now,
+        )
+        launch = LaunchIntent(
+            launch_id,
+            request,
+            self.host_id,
+            frame.frame_id,
+            selected,
+            LaunchAction.NEW,
+            None,
+            LaunchState.PLANNED,
+            None,
+            now,
+            now,
+        )
+        surface = Surface(
+            surface_id,
+            self.host_id,
+            selected,
+            None,
+            launch_id,
+            SurfaceState.PLANNED,
+            None,
+            None,
+            None,
+            None,
+            0,
+            now,
+            now,
+            None,
+        )
+        _view, executor = self._tmux_for_view(view.view_id)
+        pane: PaneObservation | None = None
+        prepared = False
+        try:
+            pane = executor.spawn_surface(
+                prefix=self.config.tmux.naming_prefix,
+                generation_id=self.generation_id,
+                view_id=view.view_id,
+                frame_id=str(frame.frame_id),
+                surface_id=str(surface_id),
+                command=("/usr/bin/sleep", "86400"),
+            )
+            if not pane.input_off:
+                raise WorkflowError(
+                    "workspace_start_unfenced",
+                    "workspace provider pane is not input fenced",
+                )
+            self.registry.prepare_workspace_start(
+                session=session,
+                membership=membership,
+                launch=launch,
+                surface=surface,
+                placement_id=placement.placement_id,
+                expected_placement_generation=placement.generation,
+                expected_claim_generation=context.claim_generation,
+                now=now,
+            )
+            prepared = True
+            self.registry.advance_launch(
+                launch_id, LaunchState.PLANNED, LaunchState.AUTHORIZED, now=now
+            )
+        except Exception:
+            if prepared:
+                try:
+                    self.registry.rollback_workspace_start(launch_id, now=now)
+                except Exception as rollback_error:
+                    self._open_recovery(
+                        kind="workspace_start_rollback_uncertain",
+                        subject_type="launch",
+                        subject_id=str(launch_id),
+                        explanation=(
+                            "Pre-execution workspace start rollback is uncertain."
+                        ),
+                        now=now,
+                        actionability=RecoveryActionability.MANUAL,
+                    )
+                    raise WorkflowError(
+                        "workspace_start_rollback_uncertain",
+                        "workspace start rollback requires exact recovery",
+                    ) from rollback_error
+            candidates = (
+                [pane]
+                if pane is not None
+                else [
+                    item
+                    for item in executor.panes()
+                    if item.surface_id == str(surface_id)
+                    and item.view_id == str(view.view_id)
+                    and item.generation_id == str(self.generation_id)
+                ]
+            )
+            if len(candidates) == 1:
+                with suppress(Exception):
+                    executor.discard_staged_surface(
+                        generation_id=self.generation_id,
+                        view_id=view.view_id,
+                        surface_id=str(surface_id),
+                        pane_id=candidates[0].pane_id,
+                    )
+            with suppress(Exception):
+                self.allocator.cleanup(selected, session_id, contract)
+            raise
+
+        assert pane is not None
+        try:
+            observed = executor.launch_surface(
+                generation_id=self.generation_id,
+                view_id=view.view_id,
+                frame_id=str(frame.frame_id),
+                surface_id=str(surface_id),
+                pane_id=pane.pane_id,
+                command=command.argv,
+                cwd=command.cwd,
+                environment=command.environment,
+            )
+            surface = self.registry.publish_surface(
+                surface_id,
+                surface.metadata_generation,
+                view.tmux_server_id,
+                pane.pane_id,
+                process_id=observed.process_id,
+                now=now,
+            )
+            self.registry.advance_launch(
+                launch_id, LaunchState.AUTHORIZED, LaunchState.STARTED, now=now
+            )
+            surface, _launch = self.registry.bind_surface_session(
+                surface_id,
+                surface.metadata_generation,
+                session_key,
+                now=now,
+            )
+            staged = self.registry.get_placement(placement.placement_id)
+            active = self.registry.advance_placement(
+                staged.placement_id,
+                staged.generation,
+                PlacementState.ACTIVE,
+                now=now,
+            )
+            session = self.registry.upsert_provider_session(
+                ProviderSession(
+                    session.session_key,
+                    session.host_id,
+                    session.provider,
+                    session.provider_session_id,
+                    session.project_id,
+                    session.checkout_id,
+                    session.name,
+                    session.purpose,
+                    session.pinned,
+                    RuntimePresence.LIVE,
+                    session.resumability,
+                    Activity.READY,
+                    ActivityReason.TURN_COMPLETE,
+                    session.created_at,
+                    now,
+                    now,
+                    now,
+                )
+            )
+            self.registry.issue_capability(
+                AgentCapability(
+                    CapabilityId(uuid4()),
+                    sha256(raw.encode("utf-8")).hexdigest(),
+                    self.host_id,
+                    view.view_id,
+                    frame.frame_id,
+                    session_key,
+                    surface.surface_id,
+                    surface.launch_id,
+                    surface.tmux_server_id,
+                    surface.pane_id,
+                    active.generation,
+                    now,
+                    now + CAPABILITY_TTL_MS,
+                    None,
+                )
+            )
+            executor.present_surface(
+                prefix=self.config.tmux.naming_prefix,
+                generation_id=self.generation_id,
+                view_id=view.view_id,
+                mode=view.mode,
+                surface_id=str(surface.surface_id),
+            )
+            executor.set_pane_input(
+                generation_id=self.generation_id,
+                view_id=view.view_id,
+                pane_id=pane.pane_id,
+                enabled=True,
+            )
+        except Exception as error:
+            self._open_recovery(
+                kind="workspace_start_uncertain",
+                subject_type="launch",
+                subject_id=str(launch_id),
+                explanation=(
+                    "Workspace provider execution crossed the uncertainty boundary."
+                ),
+                now=now,
+            )
+            raise WorkflowError(
+                "workspace_start_uncertain",
+                "workspace provider start requires exact recovery",
+            ) from error
+        return session
 
     def _push_policy(self, frame: Frame) -> TaskPushPolicy:
         project = self._project(frame.project_id)
@@ -1217,6 +1549,29 @@ class WorkflowRuntime:
         )
         return view, executor, target_pane, owner
 
+    def _managed_environment(
+        self,
+        *,
+        raw_capability: str,
+        launch_id: LaunchId,
+        surface_id: SurfaceId,
+        session_key: SessionKey,
+        transition_id: TransitionId | None = None,
+    ) -> dict[str, str]:
+        environment = {
+            "AGENT_SWITCHBOARD_CAPABILITY": raw_capability,
+            "AGENT_SWITCHBOARD_LAUNCH_ID": str(launch_id),
+            "AGENT_SWITCHBOARD_SURFACE_ID": str(surface_id),
+            "SWB_V3_SESSION_KEY": str(session_key),
+            "SWB_V3_GENERATION_ID": str(self.generation_id),
+            "SWB_V3_CONFIG_ROOT": str(self.paths.config_root),
+            "SWB_V3_STATE_ROOT": str(self.paths.state_root),
+            "SWB_V3_MCP_COMMAND": (f"{sys.executable} -m agent_switchboard agent-mcp"),
+        }
+        if transition_id is not None:
+            environment["SWB_V3_TRANSITION_ID"] = str(transition_id)
+        return environment
+
     def _provider_environment(
         self,
         *,
@@ -1228,17 +1583,13 @@ class WorkflowRuntime:
         if placement.surface_id is None:
             raise WorkflowError("target_surface_missing", "target has no surface")
         surface = self.registry.get_surface(placement.surface_id)
-        return {
-            "AGENT_SWITCHBOARD_CAPABILITY": raw_capability,
-            "AGENT_SWITCHBOARD_LAUNCH_ID": str(surface.launch_id),
-            "AGENT_SWITCHBOARD_SURFACE_ID": str(surface.surface_id),
-            "SWB_V3_TRANSITION_ID": str(transition.transition_id),
-            "SWB_V3_SESSION_KEY": str(session_key),
-            "SWB_V3_GENERATION_ID": str(self.generation_id),
-            "SWB_V3_CONFIG_ROOT": str(self.paths.config_root),
-            "SWB_V3_STATE_ROOT": str(self.paths.state_root),
-            "SWB_V3_MCP_COMMAND": (f"{sys.executable} -m agent_switchboard agent-mcp"),
-        }
+        return self._managed_environment(
+            raw_capability=raw_capability,
+            launch_id=surface.launch_id,
+            surface_id=surface.surface_id,
+            session_key=session_key,
+            transition_id=transition.transition_id,
+        )
 
     def _launch_child(
         self,
@@ -1651,6 +2002,10 @@ class WorkflowRuntime:
                             PlacementState.STOPPED_AFFINITY,
                             now=now,
                         )
+                        self._mark_surface_session_stopped(
+                            source_surface,
+                            now=now,
+                        )
                     except Exception:
                         self._open_recovery(
                             kind="human_close_cleanup",
@@ -1690,6 +2045,32 @@ class WorkflowRuntime:
             TransitionState.COMPLETED,
             execution_owner=owner,
             now=now,
+        )
+
+    def _mark_surface_session_stopped(self, surface: Surface, *, now: int) -> None:
+        if surface.session_key is None:
+            return
+        session = self.registry.get_provider_session(surface.session_key)
+        self.registry.upsert_provider_session(
+            ProviderSession(
+                session.session_key,
+                session.host_id,
+                session.provider,
+                session.provider_session_id,
+                session.project_id,
+                session.checkout_id,
+                session.name,
+                session.purpose,
+                session.pinned,
+                RuntimePresence.STOPPED,
+                session.resumability,
+                session.activity,
+                session.activity_reason,
+                session.created_at,
+                session.provider_updated_at,
+                now,
+                now,
+            )
         )
 
     def trusted_stop(self, raw_capability: str, *, now: int) -> StopResult:
@@ -1972,6 +2353,7 @@ class WorkflowRuntime:
                 PlacementState.STOPPED_AFFINITY,
                 now=now,
             )
+            self._mark_surface_session_stopped(surface, now=now)
         except Exception:
             self._open_recovery(
                 kind="completed_child_cleanup",
@@ -2040,6 +2422,9 @@ class WorkflowRuntime:
             or session.checkout_id != context.checkout_id
             or session.runtime_presence is not RuntimePresence.STOPPED
             or session.resumability is not Resumability.RESUMABLE
+            or context.claim_state is not ClaimState.RELEASED
+            or context.foreground_frame_id is not None
+            or context.background_state is not BackgroundState.SAFE
         ):
             raise WorkflowError(
                 "reopen_precondition",
@@ -2111,33 +2496,48 @@ class WorkflowRuntime:
             cwd=self.registry.checkout_path(context.checkout_id),
             session_id=session.provider_session_id,
             prompt=None,
-            injected_environment={
-                "AGENT_SWITCHBOARD_CAPABILITY": raw,
-                "AGENT_SWITCHBOARD_LAUNCH_ID": str(surface.launch_id),
-                "AGENT_SWITCHBOARD_SURFACE_ID": str(surface.surface_id),
-                "SWB_V3_SESSION_KEY": str(session.session_key),
-                "SWB_V3_GENERATION_ID": str(self.generation_id),
-                "SWB_V3_CONFIG_ROOT": str(self.paths.config_root),
-                "SWB_V3_STATE_ROOT": str(self.paths.state_root),
-                "SWB_V3_MCP_COMMAND": (
-                    f"{sys.executable} -m agent_switchboard agent-mcp"
-                ),
-            },
+            injected_environment=self._managed_environment(
+                raw_capability=raw,
+                launch_id=surface.launch_id,
+                surface_id=surface.surface_id,
+                session_key=session.session_key,
+            ),
             mcp_command=(sys.executable, "-m", "agent_switchboard", "agent-mcp"),
         )
-        self.registry.advance_launch(
-            launch.launch_id, LaunchState.PLANNED, LaunchState.AUTHORIZED, now=now
-        )
-        observed = executor.launch_surface(
-            generation_id=self.generation_id,
-            view_id=view.view_id,
-            frame_id=str(frame.frame_id),
-            surface_id=str(surface.surface_id),
-            pane_id=pane.pane_id,
-            command=command.argv,
-            cwd=command.cwd,
-            environment=command.environment,
-        )
+        try:
+            self.registry.acquire_work_context(
+                context.work_context_id,
+                context.claim_generation,
+                frame.frame_id,
+                now=now,
+            )
+            self.registry.advance_launch(
+                launch.launch_id, LaunchState.PLANNED, LaunchState.AUTHORIZED, now=now
+            )
+            observed = executor.launch_surface(
+                generation_id=self.generation_id,
+                view_id=view.view_id,
+                frame_id=str(frame.frame_id),
+                surface_id=str(surface.surface_id),
+                pane_id=pane.pane_id,
+                command=command.argv,
+                cwd=command.cwd,
+                environment=command.environment,
+            )
+        except Exception as error:
+            self._open_recovery(
+                kind="workspace_reopen_uncertain",
+                subject_type="launch",
+                subject_id=str(launch.launch_id),
+                explanation=(
+                    "Imported workspace resume staging or execution is uncertain."
+                ),
+                now=now,
+            )
+            raise WorkflowError(
+                "workspace_reopen_uncertain",
+                "imported workspace resume requires exact recovery",
+            ) from error
         assert view.tmux_server_id is not None
         surface = self.registry.publish_surface(
             surface.surface_id,

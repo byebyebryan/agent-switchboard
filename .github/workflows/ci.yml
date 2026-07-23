@@ -70,7 +70,7 @@ jobs:
         run: |
           python=/tmp/switchboard-wheel-smoke/bin/python
           swbctl=/tmp/switchboard-wheel-smoke/bin/swbctl
-          test "$("$swbctl" --version)" = "swbctl 0.3.0"
+          test "$("$swbctl" --version)" = "swbctl 0.3.1"
           "$swbctl" --help | grep -F "persistent project and task views"
           "$swbctl" init --help | grep -F -- "--config"
           "$swbctl" reset --help | grep -F -- "--confirm-generation"
@@ -92,7 +92,7 @@ jobs:
           import agent_switchboard.trusted_hook
           import agent_switchboard.workflow
 
-          assert version("agent-switchboard") == agent_switchboard.__version__ == "0.3.0"
+          assert version("agent-switchboard") == agent_switchboard.__version__ == "0.3.1"
           assert files("agent_switchboard").joinpath(
               "migrations/v0001_baseline.py"
           ).is_file()

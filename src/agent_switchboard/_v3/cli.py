@@ -674,6 +674,26 @@ def _frame(arguments: argparse.Namespace) -> int:
                 raise ConflictError("not_found", "frame does not exist")
             _print(match)
             return 0
+        if arguments.frame_command == "start":
+            host_id = HostId(arguments.host)
+            if host_id != opened.config.host.host_id:
+                raise WorkflowError(
+                    "remote_start_unavailable",
+                    "frame start must execute directly on the owner host",
+                )
+            session = workflow.start_workspace_session(
+                FrameId(arguments.frame),
+                request_id=RequestId(arguments.request_id),
+                now=timestamp,
+            )
+            _print(
+                {
+                    "frameId": arguments.frame,
+                    "sessionKey": str(session.session_key),
+                    "runtimePresence": session.runtime_presence.value,
+                }
+            )
+            return 0
         if arguments.frame_command == "reopen":
             host_id = HostId(arguments.host)
             if host_id != opened.config.host.host_id:
@@ -992,6 +1012,11 @@ def _parser() -> argparse.ArgumentParser:
     frame_show = frame_sub.add_parser("show")
     frame_show.add_argument("--frame", required=True)
     frame_show.add_argument("--at", type=int)
+    frame_start = frame_sub.add_parser("start")
+    frame_start.add_argument("--host", required=True)
+    frame_start.add_argument("--frame", required=True)
+    frame_start.add_argument("--request-id", required=True)
+    frame_start.add_argument("--at", type=int)
     frame_reopen = frame_sub.add_parser("reopen")
     frame_reopen.add_argument("--host", required=True)
     frame_reopen.add_argument("--frame", required=True)
@@ -1021,7 +1046,7 @@ def _parser() -> argparse.ArgumentParser:
         command = hooks_sub.add_parser(name)
         command.add_argument("--provider", choices=("codex", "claude"), required=True)
         command.add_argument("--executable", type=Path)
-        command.add_argument("--timeout", type=int, default=1)
+        command.add_argument("--timeout", type=int, default=10)
         command.add_argument("--dry-run", action="store_true")
 
     doctor = root.add_parser("doctor")

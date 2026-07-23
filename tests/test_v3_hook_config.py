@@ -113,7 +113,7 @@ def test_dry_run_does_not_create_provider_directory(tmp_path: Path) -> None:
     assert not root.exists()
 
 
-def test_install_preserves_stable_public_executable_symlink(tmp_path: Path) -> None:
+def test_install_pins_the_resolved_immutable_executable(tmp_path: Path) -> None:
     release_root = tmp_path / "release"
     release_root.mkdir()
     release = executable(release_root)
@@ -138,7 +138,7 @@ def test_install_preserves_stable_public_executable_symlink(tmp_path: Path) -> N
         if handler.get("statusMessage") == STATUS_MESSAGE
     ]
     assert len(handlers) == 1
-    assert handlers[0]["command"].split()[0] == str(public)
+    assert handlers[0]["command"].split()[0] == str(release)
 
 
 @pytest.mark.parametrize("unsafe", ["document", "lock", "directory"])

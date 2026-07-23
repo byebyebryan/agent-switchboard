@@ -7,10 +7,16 @@ import argparse
 import hashlib
 import json
 import tarfile
+import tomllib
 import zipfile
 from pathlib import Path, PurePosixPath
 
 ROOT = Path(__file__).resolve().parents[1]
+PROJECT_VERSION = str(
+    tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"][
+        "version"
+    ]
+)
 FORBIDDEN_PARTS = {
     ".pytest_cache",
     ".ruff_cache",
@@ -138,7 +144,7 @@ def audit_contents(wheel: Path, sdist: Path) -> dict[str, object]:
     }
     wheel_content = wheel_files(wheel)
     sdist_root, sdist_content = sdist_files(sdist)
-    dist_info = "agent_switchboard-0.3.0.dist-info"
+    dist_info = f"agent_switchboard-{PROJECT_VERSION}.dist-info"
     expected_wheel = set(package_files) | {
         f"{dist_info}/METADATA",
         f"{dist_info}/RECORD",
@@ -190,7 +196,7 @@ def audit_contents(wheel: Path, sdist: Path) -> dict[str, object]:
     metadata = wheel_content[f"{dist_info}/METADATA"].decode("utf-8")
     for expected in (
         "Name: agent-switchboard",
-        "Version: 0.3.0",
+        f"Version: {PROJECT_VERSION}",
         "License-Expression: MIT",
         "License-File: LICENSE",
         "Requires-Python: >=3.12",

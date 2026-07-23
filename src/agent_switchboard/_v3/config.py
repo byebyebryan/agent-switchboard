@@ -106,7 +106,7 @@ class TmuxConfig:
 
 @dataclass(frozen=True, slots=True)
 class HooksConfig:
-    timeout_seconds: int = 1
+    timeout_seconds: int = 10
     latency_budget_ms: int = 250
 
 
@@ -635,7 +635,7 @@ def _parse_hooks(raw: object) -> HooksConfig:
     _known(table, {"timeout_seconds", "latency_budget_ms"}, "hooks")
     return HooksConfig(
         _integer(
-            table.get("timeout_seconds", 1),
+            table.get("timeout_seconds", 10),
             "hooks.timeout_seconds",
             minimum=1,
             maximum=30,
