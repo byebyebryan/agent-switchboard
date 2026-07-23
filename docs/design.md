@@ -2,9 +2,9 @@
 
 Date: 2026-07-22
 
-Status: Phase 6F complete and accepted; Phase 6G is next
+Status: Phase 6F complete; Phase 6F.1 operational hardening in progress
 
-Target release: `0.3.2`
+Target release: `0.3.3`
 
 The implemented `0.2.0` task-first product is historical input, not a
 compatibility boundary. Phase 6 replaced its registry, protocols, command

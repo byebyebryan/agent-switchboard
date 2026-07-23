@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sys
+from collections.abc import Mapping
 from contextlib import suppress
 from dataclasses import dataclass
 from uuid import NAMESPACE_URL, uuid4, uuid5
@@ -25,6 +26,7 @@ from .domain import (
     RecoveryId,
     RecoveryState,
     RequestId,
+    TmuxServer,
     TmuxServerId,
     TransitionId,
     TransitionKind,
@@ -71,6 +73,25 @@ class ViewRecoveryResult:
 class ViewAttachResult:
     view: UserView
     attach_argv: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class ViewHealthReport:
+    checked_views: int
+    view_states: Mapping[str, ViewState]
+    warnings: tuple[dict[str, object], ...]
+
+    @property
+    def degraded_views(self) -> tuple[str, ...]:
+        return tuple(sorted(self.view_states))
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "status": "degraded" if self.view_states else "healthy",
+            "checkedViews": self.checked_views,
+            "degradedViews": list(self.degraded_views),
+            "warnings": [dict(warning) for warning in self.warnings],
+        }
 
 
 def _stable_id(value_type, *parts: object):
@@ -122,6 +143,102 @@ class ViewRuntime:
         server = self.tmux.server_evidence(self.host_id, observed_at=now)
         self.registry.record_tmux_server(server)
         return server.tmux_server_id
+
+    def observe_health(self, *, now: int) -> ViewHealthReport:
+        """Project exact tmux health without mutating registry or server state."""
+
+        views = [
+            view
+            for view in self.registry.list_views()
+            if view.state is not ViewState.RETIRED
+        ]
+        degraded: dict[str, ViewState] = {}
+        warnings: list[dict[str, object]] = []
+        executors: dict[str, TmuxExecutor] = {}
+        current_servers: dict[str, TmuxServer | None] = {}
+
+        def mark(view: UserView, code: str, message: str) -> None:
+            view_id = str(view.view_id)
+            degraded[view_id] = ViewState.DEGRADED
+            warnings.append(
+                {
+                    "code": code,
+                    "message": message,
+                    "hostId": str(self.host_id),
+                    "subjectType": "view",
+                    "subjectId": view_id,
+                }
+            )
+
+        for view in views:
+            if view.tmux_server_id is None:
+                mark(
+                    view,
+                    "view_tmux_missing",
+                    "The view has no tmux server identity; enter it to recover.",
+                )
+                continue
+            recorded = self.registry.get_tmux_server(view.tmux_server_id)
+            executor = executors.setdefault(
+                recorded.socket_path,
+                TmuxExecutor(recorded.socket_path, executable=self.tmux.executable),
+            )
+            if recorded.socket_path not in current_servers:
+                try:
+                    current_servers[recorded.socket_path] = (
+                        executor.observe_server_evidence(self.host_id, observed_at=now)
+                    )
+                except TmuxViewError:
+                    current_servers[recorded.socket_path] = None
+            current = current_servers[recorded.socket_path]
+            if current is None:
+                mark(
+                    view,
+                    "view_tmux_unavailable",
+                    "The recorded tmux server is unavailable; "
+                    "enter the view to recover.",
+                )
+                continue
+            if current.tmux_server_id != recorded.tmux_server_id:
+                mark(
+                    view,
+                    "view_tmux_replaced",
+                    "The tmux server generation changed; enter the view to recover.",
+                )
+                continue
+            try:
+                observation = executor.inspect_shell(
+                    self.config.tmux.naming_prefix,
+                    self.generation_id,
+                    view.view_id,
+                    view.mode,
+                )
+            except TmuxViewError:
+                mark(
+                    view,
+                    "view_topology_stale",
+                    "The recorded view topology is unavailable; "
+                    "enter the view to recover.",
+                )
+                continue
+            if (
+                view.mode is ViewMode.NAVIGATOR
+                and observation.sidebar is not None
+                and observation.sidebar.dead
+            ):
+                mark(
+                    view,
+                    "view_sidebar_unavailable",
+                    "The resident navigator is unavailable; enter the view to recover.",
+                )
+
+        warnings.sort(
+            key=lambda warning: (
+                str(warning["subjectId"]),
+                str(warning["code"]),
+            )
+        )
+        return ViewHealthReport(len(views), degraded, tuple(warnings))
 
     def _project(self, project_id: ProjectId):
         matches = [

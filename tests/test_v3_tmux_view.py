@@ -230,6 +230,17 @@ def test_server_restart_changes_generation_and_invalidates_old_shell(
         )
 
 
+def test_observing_missing_server_does_not_create_it(tmp_path: Path) -> None:
+    socket = tmp_path / "tmux.sock"
+    tmux = TmuxExecutor(socket)
+
+    with pytest.raises(TmuxViewError) as caught:
+        tmux.observe_server_evidence(HOST, observed_at=10)
+
+    assert caught.value.code == "tmux_unavailable"
+    assert not socket.exists()
+
+
 def test_exact_client_switch_and_replacement_are_single_client_scoped(
     tmp_path: Path,
 ) -> None:

@@ -1143,6 +1143,8 @@ def build_host_state(
     *,
     generated_at: int,
     collection_limit: int = DEFAULT_COLLECTION_LIMIT,
+    view_state_overrides: Mapping[str, ViewState | str] | None = None,
+    additional_warnings: Sequence[Mapping[str, object]] = (),
 ) -> HostState:
     """Project one registry into the bounded owner-host HostState v1 envelope."""
 
@@ -1158,6 +1160,12 @@ def build_host_state(
         raise ProtocolError("registry local host is missing")
     host_id = str(host_row["host_id"])
     truncation: dict[str, JsonValue] = {}
+    overrides = {
+        str(view_id): (
+            state.value if isinstance(state, ViewState) else ViewState(state).value
+        )
+        for view_id, state in (view_state_overrides or {}).items()
+    }
 
     projects = [
         {
@@ -1297,7 +1305,7 @@ def build_host_state(
             "hostId": str(row["host_id"]),
             "mode": str(row["mode"]),
             "activeFrameId": row["active_frame_id"],
-            "state": str(row["state"]),
+            "state": overrides.get(str(row["view_id"]), str(row["state"])),
             "revision": int(row["revision"]),
             "createdAt": int(row["created_at"]),
             "lastAttachedAt": row["last_attached_at"],
@@ -1305,6 +1313,9 @@ def build_host_state(
         }
         for row in connection.execute("SELECT * FROM user_views ORDER BY view_id")
     ]
+    unknown_overrides = set(overrides) - {str(view["viewId"]) for view in views}
+    if unknown_overrides:
+        raise ValueError("view state override references an unknown view")
     placements = [
         {
             "placementId": str(row["placement_id"]),
@@ -1399,7 +1410,10 @@ def build_host_state(
         for name, records in collections.items()
     }
     _cohere_host_collections(projected, retained_counts, truncation)
-    warnings: list[dict[str, JsonValue]] = []
+    warnings: list[dict[str, JsonValue]] = [
+        dict(warning)  # type: ignore[arg-type]
+        for warning in additional_warnings
+    ]
     if truncation:
         warnings.append(
             {
@@ -1984,9 +1998,15 @@ def build_navigator_from_registry(
     generated_at: int,
     collection_limit: int = DEFAULT_COLLECTION_LIMIT,
     staleness_interval_seconds: int = 120,
+    view_state_overrides: Mapping[str, ViewState | str] | None = None,
+    additional_warnings: Sequence[Mapping[str, object]] = (),
 ) -> NavigatorState:
     local = build_host_state(
-        registry, generated_at=generated_at, collection_limit=collection_limit
+        registry,
+        generated_at=generated_at,
+        collection_limit=collection_limit,
+        view_state_overrides=view_state_overrides,
+        additional_warnings=additional_warnings,
     )
     remotes: list[HostState] = []
     reachability: dict[str, str] = {}

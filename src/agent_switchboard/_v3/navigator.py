@@ -16,6 +16,7 @@ from .domain import ViewId, ViewMode
 from .generation import GenerationPaths, open_generation
 from .process import ProcessError, run_bounded_command
 from .protocol import NavigatorState, build_navigator_from_registry
+from .views import ViewRuntime
 
 ACTION_TIMEOUT_SECONDS = 20.0
 
@@ -142,10 +143,19 @@ class ActionRunner(Protocol):
     def __call__(self, arguments: list[str]) -> Awaitable[ActionOutcome]: ...
 
 
-def build_model(opened: Any, view_id: ViewId, *, generated_at: int) -> NavigatorModel:
+def build_model(
+    opened: Any,
+    paths: GenerationPaths,
+    view_id: ViewId,
+    *,
+    generated_at: int,
+) -> NavigatorModel:
+    health = ViewRuntime(opened, paths).observe_health(now=generated_at)
     state = build_navigator_from_registry(
         opened.registry,
         generated_at=generated_at,
+        view_state_overrides=health.view_states,
+        additional_warnings=health.warnings,
     )
     return NavigatorModel.from_state(state, view_id)
 
@@ -249,7 +259,7 @@ def create_navigator_app(
         def __init__(self) -> None:
             super().__init__()
             self.opened = opened_factory(paths)
-            self.model = build_model(self.opened, view_id, generated_at=_now())
+            self.model = build_model(self.opened, paths, view_id, generated_at=_now())
             self.action_pending = False
             self.action_status = "ready"
             self.confirmation: tuple[list[str], str] | None = None
@@ -397,7 +407,9 @@ def create_navigator_app(
 
         def _refresh_local(self) -> None:
             try:
-                self.model = build_model(self.opened, view_id, generated_at=_now())
+                self.model = build_model(
+                    self.opened, paths, view_id, generated_at=_now()
+                )
             except Exception as error:  # Textual must remain a non-owning surface.
                 self.action_status = f"refresh error: {str(error)[:160]}"
             self._render_model()

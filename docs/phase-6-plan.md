@@ -2,9 +2,10 @@
 
 Date: 2026-07-22
 
-Status: Phase 6A.1 through 6F complete; Phase 6G is next
+Status: Phase 6A.1 through 6F complete; Phase 6F.1 operational hardening in
+progress; Phase 6G follows
 
-Target core release: `0.3.2`
+Target core release: `0.3.3`
 
 Historical Phase 6E DMS rehearsal adapter: `0.5.0` (deferred, not paired)
 
@@ -365,6 +366,28 @@ outside the disposable view. Phase 6G is therefore unblocked.
 Phase 6F task-to-task navigation means selecting among existing open sibling
 frames. It does not lift the one-child creation/return bound. Recursive
 workspace/task ancestry remains exclusively Phase 6G.
+
+### Phase 6F.1: persisted-view operational baseline
+
+Status: implementation complete; installed-state acceptance pending. Evidence
+is recorded in
+[Phase 6F.1 Acceptance](phase-6f1-acceptance.md).
+
+- Observe each non-retired view's recorded tmux socket, PID, start time, and
+  shell topology without creating, repairing, or mutating anything.
+- Overlay stale server identity or topology as `degraded` in HostState,
+  NavigatorState, the resident navigator, and `doctor`.
+- Preserve the exact recovery boundary: status observation is read-only, while
+  explicit view entry remains the operation that invalidates stale locators and
+  opens recovery.
+- Replace the leftover technical-activation generation with an empty Config v3
+  generation whose CLI and desktop defaults are both navigator mode.
+- Create one fresh persistent navigator view without starting a provider,
+  changing trusted hooks, or touching native tmux/agent sessions.
+
+Exit: stale persisted ownership is visible before attachment, the installed
+generation has no imported runtime claims, a fresh navigator view reports
+healthy exact tmux evidence, and native sessions retain their PIDs and panes.
 
 ### Phase 6G: recursive task frames
 

@@ -259,6 +259,14 @@ def test_fresh_cli_ssh_attach_and_reset_leave_existing_tmux_view_untouched(
         assert v3_main([*base, "view", "list", "--at", "102"]) == 0
         views = json.loads(capsys.readouterr().out)
         view_id = ViewId(views[0]["viewId"])
+        assert v3_main([*base, "doctor", "--json"]) == 0
+        doctor = json.loads(capsys.readouterr().out)
+        assert doctor["viewHealth"] == {
+            "status": "healthy",
+            "checkedViews": 1,
+            "degradedViews": [],
+            "warnings": [],
+        }
         before = tmux.inspect_shell("agent", GENERATION, view_id, ViewMode.NAVIGATOR)
 
         class Attached(RuntimeError):

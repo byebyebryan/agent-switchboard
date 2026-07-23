@@ -166,6 +166,56 @@ class TmuxExecutor:
             )
         return result
 
+    def _server_evidence(
+        self,
+        result: subprocess.CompletedProcess[str],
+        host_id: HostId,
+        *,
+        observed_at: int,
+    ) -> TmuxServer:
+        if result.returncode != 0:
+            detail = " ".join(result.stderr.strip().split())[:1024]
+            raise TmuxViewError(
+                "tmux_unavailable",
+                detail or f"tmux exited {result.returncode}",
+            )
+        fields = result.stdout.strip().split("\t")
+        if len(fields) != 3:
+            raise TmuxViewError("tmux_evidence_invalid", "tmux evidence is malformed")
+        socket_path, raw_pid, raw_start = fields
+        if not Path(socket_path).is_absolute():
+            raise TmuxViewError(
+                "tmux_evidence_invalid", "tmux socket path is not absolute"
+            )
+        try:
+            pid = int(raw_pid)
+            start = int(raw_start)
+        except ValueError as error:
+            raise TmuxViewError(
+                "tmux_evidence_invalid", "tmux generation values are malformed"
+            ) from error
+        self.socket_path = socket_path
+        stable = uuid5(
+            NAMESPACE_URL,
+            f"agent-switchboard:tmux:{host_id}:{socket_path}:{pid}:{start}",
+        )
+        return TmuxServer(
+            TmuxServerId(stable), host_id, socket_path, pid, start, observed_at
+        )
+
+    def observe_server_evidence(
+        self, host_id: HostId, *, observed_at: int
+    ) -> TmuxServer:
+        """Read one server generation without creating or repairing a server."""
+
+        result = self.run(
+            "display-message",
+            "-p",
+            "#{socket_path}\t#{pid}\t#{start_time}",
+            check=False,
+        )
+        return self._server_evidence(result, host_id, observed_at=observed_at)
+
     def server_evidence(self, host_id: HostId, *, observed_at: int) -> TmuxServer:
         result = self.run(
             "display-message",
@@ -195,29 +245,7 @@ class TmuxExecutor:
                 time.sleep(0.05)
             else:
                 raise TmuxViewError("tmux_unavailable", "tmux server did not stabilize")
-        fields = result.stdout.strip().split("\t")
-        if len(fields) != 3:
-            raise TmuxViewError("tmux_evidence_invalid", "tmux evidence is malformed")
-        socket_path, raw_pid, raw_start = fields
-        if not Path(socket_path).is_absolute():
-            raise TmuxViewError(
-                "tmux_evidence_invalid", "tmux socket path is not absolute"
-            )
-        try:
-            pid = int(raw_pid)
-            start = int(raw_start)
-        except ValueError as error:
-            raise TmuxViewError(
-                "tmux_evidence_invalid", "tmux generation values are malformed"
-            ) from error
-        self.socket_path = socket_path
-        stable = uuid5(
-            NAMESPACE_URL,
-            f"agent-switchboard:tmux:{host_id}:{socket_path}:{pid}:{start}",
-        )
-        return TmuxServer(
-            TmuxServerId(stable), host_id, socket_path, pid, start, observed_at
-        )
+        return self._server_evidence(result, host_id, observed_at=observed_at)
 
     def _start_bootstrap(self) -> None:
         if self._bootstrap_session is not None:

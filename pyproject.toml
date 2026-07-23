@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "agent-switchboard"
-version = "0.3.2"
+version = "0.3.3"
 description = "A local session router for coding agents"
 readme = "README.md"
 license = "MIT"
@@ -38,6 +38,7 @@ only-include = [
   "docs/phase-6d-acceptance.md",
   "docs/phase-6e1-acceptance.md",
   "docs/phase-6f-acceptance.md",
+  "docs/phase-6f1-acceptance.md",
   "docs/usage-tracking-discovery.md",
   "requirements-offline.txt",
   "scripts/build_offline_bundle.py",

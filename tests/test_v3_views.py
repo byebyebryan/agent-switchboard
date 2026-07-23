@@ -775,6 +775,35 @@ def test_server_generation_loss_recreates_shell_and_fences_old_identity(
         )
         old_server = opened.view.tmux_server_id
         stop_tmux(tmux)
+        replacement_server = tmux.server_evidence(HOST, observed_at=25)
+        assert replacement_server.tmux_server_id != old_server
+        health = app.observe_health(now=26)
+        assert health.to_dict() == {
+            "status": "degraded",
+            "checkedViews": 1,
+            "degradedViews": [str(VIEW)],
+            "warnings": [
+                {
+                    "code": "view_tmux_replaced",
+                    "message": (
+                        "The tmux server generation changed; enter the view to recover."
+                    ),
+                    "hostId": str(HOST),
+                    "subjectType": "view",
+                    "subjectId": str(VIEW),
+                }
+            ],
+        }
+        assert app.registry.get_view(VIEW).state is ViewState.READY
+        projected = build_navigator_from_registry(
+            app.registry,
+            generated_at=27,
+            view_state_overrides=health.view_states,
+            additional_warnings=health.warnings,
+        ).to_dict()
+        assert projected["views"][0]["state"] == "degraded"
+        assert projected["views"][0]["attention"] == "degraded"
+        assert projected["warnings"] == list(health.warnings)
         recovered = app.recover_view(VIEW, now=30)
         assert recovered.repaired
         assert recovered.view.state is ViewState.READY

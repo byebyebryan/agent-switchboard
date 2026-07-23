@@ -114,6 +114,12 @@ Direct mode remains available for a single native-provider pane. DMS is
 deferred as a later optional desktop entry/focus adapter and is not required to
 create, attach, recover, test, or release a view.
 
+NavigatorState and `swbctl doctor` inspect each recorded view's exact tmux
+server generation and shell topology without creating a server or mutating
+state. A mismatch is projected as `degraded` with one bounded warning. Explicit
+view entry remains the recovery boundary that may invalidate stale locators,
+create a replacement shell, and require exact provider UUID resumption.
+
 ## Development and release workflow
 
 Builds, migrations, hook behavior, navigator behavior, and tmux mechanics are

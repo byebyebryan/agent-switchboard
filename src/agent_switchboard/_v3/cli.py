@@ -147,9 +147,13 @@ def _transition_dict(transition: Any) -> dict[str, Any]:
 def _open_runtime(arguments: argparse.Namespace):
     paths = _paths(arguments)
     opened = open_generation(paths)
+    return paths, opened, _view_runtime(opened, paths)
+
+
+def _view_runtime(opened: Any, paths: GenerationPaths) -> ViewRuntime:
     socket_path = os.environ.get("SWB_V3_TMUX_SOCKET")
     tmux = None if socket_path is None else TmuxExecutor(socket_path)
-    return paths, opened, ViewRuntime(opened, paths, tmux=tmux)
+    return ViewRuntime(opened, paths, tmux=tmux)
 
 
 def _open_workflow(arguments: argparse.Namespace):
@@ -265,10 +269,19 @@ def _reset(arguments: argparse.Namespace) -> int:
 
 
 def _state(arguments: argparse.Namespace) -> int:
-    with open_generation(_paths(arguments)) as opened:
+    paths = _paths(arguments)
+    with open_generation(paths) as opened:
         timestamp = _timestamp(arguments.at)
+        health = _view_runtime(opened, paths).observe_health(now=timestamp)
         if arguments.state_command == "host":
-            print(build_host_state(opened.registry, generated_at=timestamp).to_json())
+            print(
+                build_host_state(
+                    opened.registry,
+                    generated_at=timestamp,
+                    view_state_overrides=health.view_states,
+                    additional_warnings=health.warnings,
+                ).to_json()
+            )
         else:
             if arguments.refresh:
                 asyncio.run(
@@ -281,6 +294,8 @@ def _state(arguments: argparse.Namespace) -> int:
                     staleness_interval_seconds=(
                         opened.config.defaults.staleness_interval_seconds
                     ),
+                    view_state_overrides=health.view_states,
+                    additional_warnings=health.warnings,
                 ).to_json()
             )
     return 0
@@ -809,6 +824,7 @@ def _hooks(arguments: argparse.Namespace) -> int:
 def _doctor(arguments: argparse.Namespace) -> int:
     paths = _paths(arguments)
     with open_generation(paths) as opened:
+        health = _view_runtime(opened, paths).observe_health(now=_now())
         providers: list[dict[str, Any]] = []
         for configured in opened.config.providers:
             if not configured.enabled:
@@ -844,6 +860,7 @@ def _doctor(arguments: argparse.Namespace) -> int:
                 "generationId": str(opened.generation_id),
                 "activationState": opened.activation_state.value,
                 "hostId": str(opened.config.host.host_id),
+                "viewHealth": health.to_dict(),
                 "providers": providers,
                 "remotes": [
                     {
