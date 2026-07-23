@@ -35,6 +35,7 @@ from spikes.thread_workstream.navigator import (
     NavigatorState,
     TransitionVisibility,
 )
+from spikes.thread_workstream.worktree_study import run_study as run_worktree_study
 
 FINGERPRINT = "a" * 64
 ROOT = Path(__file__).parents[1]
@@ -490,3 +491,31 @@ def test_latest_plan_uses_completed_structured_item() -> None:
         )
         == "authoritative"
     )
+
+
+def test_managed_worktree_study_passes_all_ownership_gates() -> None:
+    _version, _fingerprint, status, assertions, cleanup = run_worktree_study()
+    assert status is StudyStatus.PASS
+    assert all(assertions.values())
+    assert all(cleanup.values())
+
+
+def test_retained_managed_worktree_fixture_is_sanitized_and_passing() -> None:
+    fixture = (
+        ROOT
+        / "spikes"
+        / "fixtures"
+        / "thread-workstream"
+        / "git"
+        / "managed-worktree.json"
+    )
+    retained = json.loads(fixture.read_text())
+    assert retained["status"] == "pass"
+    assert all(retained["assertions"].values())
+    assert all(retained["isolation"].values())
+    assert all(retained["cleanup"].values())
+    encoded = fixture.read_text()
+    assert "/home/" not in encoded
+    assert "/tmp/" not in encoded
+    assert "recorded_commit" not in encoded
+    assert "repository_identity" not in encoded

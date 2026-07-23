@@ -43,6 +43,16 @@ Trusted adoption plus native input-fenced history runs with:
 The retained result passes Gates 2 and 3. See
 `docs/spikes/rollover-trust-history.md`.
 
+Managed-worktree ownership runs with:
+
+```sh
+.venv/bin/python -m spikes.thread_workstream.worktree_study \
+  --output spikes/fixtures/thread-workstream/git/managed-worktree.json
+```
+
+The retained result is a secondary-study pass. See
+`docs/spikes/managed-worktree-ownership.md`.
+
 ## Local checks
 
 ```sh

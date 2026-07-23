@@ -1,0 +1,54 @@
+{
+  "assertions": {
+    "ahead_status_reported": true,
+    "bounded_runtime": true,
+    "collision_free_creation": true,
+    "dirty_and_behind_status_reported": true,
+    "dirty_and_external_preserved": true,
+    "dirty_retirement_rejected": true,
+    "exact_clean_managed_retirement": true,
+    "external_retirement_rejected": true,
+    "merged_status_reported": true,
+    "mismatched_claim_rejected": true,
+    "no_stash_or_forced_removal": true,
+    "provider_working_directory_exact": true,
+    "shared_retirement_rejected": true,
+    "unmerged_retirement_rejected": true,
+    "workstream_switching_exact": true
+  },
+  "assisted": false,
+  "cleanup": {
+    "temporary_root_deleted": true
+  },
+  "contractFingerprint": "03f865fd3dc8a5337bd98c9bcdbab3d39a5453e597390260880d89eb9baf2923",
+  "eventOrder": [
+    "shared-observed",
+    "managed-created",
+    "workstreams-switched",
+    "status-observed",
+    "managed-retired",
+    "unsafe-retirements-rejected"
+  ],
+  "installedVersion": "git version 2.55.0",
+  "isolation": {
+    "disposable_repository": true,
+    "no_repository_remotes": true,
+    "temporary_worktree_root": true
+  },
+  "limitations": [],
+  "privacyAudit": {
+    "credentialsExcluded": true,
+    "providerIdentifiersExcluded": true,
+    "providerInputExcluded": true,
+    "providerOutputExcluded": true,
+    "runtimeLocationsExcluded": true,
+    "runtimeProcessIdentifiersExcluded": true
+  },
+  "provider": "git",
+  "schemaVersion": 1,
+  "status": "pass",
+  "study": "managed-worktree-ownership",
+  "timingsMs": {
+    "total": 94
+  }
+}
