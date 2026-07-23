@@ -961,7 +961,11 @@ def test_replacement_mcp_exposes_only_capability_derived_frame_tools(
                 "jsonrpc": "2.0",
                 "id": 3,
                 "method": "tools/call",
-                "params": {"name": "switchboard_current", "arguments": {}},
+                "params": {
+                    "name": "switchboard_current",
+                    "arguments": {},
+                    "_meta": {"progressToken": 3},
+                },
             },
             {
                 "jsonrpc": "2.0",
@@ -983,6 +987,7 @@ def test_replacement_mcp_exposes_only_capability_derived_frame_tools(
                         "brief": "Prepare via exact MCP authority.",
                         "request_id": "ffffffff-1111-4fff-8fff-111111111111",
                     },
+                    "_meta": {"openai/toolCallId": "phase6f-live-shape"},
                 },
             },
         ]

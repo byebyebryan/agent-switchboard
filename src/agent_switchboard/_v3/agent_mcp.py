@@ -225,8 +225,10 @@ def _arguments(
     params: object, allowed: set[str], required: set[str]
 ) -> dict[str, object]:
     table = _object(params, "params")
-    if set(table) - {"name", "arguments"}:
+    if set(table) - {"name", "arguments", "_meta"}:
         raise McpError(-32602, "params contains unknown fields")
+    if "_meta" in table:
+        _object(table["_meta"], "params._meta")
     arguments = _object(table.get("arguments", {}), "params.arguments")
     if set(arguments) - allowed or required - set(arguments):
         raise McpError(-32602, "tool arguments do not match schema")

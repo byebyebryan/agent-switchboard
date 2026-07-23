@@ -69,7 +69,10 @@ The `0.3.2` closure candidate includes:
 - stopped provider-session bookkeeping on completed/dismissed child cleanup;
   ten-second default hooks pinned to the resolved immutable release path; and
 - explicit least-privilege forwarding of pane-local MCP authority into Codex's
-  clean stdio-server environment without placing capability values in argv.
+  clean stdio-server environment without placing capability values in argv;
+  and
+- strict tool-argument validation that accepts the protocol-reserved MCP
+  request metadata envelope used by live Codex tool calls.
 
 The exact closure implementation commit
 `cb28da06d5f2f79864be3e11ebeeef3aec8608ad` passed all 117 local tests,

@@ -51,3 +51,35 @@ def test_initialize_rejects_missing_or_invalid_protocol(requested: object) -> No
         "code": -32602,
         "message": "params.protocolVersion is required",
     }
+
+
+def test_tool_call_rejects_non_object_protocol_metadata() -> None:
+    messages = [
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {"protocolVersion": "2025-06-18"},
+        },
+        {"jsonrpc": "2.0", "method": "notifications/initialized"},
+        {
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/call",
+            "params": {
+                "name": "switchboard_current",
+                "arguments": {},
+                "_meta": "invalid",
+            },
+        },
+    ]
+    source = io.BytesIO(
+        b"".join(json.dumps(message).encode() + b"\n" for message in messages)
+    )
+    output = io.BytesIO()
+    assert run_mcp_server(object(), source, output) == 0  # type: ignore[arg-type]
+    responses = [json.loads(line) for line in output.getvalue().splitlines()]
+    assert responses[1]["error"] == {
+        "code": -32602,
+        "message": "params._meta must be an object",
+    }
