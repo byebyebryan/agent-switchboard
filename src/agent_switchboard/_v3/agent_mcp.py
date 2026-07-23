@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
+from time import time
 from typing import BinaryIO, Final
 
 from . import __version__
@@ -124,11 +125,30 @@ def _records() -> list[dict[str, object]]:
 
 class AgentToolService:
     def __init__(
-        self, workflow: WorkflowRuntime, raw_capability: str, *, now: int
+        self,
+        workflow: WorkflowRuntime,
+        raw_capability: str,
+        *,
+        now: int | None = None,
+        clock: Callable[[], int] | None = None,
     ) -> None:
+        if now is not None and clock is not None:
+            raise ValueError("now and clock are mutually exclusive")
         self.workflow = workflow
         self.raw_capability = raw_capability
-        self.now = now
+        self._clock = (
+            clock
+            if clock is not None
+            else (lambda: int(time() * 1_000))
+            if now is None
+            else (lambda: now)
+        )
+
+    @property
+    def now(self) -> int:
+        """Read time per tool call; an MCP server may outlive many transitions."""
+
+        return self._clock()
 
     def _capability(self):
         return self.workflow.registry.validate_capability(

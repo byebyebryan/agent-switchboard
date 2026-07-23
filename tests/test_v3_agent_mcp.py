@@ -8,6 +8,7 @@ import pytest
 from agent_switchboard._v3 import __version__
 from agent_switchboard._v3.agent_mcp import (
     MCP_PROTOCOL_VERSION,
+    AgentToolService,
     run_mcp_server,
 )
 
@@ -83,3 +84,16 @@ def test_tool_call_rejects_non_object_protocol_metadata() -> None:
         "code": -32602,
         "message": "params._meta must be an object",
     }
+
+
+def test_long_lived_service_reads_time_for_each_tool_call() -> None:
+    timestamps = iter((100, 200, 300))
+    service = AgentToolService(
+        object(),  # type: ignore[arg-type]
+        "test-capability",
+        clock=lambda: next(timestamps),
+    )
+
+    assert service.now == 100
+    assert service.now == 200
+    assert service.now == 300

@@ -548,9 +548,7 @@ def _agent_mcp(arguments: argparse.Namespace) -> int:
         return 2
     opened, workflow = _open_workflow(arguments)
     try:
-        service = AgentToolService(
-            workflow, raw_capability, now=_timestamp(arguments.at)
-        )
+        service = AgentToolService(workflow, raw_capability, now=arguments.at)
         return run_mcp_server(service, sys.stdin.buffer, sys.stdout.buffer)
     finally:
         opened.close()
