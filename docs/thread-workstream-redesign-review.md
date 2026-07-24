@@ -2,12 +2,18 @@
 
 Date: 2026-07-23
 
-Status: design reconciled and viable; production contract remains unapproved
+Status: design direction reconciled and viable; no viable or adopted product,
+production contract remains unapproved
 
 ## Verdict
 
 The explicit-intent redesign is coherent for Codex and survived the current
 falsification pass.
+
+This is design viability, not product viability. Phase 6 produced useful
+engineering evidence and components but was never adopted as the user's normal
+workflow. It is not a backwards-compatibility boundary for the clean
+implementation.
 
 The user chooses whether to stay, clear, interrupt, start independent work, or
 fork an alternative. Switchboard automates the lifecycle transaction only
@@ -113,7 +119,8 @@ local state remained unchanged.
 These are contract and acceptance work, not design falsifications:
 
 1. Define durable project, workstream, task, provider-thread, transition,
-   checkpoint, and pending-action records, including migration and deletion.
+   checkpoint, and pending-action records, including fresh-start disposal,
+   repository cardinality, and unsupported checkout behavior.
 2. Define navigator and CLI actions with idempotency keys and exact authority
    scopes.
 3. Prove crash recovery for the compound fork transaction:
@@ -133,12 +140,35 @@ These are contract and acceptance work, not design falsifications:
 9. Keep Claude Code manual/degraded until an isolated installed contract proves
    parity or safe emulation.
 
+## Phase 7 Roadmap Review
+
+The dependency order is sound after three scope corrections:
+
+- Phase 7F exposes only the core navigator/CLI actions whose lifecycle and
+  filesystem transactions already exist; selected-plan actions wait for 7G and
+  historical inspection waits for 7H.
+- The Codex-first core has no migration, extraction, or external-memory
+  deliverable. Old Switchboard state is rejected, and those optional concerns
+  cannot delay or distort the first viable product.
+- Phase 7A must decide whether a workstream owns one checkout or an atomic
+  multi-repository checkout set and must define visible failure for unsupported
+  Git or non-Git sources before worktree implementation begins.
+
+No roadmap-order blocker remains. The highest-risk production gates are still
+uncertain `thread/fork` reconciliation, completed-turn-to-checkpoint binding,
+compound fork crash recovery, TUI-owned interruption, and result-tip
+preservation. They occur before their dependent public actions and remain
+fail-closed acceptance gates.
+
 ## Decision
 
 Proceed to a clean-break production-contract plan for the explicit-intent
 Codex-backed design. Do not restore automatic ordinary-Plan cutover and do not
 resume the recursive parent/child return design.
 
-The next implementation plan should treat navigator actions as canonical,
-conversational phrases as exact aliases, and automatic inference or forced
-cutover as separate future policies.
+The
+[Thread and Workstream Redesign Roadmap](thread-workstream-redesign-roadmap.md)
+treats navigator actions as canonical, conversational phrases as exact aliases,
+and automatic inference or forced cutover as separate future policies. Phase
+7A production-contract work is next; runtime implementation remains
+unapproved.

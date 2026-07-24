@@ -9,7 +9,11 @@ Status: Phase 6F.2 accepted; Phase 6G paused, redesign contract unapproved
 > [Thread and Workstream Redesign Decision](thread-workstream-redesign-decision.md)
 > accepts a future clean-break direction that preserves completed result tips
 > and adopts provider-native fresh-thread transitions. Its production contract
-> is unapproved, and Phase 6G implementation remains paused.
+> is unapproved, and Phase 6G implementation remains paused. The replacement
+> workflow is sequenced in the
+> [redesign roadmap](thread-workstream-redesign-roadmap.md).
+> This technically accepted workflow was never adopted as a viable product and
+> creates no backwards-compatibility obligation.
 
 ## Purpose
 

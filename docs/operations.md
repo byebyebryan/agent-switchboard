@@ -16,9 +16,11 @@ Switchboard remains offline or on its prior version until a safe path exists.
 
 ## Pre-adoption coexistence
 
-Switchboard has not replaced the user's native workflow. Until an explicit
-adoption decision follows TUI-first acceptance, normal Codex, Claude Code, and
-tmux work continues independently of Switchboard.
+Switchboard has not reached a viable product or replaced the user's native
+workflow. Normal Codex, Claude Code, and tmux work continues independently of
+Switchboard. Any future adoption decision follows the clean-break
+thread/workstream implementation, combined S7 acceptance, and explicit user
+approval—not the historical Phase 6 TUI-first gate.
 
 The default development boundary is:
 

@@ -6,6 +6,11 @@ Status: Phase 6B.1 implementation contract locked, implemented, and validated
 
 Target release: `0.3.4`
 
+This is the implemented Phase 6 technical contract, not an adopted product
+contract or a backwards-compatibility boundary. The
+[thread/workstream roadmap](thread-workstream-redesign-roadmap.md) may replace
+its entities, schema, and commands rather than adapt them.
+
 This document is the storage and state-machine authority for the view-first
 replacement. [The design](design.md) owns product boundaries,
 [the workflow](view-workflow.md) owns user-visible behavior, and

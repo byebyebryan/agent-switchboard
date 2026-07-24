@@ -10,7 +10,15 @@ Target release: `0.3.4`
 > [Thread and Workstream Redesign Decision](thread-workstream-redesign-decision.md)
 > accepts the provider-native thread/workstream direction after its bounded
 > studies passed. The proposal remains non-normative, no production contract
-> is approved, and Phase 6G implementation stays paused.
+> is approved, and Phase 6G implementation stays paused. The
+> [redesign roadmap](thread-workstream-redesign-roadmap.md) treats prior work
+> as evidence and opt-in reusable parts while sequencing Phase 7A contract
+> work first.
+
+Switchboard has not reached a viable or adopted product. The `0.3.4` tree is a
+technical reference and evidence base, not a backwards-compatibility boundary.
+The new generation should reuse only components that naturally fit its model
+and should otherwise prefer clean replacement over legacy-shaped adaptation.
 
 The implemented `0.2.0` task-first product is historical input, not a
 compatibility boundary. Phase 6 replaced its registry, protocols, command

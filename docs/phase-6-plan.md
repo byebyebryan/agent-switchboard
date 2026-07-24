@@ -12,7 +12,14 @@ Historical Phase 6E DMS rehearsal adapter: `0.5.0` (deferred, not paired)
 > [Thread and Workstream Redesign Decision](thread-workstream-redesign-decision.md)
 > accepts a clean-break direction after its bounded studies passed. Phase 6G
 > stays paused, its recursive return model is not the next implementation
-> target, and no replacement production contract is approved.
+> target, and no replacement production contract is approved. The
+> [redesign roadmap](thread-workstream-redesign-roadmap.md) sequences Phase 7A
+> contract work before any replacement runtime implementation.
+
+Here, "accepted" means technically validated against the Phase 6 plan. Phase 6
+did not produce a viable or adopted product and creates no backwards-
+compatibility obligation. The replacement may break or delete any Phase 6
+interface when a clean new design is clearer.
 
 ## Outcome
 
@@ -20,11 +27,13 @@ Phase 6 replaced the `0.2` task-first product with durable host-local views,
 unified workspace/task frames, a resident navigator, direct mode, and
 agent-driven foreground transitions. Core and DMS completed a one-time
 technical activation rehearsal, but Switchboard has not replaced the user's
-normal native workflow. No old Switchboard public contract remains active.
+normal native workflow and did not become a viable user product. No old
+Switchboard public contract remains active.
 
-The resident TUI is now the primary product surface. Direct mode is the
-minimal/no-TUI alternative. DMS is demoted to a deferred convenience adapter
-and is no longer a paired release, development dependency, or acceptance gate.
+The resident TUI was the implemented Phase 6 technical surface. Direct mode
+was its minimal/no-TUI alternative. Neither is an adopted compatibility
+boundary. DMS is demoted to a deferred convenience adapter and is no longer a
+paired release, development dependency, or acceptance gate.
 
 The architecture is in [the design](design.md), exact user behavior is in
 [View and Frame Workflow](view-workflow.md), and canonical ownership, state,

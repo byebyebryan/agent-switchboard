@@ -1,25 +1,33 @@
 # Switchboard
 
-Switchboard is a persistent user view over provider-native coding-agent
-sessions. Its primary interface is a tmux-resident navigator beside the active
-native provider pane; direct single-pane mode remains available when no
-Switchboard UI is wanted. Switchboard owns host-local project/task frames and
-tmux presentation while Codex and Claude Code continue to own conversation
-history and terminal UI.
+Switchboard is being designed as a persistent user view over provider-native
+coding-agent sessions. Its primary interface is a tmux-resident navigator
+beside the active native provider pane; direct single-pane mode remains
+available when no Switchboard UI is wanted. The new design gives Switchboard
+project/workstream navigation, managed-filesystem ownership, and tmux
+presentation while Codex and Claude Code continue to own conversation history
+and terminal UI.
 
 ## Release shape
 
-Core `0.3.4` is the current clean-break Phase 6 generation. It exposes only Config v3,
-registry schema v1, HostState/NavigatorState/PresentationDirective v1, and the
-view/frame workflow. Snapshot/Fleet, task-first CRUD, the old administrative
-TUI, old migrations, and compatibility aliases are not installed. The compact
-resident navigator is the current primary UI.
+Switchboard has not reached a viable or adopted product release. Core `0.3.4`
+is a validated Phase 6 engineering generation and evidence source, not a
+backwards-compatibility baseline. The user's normal workflow remains native
+Codex, Claude Code, and tmux. The accepted redesign is free to replace its
+registry, configuration, commands, hooks, UI, and state rather than repurpose
+them.
+
+The implemented `0.3.4` generation exposes Config v3, registry schema v1,
+HostState/NavigatorState/PresentationDirective v1, and the view/frame workflow.
+Snapshot/Fleet, task-first CRUD, the old administrative TUI, old migrations,
+and compatibility aliases are not installed. Its compact resident navigator
+is a technical implementation, not an adopted primary UI.
 
 The offline `cutover export` command is the only component that understands an
 exact Config v2/schema-v10 source. It requires a quiescent legacy registry and
 produces a self-authenticating bundle without mutating the source.
 
-The primary command surface is:
+The implemented `0.3.4` command surface is:
 
 ```text
 swbctl init --config CONFIG_V3_TEMPLATE
@@ -74,6 +82,7 @@ Design and operations:
   (non-normative; direction accepted, production contract unapproved)
 - [Thread and Workstream Redesign Decision](docs/thread-workstream-redesign-decision.md)
 - [Thread and Workstream Redesign Review](docs/thread-workstream-redesign-review.md)
+- [Thread and Workstream Redesign Roadmap](docs/thread-workstream-redesign-roadmap.md)
 - [Agent Switchboard Design](docs/design.md)
 - [State and Control-Turn Contract](docs/state-contract.md)
 - [View and Frame Workflow](docs/view-workflow.md)

@@ -17,6 +17,12 @@ tmux, memory, history, and Git spikes below establish direction only;
 implementation still requires an approved production contract and combined
 acceptance.
 
+Phase 6 acceptance was technical, not evidence of a viable or adopted product.
+It creates no backwards-compatibility requirement. Existing implementation may
+be reused where it cleanly fits this direction, but the successor should not
+retain legacy concepts, names, schemas, or adapters merely to avoid breaking
+changes.
+
 If installed capability gates or combined acceptance later fail, the proposal
 may still be narrowed or rejected without creating a compatibility obligation.
 

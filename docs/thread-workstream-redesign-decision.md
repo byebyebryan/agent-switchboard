@@ -6,6 +6,8 @@ Status: direction accepted; production contract and Phase 6G implementation rema
 
 The reconciled validation and remaining production gates are recorded in the
 [Thread and Workstream Redesign Review](thread-workstream-redesign-review.md).
+Their dependency-ordered delivery plan is the
+[Thread and Workstream Redesign Roadmap](thread-workstream-redesign-roadmap.md).
 
 ## Decision
 
@@ -13,11 +15,17 @@ Advance the thread/workstream direction to production-contract design for
 Codex-backed workflows. Do not resume the existing Phase 6G recursive
 parent/child return design.
 
-This is a design-direction decision, not implementation approval. No production
-registry, persisted type, schema, hook, navigator, installed command, provider
-session, or ordinary tmux session changed during the studies. The accepted
-Phase 6F.2 implementation remains current until a separate clean-break contract,
-implementation plan, and acceptance gate are approved.
+This is a design-direction decision, not implementation approval. Switchboard
+does not yet have a viable or adopted product, and Phase 6 creates no backwards-
+compatibility obligation. Existing code may be reused when it naturally fits
+the new model; misleading concepts and compatibility layers should be deleted
+or replaced.
+
+No production registry, persisted type, schema, hook, navigator, installed
+command, provider session, or ordinary tmux session changed during the studies.
+The Phase 6F.2 implementation remains the repository's technical reference
+until a separate clean-break contract, implementation plan, and acceptance
+gate are approved.
 
 Codex has one selected v1 structured-plan cutover trigger: provider-native
 **clear context and implement**. Ordinary **implement this plan** remains in the
@@ -149,12 +157,14 @@ dirty, unmerged, active, or mismatched worktree.
 Phase 6A.1 through 6F.2 remain accepted history. Phase 6G remains paused and its
 recursive A -> B -> A return exit is not the next implementation target.
 
-The next authorized planning work is a clean-break production contract based
-on the proved thread/workstream boundaries. It must separately define durable
-state, recovery, migration/deletion, installed capability gates, and
-acceptance. S7 becomes that implementation's end-to-end acceptance study. The
-explicit navigator actions, conversational aliases, stable-checkpoint fork, and
-any later forced-cutover or inference policy must be called out separately.
+The
+[production roadmap](thread-workstream-redesign-roadmap.md)
+authorizes Phase 7A contract planning next. It separately sequences durable
+state, provider capabilities, recovery, checkpoint/worktree composition,
+navigator actions, Plan cutover, continuity, legacy disposal, and
+acceptance. S7 becomes that implementation's end-to-end acceptance study.
+Explicit navigator actions, conversational aliases, stable-checkpoint fork,
+and any later forced-cutover or inference policy remain separate deliverables.
 
 Until that contract is approved, every interface in the proposal and every
 spike implementation remains non-normative and non-installed.
